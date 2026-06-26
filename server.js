@@ -127,7 +127,7 @@ PETRONET PIIND POLYCAB SHREECEM SHRIRAMFIN TORNTPHARM UBL UPL VBL ZYDUSLIFE ABBO
 ASHOKLEY ASTRAL AUBANK BALKRISIND BHARATFORG BHEL CGPOWER CROMPTON ESCORTS EXIDEIND FEDERALBNK HAL
 IPCALAB IRFC JSWENERGY LTTS MAXHEALTH MRF NHPC OIL SUPREMEIND TATACOMM TATAELXSI TORNTPOWER YESBANK`.split(/\s+/).filter(Boolean);
 const STOCKS=STOCK_SYMS.map(s=>({sym:s+".NS",ts:s,name:s,cls:"Stock",src:"upstox"}));
-const ETF_SYMS=["NIFTYBEES","BANKBEES","GOLDBEES","JUNIORBEES","ITBEES","SILVERBEES"];
+const ETF_SYMS=["NIFTYBEES","BANKBEES","JUNIORBEES","ITBEES","GOLDBEES","SILVERBEES","MON100","MAFANG","PSUBNKBEES","PHARMABEES"];
 const ETFS=ETF_SYMS.map(s=>({sym:s+".NS",ts:s,name:s,cls:"ETF/Index",src:"upstox"}));
 // indices: stable Upstox instrument keys
 const INDICES=[
@@ -135,6 +135,11 @@ const INDICES=[
   {sym:"^NSEBANK",name:"Bank NIFTY",key:"NSE_INDEX|Nifty Bank",cls:"ETF/Index",src:"upstox",isIndex:true},
   {sym:"^BSESN",name:"SENSEX",key:"BSE_INDEX|SENSEX",cls:"ETF/Index",src:"upstox",isIndex:true},
 ];
+// Commodities: gold/silver ETF proxies (reliable, NSE equity segment) + MCX near-month futures (resolved live)
+const COMMODITY_ETF=[["GOLDBEES","Gold ETF (GOLDBEES)"],["SILVERBEES","Silver ETF (SILVERBEES)"]]
+  .map(([ts,name])=>({sym:ts+".NS",ts,name,cls:"Commodity",src:"upstox"}));
+const MCX_LIST=["GOLD","GOLDM","SILVER","SILVERM","CRUDEOIL","CRUDEOILM","NATURALGAS","NATGASMINI","COPPER","ZINC","ALUMINIUM","NICKEL","LEAD"];
+let COMMODITIES=[...COMMODITY_ETF];   // replaced with [...MCX, ...ETF] once MCX is resolved
 // Crypto starts as a small fallback list; replaced live with the top coins by market cap on first scan.
 let CRYPTO=[["bitcoin","Bitcoin","BTC"],["ethereum","Ethereum","ETH"],["solana","Solana","SOL"],["ripple","XRP","XRP"],
  ["binancecoin","BNB","BNB"],["dogecoin","Dogecoin","DOGE"],["cardano","Cardano","ADA"],["tron","TRON","TRX"],
@@ -149,8 +154,10 @@ function universeFor(tab){
   const stocks=STOCKS, etfidx=[...ETFS,...INDICES];
   if(tab==="Stocks")return stocks;
   if(tab==="ETFs / Indices")return etfidx;
+  if(tab==="Commodities")return COMMODITIES;
   if(tab==="Crypto")return CRYPTO;
-  return [...stocks,...etfidx,...CRYPTO];
+  const all=[...stocks,...etfidx,...COMMODITIES,...CRYPTO],seen=new Set();
+  return all.filter(a=>seen.has(a.sym)?false:(seen.add(a.sym),true));   // dedupe (gold/silver appear in ETFs + Commodities)
 }
 
 /* ============================================================
@@ -192,8 +199,38 @@ async function ensureInstruments(){
   return map;
 }
 function keyForAsset(asset){
-  if(asset.key)return asset.key;                 // indices preset
+  if(asset.key)return asset.key;                 // indices / MCX preset
   return (insMap&&insMap["EQ:"+asset.ts.toUpperCase()])||null;
+}
+// MCX: resolve the nearest-expiry futures contract per commodity (auto-rolls each month)
+let mcxCache=null,mcxDate=null;
+async function ensureMcx(){
+  if(DEMO)return MCX_LIST.slice(0,8).map(u=>({sym:'MCX:'+u,name:u+' (MCX)',key:'DEMO|'+u,cls:'Commodity',src:'upstox',isCommodity:true}));
+  const today=istDate();
+  if(mcxCache&&mcxDate===today)return mcxCache;
+  try{
+    const r=await fetch("https://assets.upstox.com/market-quote/instruments/exchange/MCX.json.gz");
+    if(!r.ok)throw new Error("mcx http");
+    const arr=JSON.parse(zlib.gunzipSync(Buffer.from(await r.arrayBuffer())).toString());
+    const now=Date.now(),best={};
+    for(const it of arr){
+      const type=(it.instrument_type||"").toUpperCase();
+      if(!type.startsWith("FUT"))continue;
+      const asset=(it.asset_symbol||it.underlying_symbol||it.name||"").toUpperCase();
+      if(!MCX_LIST.includes(asset))continue;
+      const exp=Number(it.expiry)||Date.parse(it.expiry)||0;
+      if(exp&&exp<now-864e5)continue;                 // skip already-expired
+      if(!best[asset]||(exp&&exp<best[asset].exp)) best[asset]={key:it.instrument_key,exp:exp||Infinity,name:asset};
+    }
+    const list=Object.values(best).map(b=>({sym:'MCX:'+b.name,name:b.name+' (MCX)',key:b.key,cls:'Commodity',src:'upstox',isCommodity:true,expiry:b.exp}));
+    if(list.length){mcxCache=list;mcxDate=today;}
+    return mcxCache||[];
+  }catch(e){return mcxCache||[];}    // MCX data not accessible → empty; ETF proxies still fill the tab
+}
+async function ensureCommodities(){
+  let mcx=[];try{mcx=await ensureMcx();}catch(e){}
+  COMMODITIES=[...mcx,...COMMODITY_ETF];
+  return COMMODITIES;
 }
 async function upstoxCandles(key,tf){
   // tf 'intraday' -> 30minute over ~30d ; 'daily' -> day over ~1y
@@ -278,28 +315,33 @@ function processAsset(asset,data,tf){
 async function scan(tab,tf){
   const ttl = tab==='Crypto' ? TTL_CRYPTO : (tf==='intraday'?TTL_INTRA:TTL_DAILY);
   const ck="scan:"+tab+":"+tf;const hit=cGet(ck,ttl);if(hit)return{...hit,cached:true};
-  // fetch live top crypto FIRST so the universe reflects it, then build the universe
+  // crypto + commodities resolved FIRST so the universe reflects them
   let cmap=null;
   if(tab==="Crypto"||tab==="All"){try{cmap=await ensureCrypto();}catch(e){cmap={};}}
+  if(tab==="Commodities"||tab==="All"){try{await ensureCommodities();}catch(e){}}
   const uni=universeFor(tab);
-  if(!DEMO)await ensureInstruments();
-  // resolve upstox keys + fetch candles
+  const li=loggedIn();
+  const hasUpstox=uni.some(a=>a.src==='upstox');
+  if(!DEMO && hasUpstox && li) await ensureInstruments();   // only when needed and possible (no auth for download, but skip work if not logged in)
   const stockAssets=uni.filter(a=>a.src==='upstox');
   const keyOf={};stockAssets.forEach(a=>{keyOf[a.sym]=DEMO?("DEMO|"+a.sym):keyForAsset(a);});
-  const res=await mapLimit(uni,6,async asset=>{
+  const res=await mapLimit(uni,8,async asset=>{
     let data;
-    if(asset.src==='cg'){data=cmap[asset.sym];}
-    else{const key=keyOf[asset.sym];if(!key)throw new Error("no instrument key");
-      data=DEMO?synth(hashStr(asset.sym),tf==='intraday'?400:300,0.04):await upstoxCandles(key,tf);}
+    if(asset.src==='cg'){data=cmap[asset.sym];}                 // crypto: never needs login
+    else{
+      if(!DEMO && !li) throw new Error("login");                // skip Upstox instantly when not logged in
+      const key=keyOf[asset.sym];if(!key)throw new Error("no instrument key");
+      data=DEMO?synth(hashStr(asset.sym),tf==='intraday'?400:300,0.04):await upstoxCandles(key,tf);
+    }
     return processAsset(asset,data,tf);
   });
   const ok=res.filter(r=>r&&!r.__err);
-  // pin live LTP for upstox names
-  if(!DEMO){const keys=stockAssets.map(a=>keyOf[a.sym]).filter(Boolean);
+  // pin live LTP for upstox names (only when logged in)
+  if(!DEMO && li){const keys=stockAssets.map(a=>keyOf[a.sym]).filter(Boolean);
     try{const ltp=await upstoxLTP(keys);
       ok.forEach(r=>{if(r.asset.src==='upstox'){const k=keyOf[r.asset.sym];if(k&&ltp[k]){r.sig.price=ltp[k];/* refresh action vs live price */r.action=actionNow(r.sig,r.setup,r.since,fmtTime);}}});}catch(e){}
   }
-  const out={tab,tf,analyzed:ok.length,total:uni.length,results:ok,ts:Date.now(),demo:DEMO,keyOf};
+  const out={tab,tf,analyzed:ok.length,total:uni.length,results:ok,ts:Date.now(),demo:DEMO,loggedIn:li,keyOf};
   cSet(ck,out);return out;
 }
 function hashStr(s){let h=0;for(const c of s)h=(h*31+c.charCodeAt(0))>>>0;return h;}
@@ -335,10 +377,10 @@ async function handler(req,res){
       if(!code)return htmlMsg(res,"Login failed","No authorization code returned. Try again from the dashboard.");
       try{const tok=await exchangeCode(code);saveToken(tok);res.writeHead(302,{Location:"/"});return res.end();}
       catch(e){return htmlMsg(res,"Login failed",e.message);}}
-    if(p==="/api/scan"){if(!loggedIn())return sendJSON(res,{error:"login_required"},401);
+    if(p==="/api/scan"){ // no login gate — crypto/commodity-ETF work without Upstox; stocks just skip until logged in
       const data=await scan(u.searchParams.get("tab")||"Stocks",u.searchParams.get("tf")||"intraday");return sendJSON(res,data);}
-    if(p==="/api/quotes"){if(!loggedIn())return sendJSON(res,{error:"login_required"},401);
-      return sendJSON(res,{quotes:await liveQuotes(u.searchParams.get("tab")||"Stocks"),ts:Date.now()});}
+    if(p==="/api/quotes"){
+      return sendJSON(res,{quotes:await liveQuotes(u.searchParams.get("tab")||"Stocks"),loggedIn:loggedIn(),ts:Date.now()});}
     // static — tolerate index.html living in /public OR the repo root
     let rel=path.normalize(p==="/"?"/index.html":p).replace(/^(\.\.[/\\])+/,"").replace(/^[/\\]+/,"");
     const candidates=[path.join(__dirname,"public",rel),path.join(__dirname,rel)];

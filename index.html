@@ -134,7 +134,7 @@ function drawLogin(){
   const el=document.getElementById('loginbar');
   if(status.demo){el.className='demobar';el.innerHTML='🧪 <b>DEMO MODE</b> — showing synthetic data so you can see the layout. To get real Upstox prices: edit <span class="src">config.json</span> (set your API key/secret and <span class="src">"demo": false</span>), restart, then log in.';return;}
   if(!status.hasCreds){el.className='loginbar';el.innerHTML='<div>🔑 <b>Setup needed.</b> Open <span class="src">config.json</span> and paste your Upstox API key &amp; secret (see README), then restart.</div>';return;}
-  if(!status.loggedIn){el.className='loginbar';el.innerHTML='<div>🔒 <b>Daily login required.</b> Upstox expires access every morning — one click reconnects you.</div><a class="btn go" href="/auth/login">Login with Upstox →</a>';return;}
+  if(!status.loggedIn){el.className='loginbar';el.innerHTML='<div>🔒 <b>Login for stocks, ETFs &amp; commodities.</b> Upstox expires access each morning — one click reconnects. <span style="color:var(--muted)">(Crypto works without login.)</span></div><a class="btn go" href="/auth/login">Login with Upstox →</a>';return;}
   el.className='';el.innerHTML='';
 }
 function onRiskChange(){const lev=getLev();document.getElementById('riskNote').textContent=`Risk ${money(getCap()*getRisk()/100,0)} per trade (${getRisk()}% of ${money(getCap(),0)}) · ${lev>1?lev+'× leverage (intraday margin)':'1× delivery (full cash)'}`;if(lastResults.length)render(lastResults);}
@@ -271,7 +271,7 @@ function refreshSecs(){return (activeTab!=='Crypto'&&!status.marketOpen)?120:60;
 function scheduleRefresh(){refreshAt=Date.now()+refreshSecs()*1000;}
 function tickCountdown(){if(!refreshAt)return;const left=Math.max(0,Math.round((refreshAt-Date.now())/1000));document.getElementById('nextRef').textContent=`⟳ refresh in ${left}s · ${timeframe==='intraday'?'30-min':'daily'}`;if(left<=0&&!scanning){refreshAt=0;runScan();}}
 function updateMkt(){const st=document.getElementById('mktStatus');if(activeTab==='Crypto'){st.className='badge open';st.textContent='Crypto · 24×7';return;}const o=status.marketOpen;st.className='badge '+(o?'open':'closed');st.textContent=o?'NSE/BSE · OPEN':'NSE/BSE · Closed';}
-function renderTabs(){const t=document.getElementById('tabs');t.innerHTML='';["Stocks","ETFs / Indices","Crypto","All"].forEach(k=>{const b=document.createElement('div');b.className='tab'+(k===activeTab?' active':'');b.textContent=k;b.onclick=()=>{activeTab=k;renderTabs();updateMkt();runScan();};t.appendChild(b);});}
+function renderTabs(){const t=document.getElementById('tabs');t.innerHTML='';["Stocks","ETFs / Indices","Commodities","Crypto","All"].forEach(k=>{const b=document.createElement('div');b.className='tab'+(k===activeTab?' active':'');b.textContent=k;b.onclick=()=>{activeTab=k;renderTabs();updateMkt();runScan();};t.appendChild(b);});}
 document.getElementById('tf').addEventListener('click',e=>{const d=e.target.closest('[data-tf]');if(!d)return;timeframe=d.dataset.tf;[...document.querySelectorAll('#tf div')].forEach(x=>x.classList.toggle('on',x===d));runScan();});
 setInterval(tickCountdown,1000);
 setInterval(pollQuotes,8000);
