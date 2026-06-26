@@ -310,10 +310,11 @@ async function handler(req,res){
       const data=await scan(u.searchParams.get("tab")||"Stocks",u.searchParams.get("tf")||"intraday");return sendJSON(res,data);}
     if(p==="/api/quotes"){if(!loggedIn())return sendJSON(res,{error:"login_required"},401);
       return sendJSON(res,{quotes:await liveQuotes(u.searchParams.get("tab")||"Stocks"),ts:Date.now()});}
-    // static
-    let file=p==="/"?"/index.html":p;
-    const fp=path.join(__dirname,"public",path.normalize(file).replace(/^(\.\.[/\\])+/,""));
-    if(fs.existsSync(fp)&&fs.statSync(fp).isFile()){res.writeHead(200,{"Content-Type":MIME[path.extname(fp)]||"application/octet-stream"});return fs.createReadStream(fp).pipe(res);}
+    // static — tolerate index.html living in /public OR the repo root
+    let rel=path.normalize(p==="/"?"/index.html":p).replace(/^(\.\.[/\\])+/,"").replace(/^[/\\]+/,"");
+    const candidates=[path.join(__dirname,"public",rel),path.join(__dirname,rel)];
+    for(const fp of candidates){if(fs.existsSync(fp)&&fs.statSync(fp).isFile()){res.writeHead(200,{"Content-Type":MIME[path.extname(fp)]||"application/octet-stream"});return fs.createReadStream(fp).pipe(res);}}
+    if(p==="/"){res.writeHead(200,{"Content-Type":"text/html"});return res.end('<body style="font-family:sans-serif;background:#0a0e14;color:#eaf1f8;padding:40px"><h2>◆ Server is LIVE ✅</h2><p>Your deploy worked — but <b>index.html</b> isn’t in the repo yet. Upload <span style="font-family:monospace">index.html</span> to your GitHub repo, wait ~2 min for Render to redeploy, then refresh this page.</p></body>');}
     res.writeHead(404);res.end("Not found");
   }catch(e){sendJSON(res,{error:String(e.message||e)},500);}
 }
