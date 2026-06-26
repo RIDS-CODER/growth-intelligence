@@ -162,7 +162,7 @@ async function runScan(){
     render(d.results);
     const now=new Date();
     document.getElementById('lastUpd').textContent='Updated '+now.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true});
-    document.getElementById('pstat').textContent=`${d.analyzed}/${d.total} live${d.cached?' (cached)':''}`;
+    document.getElementById('pstat').textContent=`${d.analyzed}/${d.total} live${d.cached?' (cached)':''}${d.note?' · ⚠ '+d.note:''}`;
   }catch(e){document.getElementById('pstat').textContent='Error';document.getElementById('buyCards').innerHTML='<div class="empty">Backend error: '+e.message+'</div>';}
   scanning=false;document.getElementById('scanBtn').disabled=false;scheduleRefresh();
 }
