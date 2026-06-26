@@ -1,0 +1,7 @@
+{
+  "upstoxApiKey": "PASTE_YOUR_UPSTOX_API_KEY_HERE",
+  "upstoxApiSecret": "PASTE_YOUR_UPSTOX_API_SECRET_HERE",
+  "redirectUri": "http://localhost:5180/callback",
+  "port": 5180,
+  "demo": true
+}
