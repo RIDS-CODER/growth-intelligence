@@ -19,7 +19,7 @@ const PUBLIC_URL=(process.env.REDIRECT_URI ? process.env.REDIRECT_URI.replace(/\
 const REDIRECT  = PUBLIC_URL+"/callback";
 // live whenever real API keys exist; demo only if explicitly set or no keys at all
 const DEMO      = process.env.DEMO==="1" ? true : (API_KEY ? false : (CFG.demo===true));
-const TTL_DAILY = 10*60*1000, TTL_INTRA = 90*1000;
+const TTL_DAILY = 5*60*1000, TTL_INTRA = 45*1000, TTL_CRYPTO = 40*1000;
 const TOK_FILE  = path.join(__dirname,"token.json");
 const INS_FILE  = path.join(__dirname,"instruments.json");
 
@@ -233,20 +233,22 @@ let cgCache=null,cgAt=0;
 const CG_TOP=parseInt(CFG.cryptoTop)||75;     // how many coins to pull (minus stablecoins)
 async function ensureCrypto(){
   if(DEMO){const m={};CRYPTO.forEach(c=>{let h=0;for(const ch of c.sym)h=(h*31+ch.charCodeAt(0))>>>0;m[c.sym]=synth(h,168,0.02);});return m;}
-  if(cgCache&&Date.now()-cgAt<50000)return cgCache;
-  const arr=await getJSON(`https://api.coingecko.com/api/v3/coins/markets?vs_currency=inr&order=market_cap_desc&per_page=${CG_TOP}&page=1&sparkline=true&price_change_percentage=24h`,{});
-  const list=[],map={},now=Date.now();
-  arr.forEach(it=>{
-    if(STABLE.has(it.id))return;
-    let close=((it.sparkline_in_7d&&it.sparkline_in_7d.price)||[]).slice();
-    if(close.length<60||!(it.current_price>0))return;
-    const last=close[close.length-1];if(last>0){const f=it.current_price/last;close=close.map(v=>v*f);}
-    close[close.length-1]=it.current_price;
-    list.push({sym:it.id,tk:(it.symbol||"").toUpperCase(),name:it.name,cls:"Crypto",src:"cg"});
-    map[it.id]={close,high:close.slice(),low:close.slice(),times:close.map((_,i)=>now-(close.length-1-i)*36e5),price:it.current_price};
-  });
-  if(list.length>=8) CRYPTO=list;             // replace fallback with live top list
-  cgCache=map;cgAt=Date.now();return map;
+  if(cgCache&&Date.now()-cgAt<30000)return cgCache;
+  try{
+    const arr=await getJSON(`https://api.coingecko.com/api/v3/coins/markets?vs_currency=inr&order=market_cap_desc&per_page=${CG_TOP}&page=1&sparkline=true&price_change_percentage=24h`,{});
+    const list=[],map={},now=Date.now();
+    arr.forEach(it=>{
+      if(STABLE.has(it.id))return;
+      let close=((it.sparkline_in_7d&&it.sparkline_in_7d.price)||[]).slice();
+      if(close.length<60||!(it.current_price>0))return;
+      const last=close[close.length-1];if(last>0){const f=it.current_price/last;close=close.map(v=>v*f);}
+      close[close.length-1]=it.current_price;
+      list.push({sym:it.id,tk:(it.symbol||"").toUpperCase(),name:it.name,cls:"Crypto",src:"cg"});
+      map[it.id]={close,high:close.slice(),low:close.slice(),times:close.map((_,i)=>now-(close.length-1-i)*36e5),price:it.current_price};
+    });
+    if(list.length>=8) CRYPTO=list;            // replace fallback with live top list
+    cgCache=map;cgAt=Date.now();return map;
+  }catch(e){ if(cgCache) return cgCache; throw e; }  // rate-limited? serve last good data, don't blank the tab
 }
 
 /* ============================================================
@@ -274,7 +276,8 @@ function processAsset(asset,data,tf){
     priceTag:asset.src==='cg'?'live':(marketOpen()?'LIVE (broker)':'prev close'),series:data.close.slice(-80)};
 }
 async function scan(tab,tf){
-  const ck="scan:"+tab+":"+tf;const hit=cGet(ck,tf==='intraday'?TTL_INTRA:TTL_DAILY);if(hit)return{...hit,cached:true};
+  const ttl = tab==='Crypto' ? TTL_CRYPTO : (tf==='intraday'?TTL_INTRA:TTL_DAILY);
+  const ck="scan:"+tab+":"+tf;const hit=cGet(ck,ttl);if(hit)return{...hit,cached:true};
   // fetch live top crypto FIRST so the universe reflects it, then build the universe
   let cmap=null;
   if(tab==="Crypto"||tab==="All"){try{cmap=await ensureCrypto();}catch(e){cmap={};}}
@@ -302,10 +305,15 @@ async function scan(tab,tf){
 function hashStr(s){let h=0;for(const c of s)h=(h*31+c.charCodeAt(0))>>>0;return h;}
 
 /* live quotes endpoint (cheap, frequent) */
+let cgPriceCache=null,cgPriceAt=0;
 async function liveQuotes(tab){
   const uni=universeFor(tab),out={};
   const cryptoIds=uni.filter(a=>a.src==='cg');
-  if(cryptoIds.length){try{const m=DEMO?{}:await getJSON(`https://api.coingecko.com/api/v3/simple/price?ids=${cryptoIds.map(c=>c.sym).join(",")}&vs_currency=inr`,{});cryptoIds.forEach(c=>{if(m[c.sym])out[c.sym]=m[c.sym].inr;});}catch(e){}}
+  if(cryptoIds.length){
+    if(!DEMO && cgPriceCache && Date.now()-cgPriceAt<12000){Object.assign(out,cgPriceCache);}  // throttle CoinGecko (free rate limit)
+    else if(!DEMO){try{const m=await getJSON(`https://api.coingecko.com/api/v3/simple/price?ids=${cryptoIds.map(c=>c.sym).join(",")}&vs_currency=inr`,{});
+      const c={};cryptoIds.forEach(x=>{if(m[x.sym])c[x.sym]=m[x.sym].inr;});cgPriceCache=c;cgPriceAt=Date.now();Object.assign(out,c);}
+      catch(e){if(cgPriceCache)Object.assign(out,cgPriceCache);}}}
   if(!DEMO){await ensureInstruments();const stocks=uni.filter(a=>a.src==='upstox');const keyOf={};stocks.forEach(a=>keyOf[a.sym]=keyForAsset(a));
     const keys=stocks.map(a=>keyOf[a.sym]).filter(Boolean);
     try{const ltp=await upstoxLTP(keys);stocks.forEach(a=>{const k=keyOf[a.sym];if(k&&ltp[k])out[a.sym]=ltp[k];});}catch(e){}}

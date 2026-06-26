@@ -274,7 +274,7 @@ function updateMkt(){const st=document.getElementById('mktStatus');if(activeTab=
 function renderTabs(){const t=document.getElementById('tabs');t.innerHTML='';["Stocks","ETFs / Indices","Crypto","All"].forEach(k=>{const b=document.createElement('div');b.className='tab'+(k===activeTab?' active':'');b.textContent=k;b.onclick=()=>{activeTab=k;renderTabs();updateMkt();runScan();};t.appendChild(b);});}
 document.getElementById('tf').addEventListener('click',e=>{const d=e.target.closest('[data-tf]');if(!d)return;timeframe=d.dataset.tf;[...document.querySelectorAll('#tf div')].forEach(x=>x.classList.toggle('on',x===d));runScan();});
 setInterval(tickCountdown,1000);
-setInterval(pollQuotes,5000);
+setInterval(pollQuotes,8000);
 setInterval(getStatus,60000);
 
 renderTabs();onRiskChange();onMinScore();getStatus().then(runScan);
