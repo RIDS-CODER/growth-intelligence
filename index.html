@@ -40,6 +40,11 @@
   .pstat{font-family:var(--mono);font-size:11px;color:var(--muted);white-space:nowrap}
   .riskbar{margin-top:10px}.rl{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px}
   .rl input{width:120px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--txt);font-family:var(--mono);font-size:13px;padding:7px 9px}.rl input:focus{outline:none;border-color:var(--accent)}
+  .rl input[type=range]{width:150px;padding:0;accent-color:var(--accent)}
+  .infobox{background:linear-gradient(160deg,var(--panel),var(--panel2));border:1px solid rgba(99,102,241,.35);border-radius:13px;padding:16px 18px;margin:14px 0;font-size:13px;line-height:1.7}
+  .infobox h3{font-size:15px;margin-bottom:8px;color:#c7d2fe}.infobox p{margin-bottom:8px}
+  .infobox .scale{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+  .infobox .pill{padding:3px 11px;border-radius:20px;font-size:11px;font-family:var(--mono);font-weight:700}
   .summary{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:20px 0 6px}@media(max-width:760px){.summary{grid-template-columns:1fr}}
   .hero{border-radius:16px;padding:18px 20px;border:1px solid var(--line);background:linear-gradient(160deg,var(--panel),var(--panel2))}
   .hero .lbl{font-size:11px;text-transform:uppercase;letter-spacing:1.2px;color:var(--muted);font-weight:700}
@@ -99,6 +104,13 @@
     <span class="pstat" id="riskNote"></span>
     <button class="btn export" onclick="exportCSV()">⬇ Export to Excel (CSV)</button>
   </div>
+  <div class="controls" style="margin-top:10px">
+    <label class="rl">Min score <input id="minscore" type="range" min="0" max="60" step="1" value="0" oninput="onMinScore()"> <b id="minscoreVal" style="color:var(--txt);font-family:var(--mono);min-width:22px;display:inline-block">0</b></label>
+    <button class="btn" id="strongBtn" onclick="setStrong()">💪 Strong only</button>
+    <button class="btn" onclick="toggleScoreInfo()">ℹ️ What does the score mean?</button>
+    <span class="pstat" id="filterNote"></span>
+  </div>
+  <div id="scoreInfo" style="display:none"></div>
 
   <div class="summary" id="summary"></div>
   <h2 class="sec">📈 BUY now / Long <span class="count" id="buyCount">0</span></h2>
@@ -164,11 +176,32 @@ async function pollQuotes(){
   }catch(e){}
 }
 
+const getMinScore=()=>+document.getElementById('minscore').value||0;
+function onMinScore(){document.getElementById('minscoreVal').textContent=getMinScore();syncStrongBtn();if(lastResults.length)render(lastResults);}
+const STRONG=40;
+function setStrong(){const s=document.getElementById('minscore');s.value=getMinScore()>=STRONG?0:STRONG;onMinScore();}
+function syncStrongBtn(){const b=document.getElementById('strongBtn');if(!b)return;const on=getMinScore()>=STRONG;b.classList.toggle('go',on);b.textContent=on?'💪 Strong only · ON':'💪 Strong only';}
+function toggleScoreInfo(){const el=document.getElementById('scoreInfo');if(el.style.display==='none'){el.innerHTML=scoreInfoHTML();el.style.display='block';}else{el.style.display='none';}}
+function scoreInfoHTML(){return `<div class="infobox">
+  <h3>📊 What the score means</h3>
+  <p>The <b>score</b> runs from <b>−100 to +100</b>. It is a <b>weighted vote of 8 technical indicators</b> — long-term trend (50/200), EMA 12/26 momentum, RSI, MACD, Bollinger position, Stochastic, rate-of-change, and 20-bar breakout. <b style="color:var(--buy)">Positive</b> = bullish (lean BUY); <b style="color:var(--sell)">negative</b> = bearish (lean SELL).</p>
+  <p>The <b>size</b> of the number is <b>conviction</b> — how strongly those indicators agree right now. It is <b>NOT</b> a predicted return and <b>NOT</b> a win probability. A +45 means the indicators broadly line up bullish; a +13 means only a slight tilt.</p>
+  <div class="scale">
+    <span class="pill" style="background:var(--hold-bg);color:var(--hold)">12–20 · weak / early</span>
+    <span class="pill" style="background:rgba(34,211,238,.15);color:var(--accent2)">20–40 · moderate</span>
+    <span class="pill" style="background:var(--buy-bg);color:var(--buy)">40+ · strong agreement</span>
+  </div>
+  <p class="small">Use the <b>Min score</b> slider above to hide weaker setups (e.g. set it to 20 to see only moderate-and-up). Higher conviction still does <b>not</b> mean a guaranteed win — even strong setups fail, which is exactly why every card carries a stop-loss and invalidation. The score helps you <b>prioritise</b>, not predict.</p>
+</div>`;}
+
 function render(results){
   lastResults=results;
-  const buys=results.filter(r=>r.sig.verdict==='BUY').sort((a,b)=>b.sig.score-a.sig.score);
-  const sells=results.filter(r=>r.sig.verdict==='SELL').sort((a,b)=>a.sig.score-b.sig.score);
+  const ms=getMinScore();
+  const buys=results.filter(r=>r.sig.verdict==='BUY'&&r.sig.score>=ms).sort((a,b)=>b.sig.score-a.sig.score);
+  const sells=results.filter(r=>r.sig.verdict==='SELL'&&r.sig.score<=-ms).sort((a,b)=>a.sig.score-b.sig.score);
   document.getElementById('buyCount').textContent=buys.length;document.getElementById('sellCount').textContent=sells.length;
+  const hidden=results.filter(r=>r.sig.verdict!=='HOLD').length-(buys.length+sells.length);
+  document.getElementById('filterNote').textContent=ms>0?`Min score ${ms}: hiding ${hidden} weaker setup${hidden===1?'':'s'}`:'';
   renderSummary(buys[0],sells[0]);renderCards('buyCards',buys,true);renderCards('sellCards',sells,false);
 }
 function renderSummary(bb,bs){const make=(r,isBuy)=>{if(!r)return `<div class="hero"><div class="lbl">${isBuy?'Best long':'Best short'}</div><div class="nm" style="color:var(--muted)">No qualifying setup</div></div>`;
@@ -244,7 +277,7 @@ setInterval(tickCountdown,1000);
 setInterval(pollQuotes,5000);
 setInterval(getStatus,60000);
 
-renderTabs();onRiskChange();getStatus().then(runScan);
+renderTabs();onRiskChange();onMinScore();getStatus().then(runScan);
 </script>
 </body>
 </html>
