@@ -141,16 +141,12 @@ const COMMODITY_ETF=[["GOLDBEES","Gold ETF (GOLDBEES)"],["SILVERBEES","Silver ET
   .map(([ts,name])=>({sym:ts+".NS",ts,name,cls:"Commodity",src:"upstox"}));
 const MCX_LIST=["GOLD","GOLDM","SILVER","SILVERM","CRUDEOIL","CRUDEOILM","NATURALGAS","NATGASMINI","COPPER","ZINC","ALUMINIUM","NICKEL","LEAD"];
 let COMMODITIES=[...COMMODITY_ETF];   // replaced with [...MCX, ...ETF] once MCX is resolved
-// Crypto starts as a small fallback list; replaced live with the top coins by market cap on first scan.
-let CRYPTO=[["bitcoin","Bitcoin","BTC"],["ethereum","Ethereum","ETH"],["solana","Solana","SOL"],["ripple","XRP","XRP"],
- ["binancecoin","BNB","BNB"],["dogecoin","Dogecoin","DOGE"],["cardano","Cardano","ADA"],["tron","TRON","TRX"],
- ["chainlink","Chainlink","LINK"],["polkadot","Polkadot","DOT"],["matic-network","Polygon","POL"],["litecoin","Litecoin","LTC"]
-].map(([sym,name,tk])=>({sym,tk,name,cls:"Crypto",src:"cg"}));
-// stablecoins / wrapped / liquid-staking tokens — excluded (their price is pegged, no tradeable signal)
-const STABLE=new Set(["tether","usd-coin","dai","first-digital-usd","true-usd","usdd","frax","paxos-standard","binance-usd",
- "ethena-usde","usds","paypal-usd","gho","crvusd","usdb","ripple-usd","wrapped-bitcoin","wrapped-steth","staked-ether",
- "weth","wrapped-eeth","coinbase-wrapped-btc","binance-staked-sol","jupiter-staked-sol","lido-staked-ether","rocket-pool-eth",
- "mantle-staked-ether","wbnb","bridged-wrapped-steth","kelp-dao-restaked-eth","msol","wrapped-beacon-eth","solv-btc","tbtc","lombard-staked-btc"]);
+// Crypto via Binance public market data (no key, native OHLC at every timeframe). Fallback list for DEMO / first load.
+let CRYPTO=[["BTCUSDT","BTC"],["ETHUSDT","ETH"],["SOLUSDT","SOL"],["XRPUSDT","XRP"],["BNBUSDT","BNB"],["DOGEUSDT","DOGE"],
+ ["ADAUSDT","ADA"],["TRXUSDT","TRX"],["LINKUSDT","LINK"],["DOTUSDT","DOT"],["MATICUSDT","POL"],["LTCUSDT","LTC"]
+].map(([sym,tk])=>({sym,binance:sym,tk,name:tk,cls:"Crypto",src:"cg"}));
+// exclude stablecoins / fiat / leveraged tokens (pegged or synthetic — no tradeable signal)
+const STABLE_TK=new Set(["USDT","USDC","FDUSD","TUSD","BUSD","DAI","USDP","USDD","PYUSD","EUR","GBP","AEUR","USDE","USD1","EURI","XUSD"]);
 function universeFor(tab){
   const stocks=STOCKS, etfidx=[...ETFS,...INDICES];
   if(tab==="Stocks")return stocks;
@@ -233,18 +229,33 @@ async function ensureCommodities(){
   COMMODITIES=[...mcx,...COMMODITY_ETF];
   return COMMODITIES;
 }
+// Upstox API V3 timeframes. hours max 5 → 6h/12h are resampled from 1h.
+const TF_MAP={
+  "15m":{unit:"minutes",interval:15,days:30},
+  "30m":{unit:"minutes",interval:30,days:50},
+  "1h" :{unit:"hours",  interval:1, days:100},
+  "4h" :{unit:"hours",  interval:4, days:300},
+  "6h" :{unit:"hours",  interval:1, days:180,resample:6},
+  "12h":{unit:"hours",  interval:1, days:200,resample:12},
+  "daily":{unit:"days", interval:1, days:500},
+  // legacy aliases
+  "intraday":{unit:"minutes",interval:30,days:50},
+};
+function tfCfg(tf){return TF_MAP[tf]||TF_MAP["30m"];}
+function resampleSeries(d,f){
+  if(!f||f<=1)return d;
+  const close=[],high=[],low=[],times=[];
+  for(let i=0;i<d.close.length;i+=f){const end=Math.min(i+f,d.close.length);let hi=-Infinity,lo=Infinity;
+    for(let j=i;j<end;j++){hi=Math.max(hi,d.high[j]);lo=Math.min(lo,d.low[j]);}
+    close.push(d.close[end-1]);high.push(hi);low.push(lo);times.push(d.times[end-1]);}
+  return {close,high,low,times,price:close[close.length-1],mtime:d.mtime};
+}
 async function upstoxCandles(key,tf){
-  // tf 'intraday' -> 30minute over ~30d ; 'daily' -> day over ~1y
-  const today=new Date(), to=ymd(today);
-  if(tf==="intraday"){
-    const from=ymd(new Date(today.getTime()-35*864e5));
-    const url=`https://api.upstox.com/v2/historical-candle/${encodeURIComponent(key)}/30minute/${to}/${from}`;
-    return parseCandles(await getJSON(url,authHeaders()));
-  }else{
-    const from=ymd(new Date(today.getTime()-400*864e5));
-    const url=`https://api.upstox.com/v2/historical-candle/${encodeURIComponent(key)}/day/${to}/${from}`;
-    return parseCandles(await getJSON(url,authHeaders()));
-  }
+  const cfg=tfCfg(tf), to=ymd(new Date()), from=ymd(new Date(Date.now()-cfg.days*864e5));
+  const url=`https://api.upstox.com/v3/historical-candle/${encodeURIComponent(key)}/${cfg.unit}/${cfg.interval}/${to}/${from}`;
+  let d=parseCandles(await getJSON(url,authHeaders()));
+  if(cfg.resample)d=resampleSeries(d,cfg.resample);
+  return d;
 }
 function parseCandles(j){
   const c=j&&j.data&&j.data.candles||[];
@@ -266,35 +277,52 @@ async function upstoxLTP(keys){
   return out;
 }
 
-/* ---------- CoinGecko (crypto): live top coins by market cap, one request ---------- */
-let cgCache=null,cgAt=0;
-const CG_TOP=parseInt(CFG.cryptoTop)||75;     // how many coins to pull (minus stablecoins)
-let cgOk=false, cgErr="";
-const cgHeaders=()=>COINGECKO_KEY?{"x-cg-demo-api-key":COINGECKO_KEY}:{};
-async function ensureCrypto(){
-  if(DEMO){const m={};CRYPTO.forEach(c=>{let h=0;for(const ch of c.sym)h=(h*31+ch.charCodeAt(0))>>>0;m[c.sym]=synth(h,168,0.02);});cgOk=true;return m;}
-  if(cgCache&&Date.now()-cgAt<30000){cgOk=true;return cgCache;}
-  const url=`https://api.coingecko.com/api/v3/coins/markets?vs_currency=inr&order=market_cap_desc&per_page=${CG_TOP}&page=1&sparkline=true&price_change_percentage=24h`;
-  for(let attempt=0;attempt<2;attempt++){
-    try{
-      const arr=await getJSON(url,cgHeaders());
-      if(!Array.isArray(arr))throw new Error("bad response");
-      const list=[],map={},now=Date.now();
-      arr.forEach(it=>{
-        if(STABLE.has(it.id))return;
-        let close=((it.sparkline_in_7d&&it.sparkline_in_7d.price)||[]).slice();
-        if(close.length<60||!(it.current_price>0))return;
-        const last=close[close.length-1];if(last>0){const f=it.current_price/last;close=close.map(v=>v*f);}
-        close[close.length-1]=it.current_price;
-        list.push({sym:it.id,tk:(it.symbol||"").toUpperCase(),name:it.name,cls:"Crypto",src:"cg"});
-        map[it.id]={close,high:close.slice(),low:close.slice(),times:close.map((_,i)=>now-(close.length-1-i)*36e5),price:it.current_price};
-      });
-      if(list.length>=8){CRYPTO=list;cgCache=map;cgAt=Date.now();cgOk=true;cgErr="";return map;}
-      throw new Error("no usable coins in response");
-    }catch(e){cgErr=String(e.message||e);if(attempt===0){await new Promise(r=>setTimeout(r,900));continue;}}
+/* ---------- Crypto via Binance public market data (reliable, no key, native OHLC every timeframe) ---------- */
+const CG_TOP=parseInt(process.env.CRYPTO_TOP)||parseInt(CFG.cryptoTop)||120;   // number of coins (top by 24h volume)
+const BN_HOSTS=["https://data-api.binance.vision","https://api.binance.com","https://api-gcp.binance.com"];
+const BN_INT={"15m":"15m","30m":"30m","1h":"1h","4h":"4h","6h":"6h","12h":"12h","daily":"1d","intraday":"30m"};
+let cgOk=false;
+async function binanceGet(pathq){let last;for(const h of BN_HOSTS){try{return await getJSON(h+pathq,{});}catch(e){last=e;}}throw last||new Error("binance unreachable");}
+// USD→INR (Binance quotes in USDT). Cached 6h; fallback chain so ₹ is always populated.
+let fxRate=null,fxAt=0;
+async function usdInr(){
+  if(fxRate&&Date.now()-fxAt<6*3600e3)return fxRate;
+  const tries=[
+    async()=>{const j=await getJSON("https://open.er-api.com/v6/latest/USD",{});return j&&j.rates&&j.rates.INR;},
+    async()=>{const j=await getJSON("https://api.frankfurter.app/latest?from=USD&to=INR",{});return j&&j.rates&&j.rates.INR;},
+  ];
+  for(const t of tries){try{const r=await t();if(r>0){fxRate=r;fxAt=Date.now();return r;}}catch(e){}}
+  return fxRate||86;   // sensible fallback if all FX sources fail
+}
+// universe: top USDT pairs by 24h quote volume (liquidity = what you can actually trade)
+let cryUniAt=0;
+async function ensureCryptoUniverse(){
+  if(DEMO){cgOk=true;return CRYPTO;}
+  if(cryUniAt&&Date.now()-cryUniAt<600000)return CRYPTO;
+  try{
+    const arr=await binanceGet("/api/v3/ticker/24hr");
+    if(!Array.isArray(arr))throw new Error("bad ticker");
+    const rows=arr.filter(t=>t.symbol&&t.symbol.endsWith("USDT"))
+      .map(t=>({sym:t.symbol,tk:t.symbol.slice(0,-4),qv:+t.quoteVolume||0}))
+      .filter(r=>!STABLE_TK.has(r.tk) && !/(UP|DOWN|BULL|BEAR)$/.test(r.tk) && !/^\d/.test(r.tk))
+      .sort((a,b)=>b.qv-a.qv).slice(0,CG_TOP);
+    if(rows.length>=8){CRYPTO=rows.map(r=>({sym:r.sym,binance:r.sym,tk:r.tk,name:r.tk,cls:"Crypto",src:"cg"}));cryUniAt=Date.now();}
+    cgOk=true;
+  }catch(e){cgOk=false;}   // keep last universe; per-coin fetch will flag failure
+  return CRYPTO;
+}
+async function loadBinance(asset,tf){
+  if(DEMO){let h=0;for(const ch of asset.sym)h=(h*31+ch.charCodeAt(0))>>>0;return synth(h,300,0.03);}
+  const interval=BN_INT[tf]||"1h";
+  const j=await binanceGet(`/api/v3/klines?symbol=${asset.binance}&interval=${interval}&limit=400`);
+  if(!Array.isArray(j)||!j.length)throw new Error("no klines");
+  const r=await usdInr();
+  const close=[],high=[],low=[],times=[];
+  for(const k of j){ // [openTime,o,h,l,c,vol,closeTime,...]
+    const c=+k[4];if(!isFinite(c))continue;
+    close.push(c*r);high.push(+k[2]*r);low.push(+k[3]*r);times.push(+k[6]);
   }
-  cgOk=false;                                  // failed: serve last good data if any, but flag it so we don't cache an empty scan
-  return cgCache||{};
+  return {close,high,low,times,price:close[close.length-1],mtime:times[times.length-1]};
 }
 
 /* ============================================================
@@ -308,37 +336,55 @@ function marketOpen(){const ist=new Date(new Date().toLocaleString("en-US",{time
 function fmtTime(ms){if(!ms)return"";const ist=new Date(new Date(ms).toLocaleString("en-US",{timeZone:"Asia/Kolkata"}));return ist.toLocaleString("en-IN",{day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit",hour12:true});}
 function synth(seed,n,drift){let x=500+seed%4000,o=[],s=seed||1;const r=()=>{s=(s*16807)%2147483647;return s/2147483647;};const d=drift==null?((seed%3)-1)*0.12:drift;const close=[];for(let i=0;i<n;i++){x*=(1+(r()-0.5+d)*0.03);x=Math.max(1,x);close.push(x);}const now=Date.now();return {close,high:close.map(v=>v*1.004),low:close.map(v=>v*0.996),times:close.map((_,i)=>now-(n-1-i)*18e5),price:close[close.length-1]};}
 
+// "does this trade have room beyond this bar?" — higher-timeframe confluence from the same series (no extra API call)
+function scopeFlag(sig){
+  const dir=sig.verdict==='SELL'?-1:sig.verdict==='BUY'?1:0;
+  if(!dir)return null;
+  const trendUp = (sig.s50!=null&&sig.s200!=null)?sig.s50>sig.s200:null;
+  const nearHi = sig.hi20&&sig.price>=sig.hi20*0.995;
+  const nearLo = sig.lo20&&sig.price<=sig.lo20*1.005;
+  if(dir>0){
+    if(trendUp===true&&!nearHi)return {good:true, txt:'🚀 Room to run — higher-timeframe trend agrees, can extend into a swing'};
+    if(nearHi)return {good:false, txt:'⚠ Near recent high — limited upside, take profit quickly'};
+    return {good:false, txt:'↔ Counter to the bigger trend — likely a short-lived bounce'};
+  }else{
+    if(trendUp===false&&!nearLo)return {good:true, txt:'🚀 Room to fall — higher-timeframe trend agrees, can extend'};
+    if(nearLo)return {good:false, txt:'⚠ Near recent low — limited downside left'};
+    return {good:false, txt:'↔ Counter to the bigger trend — likely a short-lived dip'};
+  }
+}
 function processAsset(asset,data,tf){
-  if(!data||!data.close||data.close.length<60)throw new Error("no data");
-  const thr=tf==='intraday'?12:20;          // looser threshold intraday = more opportunities
+  if(!data||!data.close||data.close.length<40)throw new Error("no data");
+  const thr=tf==='daily'?20:12;             // looser threshold on all intraday frames = more opportunities
   const sig=computeSignal(data.close,data.high,data.low,thr);
-  const setup=buildSetup(sig,tf);
+  const setup=buildSetup(sig,tf==='daily'?'daily':'intraday');
   const since=signalSince(data.close,data.high,data.low,data.times);
   const action=actionNow(sig,setup,since,fmtTime);
   const reasons=buildReasons(sig,setup,marketOpen(),asset.src==='cg');
+  const scope=scopeFlag(sig);
   const dec=asset.src==='cg'&&data.price<5?4:2;
   const isIndex=!!asset.isIndex||asset.sym.startsWith('^');
-  return {asset,sig,setup,since,action,reasons,dec,isIndex,asof:fmtTime(data.times?data.times[data.times.length-1]:Date.now()),
+  const asofMs=data.mtime||(data.times?data.times[data.times.length-1]:Date.now());
+  return {asset,sig,setup,since,action,reasons,scope,dec,isIndex,tf,asof:fmtTime(asofMs),
     priceTag:asset.src==='cg'?'live':(marketOpen()?'LIVE (broker)':'prev close'),series:data.close.slice(-80)};
 }
 async function scan(tab,tf){
   const ttl = tab==='Crypto' ? TTL_CRYPTO : (tf==='intraday'?TTL_INTRA:TTL_DAILY);
   const ck="scan:"+tab+":"+tf;const hit=cGet(ck,ttl);if(hit)return{...hit,cached:true};
-  // crypto + commodities resolved FIRST so the universe reflects them
-  let cmap=null;
-  if(tab==="Crypto"||tab==="All"){try{cmap=await ensureCrypto();}catch(e){cmap={};}}
+  // crypto universe (Binance) + commodities resolved FIRST so the universe reflects them
+  if(tab==="Crypto"||tab==="All"){try{await ensureCryptoUniverse();}catch(e){}}
   if(tab==="Commodities"||tab==="All"){try{await ensureCommodities();}catch(e){}}
   const uni=universeFor(tab);
   const li=loggedIn();
   const hasUpstox=uni.some(a=>a.src==='upstox');
-  if(!DEMO && hasUpstox && li) await ensureInstruments();   // only when needed and possible (no auth for download, but skip work if not logged in)
+  if(!DEMO && hasUpstox && li) await ensureInstruments();
   const stockAssets=uni.filter(a=>a.src==='upstox');
   const keyOf={};stockAssets.forEach(a=>{keyOf[a.sym]=DEMO?("DEMO|"+a.sym):keyForAsset(a);});
-  const res=await mapLimit(uni,8,async asset=>{
+  const res=await mapLimit(uni,10,async asset=>{
     let data;
-    if(asset.src==='cg'){data=cmap[asset.sym];}                 // crypto: never needs login
+    if(asset.src==='cg'){data=await loadBinance(asset,tf);}       // crypto: Binance klines (native timeframe), never needs login
     else{
-      if(!DEMO && !li) throw new Error("login");                // skip Upstox instantly when not logged in
+      if(!DEMO && !li) throw new Error("login");                  // skip Upstox instantly when not logged in
       const key=keyOf[asset.sym];if(!key)throw new Error("no instrument key");
       data=DEMO?synth(hashStr(asset.sym),tf==='intraday'?400:300,0.04):await upstoxCandles(key,tf);
     }
@@ -350,9 +396,10 @@ async function scan(tab,tf){
     try{const ltp=await upstoxLTP(keys);
       ok.forEach(r=>{if(r.asset.src==='upstox'){const k=keyOf[r.asset.sym];if(k&&ltp[k]){r.sig.price=ltp[k];/* refresh action vs live price */r.action=actionNow(r.sig,r.setup,r.since,fmtTime);}}});}catch(e){}
   }
-  const cryptoFailed=(tab==='Crypto'||tab==='All') && !DEMO && !cgOk;
+  const cryptoAssets=uni.filter(a=>a.src==='cg');
+  const cryptoFailed = cryptoAssets.length>0 && !DEMO && !ok.some(r=>r.asset.src==='cg');
   const out={tab,tf,analyzed:ok.length,total:uni.length,results:ok,ts:Date.now(),demo:DEMO,loggedIn:li,keyOf,
-    note: cryptoFailed?("Crypto source rate-limited"+(COINGECKO_KEY?"":" — add a free CoinGecko demo key (COINGECKO_KEY) for reliable server-side crypto")):undefined};
+    note: cryptoFailed?"Crypto (Binance) temporarily unreachable — retrying next refresh":undefined};
   if(ok.length>0 && !cryptoFailed) cSet(ck,out);   // never cache an empty/failed scan
   return out;
 }
@@ -363,10 +410,11 @@ let cgPriceCache=null,cgPriceAt=0;
 async function liveQuotes(tab){
   const uni=universeFor(tab),out={};
   const cryptoIds=uni.filter(a=>a.src==='cg');
-  if(cryptoIds.length){
-    if(!DEMO && cgPriceCache && Date.now()-cgPriceAt<12000){Object.assign(out,cgPriceCache);}  // throttle CoinGecko (free rate limit)
-    else if(!DEMO){try{const m=await getJSON(`https://api.coingecko.com/api/v3/simple/price?ids=${cryptoIds.map(c=>c.sym).join(",")}&vs_currency=inr`,cgHeaders());
-      const c={};cryptoIds.forEach(x=>{if(m[x.sym])c[x.sym]=m[x.sym].inr;});cgPriceCache=c;cgPriceAt=Date.now();Object.assign(out,c);}
+  if(cryptoIds.length && !DEMO){
+    if(cgPriceCache && Date.now()-cgPriceAt<8000){Object.assign(out,cgPriceCache);}
+    else{try{const arr=await binanceGet("/api/v3/ticker/price");const r=await usdInr();
+      const bySym={};if(Array.isArray(arr))arr.forEach(x=>{bySym[x.symbol]=+x.price*r;});
+      const c={};cryptoIds.forEach(x=>{if(bySym[x.binance])c[x.sym]=bySym[x.binance];});cgPriceCache=c;cgPriceAt=Date.now();Object.assign(out,c);}
       catch(e){if(cgPriceCache)Object.assign(out,cgPriceCache);}}}
   if(!DEMO){await ensureInstruments();const stocks=uni.filter(a=>a.src==='upstox');const keyOf={};stocks.forEach(a=>keyOf[a.sym]=keyForAsset(a));
     const keys=stocks.map(a=>keyOf[a.sym]).filter(Boolean);
@@ -411,4 +459,5 @@ if(require.main===module){
     console.log(`  Upstox app key: ${API_KEY?"set":"MISSING — edit config.json"}  |  Logged in today: ${loggedIn()}\n`);
   });
 }
-module.exports={IND,computeSignal,buildSetup,buildReasons,signalSince,actionNow,parseCandles,authURL,scan,universeFor,fmtTime};
+module.exports={IND,computeSignal,buildSetup,buildReasons,signalSince,actionNow,parseCandles,authURL,scan,universeFor,fmtTime,
+  loadBinance,ensureCryptoUniverse,usdInr,resampleSeries,tfCfg,getCRYPTO:()=>CRYPTO};

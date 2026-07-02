@@ -67,6 +67,9 @@
   .action{border-radius:10px;padding:11px 13px;margin:13px 0 4px;font-weight:700;font-size:13.5px;border:1px solid}
   .action.now{background:var(--buy-bg);border-color:rgba(22,199,132,.5);color:#8ff0c8}.action.wait{background:var(--hold-bg);border-color:rgba(240,185,11,.45);color:#f0d488}.action.exit{background:var(--sell-bg);border-color:rgba(234,57,67,.5);color:#f6aab0}
   .action .since{display:block;font-weight:500;font-size:11px;color:var(--muted);margin-top:4px;font-family:var(--mono)}
+  .scope{font-size:12px;font-weight:600;padding:7px 11px;border-radius:9px;margin:0 0 4px}
+  .scope.good{background:rgba(34,211,238,.1);border:1px solid rgba(34,211,238,.3);color:#a5f3fc}
+  .scope.warn{background:var(--hold-bg);border:1px solid rgba(240,185,11,.3);color:#e8c766}
   .spark{width:100%;height:46px;display:block;margin:10px 0 2px}
   .levels{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin:14px 0}
   .lv{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:9px 10px}.lv .k{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}.lv .v{font-family:var(--mono);font-size:14px;font-weight:700;margin-top:2px}.lv .r{font-family:var(--mono);font-size:11px;margin-top:1px}
@@ -92,7 +95,7 @@
 
   <div class="controls">
     <div class="tabs" id="tabs"></div>
-    <div class="seg" id="tf"><div data-tf="intraday" class="on">⚡ Intraday 30m</div><div data-tf="daily">📅 Swing Daily</div></div>
+    <div class="seg" id="tf"><div data-tf="15m">15m</div><div data-tf="30m" class="on">30m</div><div data-tf="1h">1h</div><div data-tf="4h">4h</div><div data-tf="6h">6h</div><div data-tf="12h">12h</div><div data-tf="daily">1D</div></div>
     <button class="btn" id="scanBtn" onclick="runScan()">↻ Refresh now</button>
     <div class="progress"><div class="pf" id="pf"></div></div>
     <div class="pstat" id="pstat">starting…</div>
@@ -121,7 +124,7 @@
   <footer>Prices: <span class="src">Upstox</span> real-time (stocks/ETFs/indices) · <span class="src">CoinGecko</span> (crypto). Indices in points, rest in ₹. Times IST.<br>Growth Intelligence Platform PRO · auto-refreshing.</footer>
 </div>
 <script>
-let activeTab="Stocks",timeframe="intraday",lastResults=[],status={},refreshAt=0;
+let activeTab="Stocks",timeframe="30m",lastResults=[],status={},refreshAt=0;
 const money=(v,d=2)=>v==null?'—':'₹'+Number(v).toLocaleString('en-IN',{minimumFractionDigits:d,maximumFractionDigits:d});
 const fmtVal=(v,d,ix)=>v==null?'—':(ix?Number(v).toLocaleString('en-IN',{minimumFractionDigits:d,maximumFractionDigits:d})+' pts':money(v,d));
 const id4=s=>s.replace(/[^a-z0-9]/gi,'');
@@ -215,7 +218,7 @@ function renderSummary(bb,bs){const make=(r,isBuy)=>{if(!r)return `<div class="h
   document.getElementById('summary').innerHTML=make(bb,true)+make(bs,false);}
 function renderCards(id,list,isBuy){const el=document.getElementById(id);if(!list.length){el.innerHTML='<div class="empty">No '+(isBuy?'long':'short')+' setups this scan.</div>';return;}el.innerHTML=list.map((r,i)=>card(r,i,isBuy)).join('');}
 function sparkline(a,isBuy){if(!a||a.length<2)return'';const lo=Math.min(...a),hi=Math.max(...a),sp=hi-lo||1,W=340,H=46;const pts=a.map((v,i)=>`${(i/(a.length-1)*W).toFixed(1)},${(H-(v-lo)/sp*H).toFixed(1)}`).join(' ');return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><polyline points="${pts}" fill="none" stroke="${isBuy?'#16c784':'#ea3943'}" stroke-width="1.6"/></svg>`;}
-function card(r,i,isBuy){const{asset,sig,setup,reasons,dec,action,asof,isIndex,priceTag,series}=r,f=v=>fmtVal(v,dec,isIndex),open=i<3?'open':'';
+function card(r,i,isBuy){const{asset,sig,setup,reasons,dec,action,scope,asof,isIndex,priceTag,series}=r,f=v=>fmtVal(v,dec,isIndex),open=i<3?'open':'';
   const tn=['Target 1','Target 2','Target 3'];
   const tgts=setup.targets.map((t,k)=>`<div class="lv t${k+1}"><div class="k">${tn[k]}</div><div class="v">${f(t)}</div><div class="r">${setup.ret[k]>=0?'+':''}${setup.ret[k].toFixed(1)}%</div></div>`).join('');
   return `<div class="tc ${open} ${isBuy?'':'sellcard'}">
@@ -226,6 +229,7 @@ function card(r,i,isBuy){const{asset,sig,setup,reasons,dec,action,asof,isIndex,p
     </div>
     <div class="bd">
       <div class="action ${action.cls}">${action.txt}<span class="since">${action.since||''}</span></div>
+      ${scope?`<div class="scope ${scope.good?'good':'warn'}">${scope.txt}</div>`:''}
       ${sparkline(series,isBuy)}
       <div class="kv" style="margin-top:6px">
         <div class="k">Current Price</div><div class="v" id="px_${id4(asset.sym)}">${f(sig.price)}</div>
@@ -269,7 +273,7 @@ function exportCSV(){if(!lastResults.length){alert('Wait for a scan.');return;}
 
 function refreshSecs(){return (activeTab!=='Crypto'&&!status.marketOpen)?120:60;}
 function scheduleRefresh(){refreshAt=Date.now()+refreshSecs()*1000;}
-function tickCountdown(){if(!refreshAt)return;const left=Math.max(0,Math.round((refreshAt-Date.now())/1000));document.getElementById('nextRef').textContent=`⟳ refresh in ${left}s · ${timeframe==='intraday'?'30-min':'daily'}`;if(left<=0&&!scanning){refreshAt=0;runScan();}}
+function tickCountdown(){if(!refreshAt)return;const left=Math.max(0,Math.round((refreshAt-Date.now())/1000));document.getElementById('nextRef').textContent=`⟳ refresh in ${left}s · ${timeframe}`;if(left<=0&&!scanning){refreshAt=0;runScan();}}
 function updateMkt(){const st=document.getElementById('mktStatus');if(activeTab==='Crypto'){st.className='badge open';st.textContent='Crypto · 24×7';return;}const o=status.marketOpen;st.className='badge '+(o?'open':'closed');st.textContent=o?'NSE/BSE · OPEN':'NSE/BSE · Closed';}
 function renderTabs(){const t=document.getElementById('tabs');t.innerHTML='';["Stocks","ETFs / Indices","Commodities","Crypto","All"].forEach(k=>{const b=document.createElement('div');b.className='tab'+(k===activeTab?' active':'');b.textContent=k;b.onclick=()=>{activeTab=k;renderTabs();updateMkt();runScan();};t.appendChild(b);});}
 document.getElementById('tf').addEventListener('click',e=>{const d=e.target.closest('[data-tf]');if(!d)return;timeframe=d.dataset.tf;[...document.querySelectorAll('#tf div')].forEach(x=>x.classList.toggle('on',x===d));runScan();});
