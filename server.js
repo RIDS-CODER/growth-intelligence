@@ -277,52 +277,79 @@ async function upstoxLTP(keys){
   return out;
 }
 
-/* ---------- Crypto via Binance public market data (reliable, no key, native OHLC every timeframe) ---------- */
-const CG_TOP=parseInt(process.env.CRYPTO_TOP)||parseInt(CFG.cryptoTop)||120;   // number of coins (top by 24h volume)
+/* ---------- Crypto: CoinDCX (INR-native, no key) primary · Binance (USDT×FX) fallback ---------- */
+const CG_TOP=parseInt(process.env.CRYPTO_TOP)||parseInt(CFG.cryptoTop)||120;
+let cgOk=false, cryptoMode="binance";   // set to 'coindcx' when CoinDCX is reachable
+// CoinDCX public endpoints (no auth)
+const CDX_INT={"15m":"15m","30m":"30m","1h":"1h","4h":"4h","6h":"6h","12h":"12h","daily":"1d","intraday":"30m"};
+let cdxTicker={},cdxTickerAt=0;
+async function cdxGetTicker(){const t=await getJSON("https://api.coindcx.com/exchange/ticker",{});if(!Array.isArray(t))throw new Error("cdx ticker");
+  const snap={};t.forEach(x=>{if(x.market)snap[x.market]=+x.last_price;});cdxTicker=snap;cdxTickerAt=Date.now();return t;}
+// Binance fallback
 const BN_HOSTS=["https://data-api.binance.vision","https://api.binance.com","https://api-gcp.binance.com"];
 const BN_INT={"15m":"15m","30m":"30m","1h":"1h","4h":"4h","6h":"6h","12h":"12h","daily":"1d","intraday":"30m"};
-let cgOk=false;
 async function binanceGet(pathq){let last;for(const h of BN_HOSTS){try{return await getJSON(h+pathq,{});}catch(e){last=e;}}throw last||new Error("binance unreachable");}
-// USD→INR (Binance quotes in USDT). Cached 6h; fallback chain so ₹ is always populated.
 let fxRate=null,fxAt=0;
 async function usdInr(){
   if(fxRate&&Date.now()-fxAt<6*3600e3)return fxRate;
-  const tries=[
-    async()=>{const j=await getJSON("https://open.er-api.com/v6/latest/USD",{});return j&&j.rates&&j.rates.INR;},
-    async()=>{const j=await getJSON("https://api.frankfurter.app/latest?from=USD&to=INR",{});return j&&j.rates&&j.rates.INR;},
-  ];
+  const tries=[async()=>{const j=await getJSON("https://open.er-api.com/v6/latest/USD",{});return j&&j.rates&&j.rates.INR;},
+    async()=>{const j=await getJSON("https://api.frankfurter.app/latest?from=USD&to=INR",{});return j&&j.rates&&j.rates.INR;}];
   for(const t of tries){try{const r=await t();if(r>0){fxRate=r;fxAt=Date.now();return r;}}catch(e){}}
-  return fxRate||86;   // sensible fallback if all FX sources fail
+  return fxRate||86;
 }
-// universe: top USDT pairs by 24h quote volume (liquidity = what you can actually trade)
+const isStableBase=b=>STABLE_TK.has(b)||/(UP|DOWN|BULL|BEAR)$/.test(b)||/^\d/.test(b);
 let cryUniAt=0;
 async function ensureCryptoUniverse(){
-  if(DEMO){cgOk=true;return CRYPTO;}
+  if(DEMO){cgOk=true;cryptoMode="binance";return CRYPTO;}
   if(cryUniAt&&Date.now()-cryUniAt<600000)return CRYPTO;
+  // 1) Prefer CoinDCX — real INR prices, no key
   try{
-    const arr=await binanceGet("/api/v3/ticker/24hr");
-    if(!Array.isArray(arr))throw new Error("bad ticker");
-    const rows=arr.filter(t=>t.symbol&&t.symbol.endsWith("USDT"))
-      .map(t=>({sym:t.symbol,tk:t.symbol.slice(0,-4),qv:+t.quoteVolume||0}))
-      .filter(r=>!STABLE_TK.has(r.tk) && !/(UP|DOWN|BULL|BEAR)$/.test(r.tk) && !/^\d/.test(r.tk))
-      .sort((a,b)=>b.qv-a.qv).slice(0,CG_TOP);
+    const t=await cdxGetTicker();
+    const rows=t.filter(x=>x.market&&x.market.endsWith("INR"))
+      .map(x=>{const base=x.market.slice(0,-3);return {market:x.market,base,last:+x.last_price,vol:(+x.volume||0)*(+x.last_price||0)};})
+      .filter(r=>r.last>0&&!isStableBase(r.base)).sort((a,b)=>b.vol-a.vol).slice(0,CG_TOP);
+    if(rows.length>=8){
+      CRYPTO=rows.map(r=>({sym:r.market,pair:"I-"+r.base+"_INR",binance:r.base+"USDT",tk:r.base,name:r.base,cls:"Crypto",src:"cg"}));
+      cryptoMode="coindcx";cryUniAt=Date.now();cgOk=true;return CRYPTO;
+    }
+  }catch(e){/* CoinDCX unreachable (geo?) → fall back to Binance */}
+  // 2) Fallback: Binance top USDT pairs by volume (global ₹ reference)
+  try{
+    const arr=await binanceGet("/api/v3/ticker/24hr");if(!Array.isArray(arr))throw new Error("bad ticker");
+    const rows=arr.filter(t=>t.symbol&&t.symbol.endsWith("USDT")).map(t=>({sym:t.symbol,tk:t.symbol.slice(0,-4),qv:+t.quoteVolume||0}))
+      .filter(r=>!isStableBase(r.tk)).sort((a,b)=>b.qv-a.qv).slice(0,CG_TOP);
     if(rows.length>=8){CRYPTO=rows.map(r=>({sym:r.sym,binance:r.sym,tk:r.tk,name:r.tk,cls:"Crypto",src:"cg"}));cryUniAt=Date.now();}
-    cgOk=true;
-  }catch(e){cgOk=false;}   // keep last universe; per-coin fetch will flag failure
+    cryptoMode="binance";cgOk=true;
+  }catch(e){cgOk=false;}
   return CRYPTO;
 }
-async function loadBinance(asset,tf){
+// dispatcher
+async function loadCrypto(asset,tf){
   if(DEMO){let h=0;for(const ch of asset.sym)h=(h*31+ch.charCodeAt(0))>>>0;return synth(h,300,0.03);}
+  if(cryptoMode==="coindcx" && asset.pair){
+    try{ return await loadCoinDCX(asset,tf); }
+    catch(e){ if(asset.binance) return await loadBinance(asset,tf); throw e; } // per-coin fallback
+  }
+  return loadBinance(asset,tf);
+}
+async function loadCoinDCX(asset,tf){
+  const interval=CDX_INT[tf]||"1h";
+  const j=await getJSON(`https://public.coindcx.com/market_data/candles?pair=${encodeURIComponent(asset.pair)}&interval=${interval}&limit=400`,{});
+  if(!Array.isArray(j)||!j.length)throw new Error("no candles");
+  const rows=j.slice().reverse();  // CoinDCX returns newest-first → ascending
+  const close=[],high=[],low=[],times=[];
+  for(const k of rows){const c=+k.close;if(!isFinite(c))continue;close.push(c);high.push(+k.high);low.push(+k.low);times.push(+k.time);}
+  if(cdxTicker[asset.sym]>0&&close.length)close[close.length-1]=cdxTicker[asset.sym];  // pin to live ticker
+  return {close,high,low,times,price:close[close.length-1],mtime:Date.now()};
+}
+async function loadBinance(asset,tf){
   const interval=BN_INT[tf]||"1h";
   const j=await binanceGet(`/api/v3/klines?symbol=${asset.binance}&interval=${interval}&limit=400`);
   if(!Array.isArray(j)||!j.length)throw new Error("no klines");
   const r=await usdInr();
   const close=[],high=[],low=[],times=[];
-  for(const k of j){ // [openTime,o,h,l,c,vol,closeTime,...]
-    const c=+k[4];if(!isFinite(c))continue;
-    close.push(c*r);high.push(+k[2]*r);low.push(+k[3]*r);times.push(+k[6]);
-  }
-  return {close,high,low,times,price:close[close.length-1],mtime:times[times.length-1]};
+  for(const k of j){const c=+k[4];if(!isFinite(c))continue;close.push(c*r);high.push(+k[2]*r);low.push(+k[3]*r);times.push(+k[6]);}
+  return {close,high,low,times,price:close[close.length-1],mtime:Date.now()};
 }
 
 /* ============================================================
@@ -366,7 +393,7 @@ function processAsset(asset,data,tf){
   const isIndex=!!asset.isIndex||asset.sym.startsWith('^');
   const asofMs=data.mtime||(data.times?data.times[data.times.length-1]:Date.now());
   return {asset,sig,setup,since,action,reasons,scope,dec,isIndex,tf,asof:fmtTime(asofMs),
-    priceTag:asset.src==='cg'?'live':(marketOpen()?'LIVE (broker)':'prev close'),series:data.close.slice(-80)};
+    priceTag:asset.src==='cg'?(cryptoMode==='coindcx'?'live · CoinDCX ₹':'live · global ₹'):(marketOpen()?'LIVE (broker)':'prev close'),series:data.close.slice(-80)};
 }
 async function scan(tab,tf){
   const ttl = tab==='Crypto' ? TTL_CRYPTO : (tf==='intraday'?TTL_INTRA:TTL_DAILY);
@@ -382,7 +409,7 @@ async function scan(tab,tf){
   const keyOf={};stockAssets.forEach(a=>{keyOf[a.sym]=DEMO?("DEMO|"+a.sym):keyForAsset(a);});
   const res=await mapLimit(uni,10,async asset=>{
     let data;
-    if(asset.src==='cg'){data=await loadBinance(asset,tf);}       // crypto: Binance klines (native timeframe), never needs login
+    if(asset.src==='cg'){data=await loadCrypto(asset,tf);}        // crypto: CoinDCX INR (or Binance fallback), never needs login
     else{
       if(!DEMO && !li) throw new Error("login");                  // skip Upstox instantly when not logged in
       const key=keyOf[asset.sym];if(!key)throw new Error("no instrument key");
@@ -412,10 +439,15 @@ async function liveQuotes(tab){
   const cryptoIds=uni.filter(a=>a.src==='cg');
   if(cryptoIds.length && !DEMO){
     if(cgPriceCache && Date.now()-cgPriceAt<8000){Object.assign(out,cgPriceCache);}
-    else{try{const arr=await binanceGet("/api/v3/ticker/price");const r=await usdInr();
-      const bySym={};if(Array.isArray(arr))arr.forEach(x=>{bySym[x.symbol]=+x.price*r;});
-      const c={};cryptoIds.forEach(x=>{if(bySym[x.binance])c[x.sym]=bySym[x.binance];});cgPriceCache=c;cgPriceAt=Date.now();Object.assign(out,c);}
-      catch(e){if(cgPriceCache)Object.assign(out,cgPriceCache);}}}
+    else if(cryptoMode==="coindcx"){
+      try{await cdxGetTicker();const c={};cryptoIds.forEach(x=>{if(cdxTicker[x.sym]>0)c[x.sym]=cdxTicker[x.sym];});cgPriceCache=c;cgPriceAt=Date.now();Object.assign(out,c);}
+      catch(e){if(cgPriceCache)Object.assign(out,cgPriceCache);}
+    }else{
+      try{const arr=await binanceGet("/api/v3/ticker/price");const r=await usdInr();
+        const bySym={};if(Array.isArray(arr))arr.forEach(x=>{bySym[x.symbol]=+x.price*r;});
+        const c={};cryptoIds.forEach(x=>{if(bySym[x.binance])c[x.sym]=bySym[x.binance];});cgPriceCache=c;cgPriceAt=Date.now();Object.assign(out,c);}
+        catch(e){if(cgPriceCache)Object.assign(out,cgPriceCache);}
+    }}
   if(!DEMO){await ensureInstruments();const stocks=uni.filter(a=>a.src==='upstox');const keyOf={};stocks.forEach(a=>keyOf[a.sym]=keyForAsset(a));
     const keys=stocks.map(a=>keyOf[a.sym]).filter(Boolean);
     try{const ltp=await upstoxLTP(keys);stocks.forEach(a=>{const k=keyOf[a.sym];if(k&&ltp[k])out[a.sym]=ltp[k];});}catch(e){}}
@@ -460,4 +492,4 @@ if(require.main===module){
   });
 }
 module.exports={IND,computeSignal,buildSetup,buildReasons,signalSince,actionNow,parseCandles,authURL,scan,universeFor,fmtTime,
-  loadBinance,ensureCryptoUniverse,usdInr,resampleSeries,tfCfg,getCRYPTO:()=>CRYPTO};
+  loadBinance,loadCoinDCX,loadCrypto,ensureCryptoUniverse,usdInr,resampleSeries,tfCfg,getCRYPTO:()=>CRYPTO,getMode:()=>cryptoMode};
