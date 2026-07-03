@@ -117,6 +117,7 @@
     <label class="rl">Capital ₹ <input id="capital" type="number" min="0" step="1000" value="100000" oninput="onRiskChange()"></label>
     <label class="rl">Risk / trade % <input id="riskpct" type="number" min="0.1" max="100" step="0.1" value="1" oninput="onRiskChange()"></label>
     <label class="rl" title="1 = delivery (full cash). ~5 = intraday MIS leverage.">Leverage × <input id="lev" type="number" min="1" max="20" step="1" value="1" oninput="onRiskChange()"></label>
+    <label class="rl" title="Use the engine's per-trade suggested leverage ceiling instead of a fixed number"><input type="checkbox" id="autoLev" onchange="onRiskChange()" style="width:auto"> Auto (engine-suggested)</label>
     <span class="pstat" id="riskNote"></span>
     <button class="btn export" onclick="exportCSV()">⬇ Export to Excel (CSV)</button>
   </div>
@@ -146,6 +147,8 @@ const id4=s=>s.replace(/[^a-z0-9]/gi,'');
 const getCap=()=>Math.max(0,+document.getElementById('capital').value||0);
 const getRisk=()=>Math.max(0,+document.getElementById('riskpct').value||0);
 const getLev=()=>Math.max(1,+document.getElementById('lev').value||1);
+const autoLevOn=()=>document.getElementById('autoLev').checked;
+const levFor=setup=>autoLevOn()?Math.max(1,setup.suggestedLev||1):getLev();  // per-trade suggested ceiling, or your fixed number
 
 async function getStatus(){try{status=await(await fetch('/api/status')).json();}catch{status={};}drawLogin();updateMkt();}
 function drawLogin(){
@@ -157,14 +160,14 @@ function drawLogin(){
 }
 function onRiskChange(){const lev=getLev();document.getElementById('riskNote').textContent=`Risk ${money(getCap()*getRisk()/100,0)} per trade (${getRisk()}% of ${money(getCap(),0)}) · ${lev>1?lev+'× leverage (intraday margin)':'1× delivery (full cash)'}`;if(lastResults.length)render(lastResults);}
 function posSize(asset,setup){
-  const cap=getCap(),rp=getRisk(),lev=getLev();
+  const cap=getCap(),rp=getRisk(),lev=levFor(setup);
   const car=cap*rp/100, rpu=Math.abs(setup.entry-setup.stop), fr=asset.cls==='Crypto';
   let q=rpu>0?car/rpu:0; q=fr?+q.toFixed(6):Math.floor(q);
   const posValue=q*setup.entry;            // total amount invested (full position value)
   const margin=posValue/lev;               // cash you must block in the account
   const actualRisk=q*rpu;                  // ₹ lost if the stop is hit (≈ your risk budget)
   const profit=setup.targets.map(t=>q*Math.abs(t-setup.entry)); // ₹ gained at each target
-  return {qty:q,posValue,margin,actualRisk,profit,fractional:fr,lev,capWarn:margin>cap};
+  return {qty:q,posValue,margin,actualRisk,profit,fractional:fr,lev,suggested:setup.suggestedLev||1,auto:autoLevOn(),capWarn:margin>cap};
 }
 
 let scanning=false;
@@ -226,7 +229,8 @@ function renderBacktest(d){
   const pf=a.profitFactor>=99?'∞':a.profitFactor.toFixed(2), beat=a.assets?Math.round(a.beatBuyHold/a.assets*100):0;
   const rows=d.perAsset.map(x=>`<tr><td>${x.name||x.sym}</td><td>${x.trades}</td><td>${x.winRate.toFixed(0)}%</td><td class="${x.totalRet>=0?'up':'down'}">${x.totalRet>=0?'+':''}${x.totalRet.toFixed(1)}%</td><td class="${x.buyHold>=0?'up':'down'}">${x.buyHold>=0?'+':''}${x.buyHold.toFixed(1)}%</td><td class="down">${x.maxDD.toFixed(1)}%</td></tr>`).join('');
   el.innerHTML=`<div class="btpanel">
-    <h3>📊 Backtest — ${d.tab} · ${d.tf} · ${a.assets} assets${d.cached?' (cached)':''}${d.demo?' · ⚠ DEMO data':''}</h3>
+    <h3>📊 Backtest — ${d.tab} · ${d.tf}${d.cached?' (cached)':''}${d.demo?' · ⚠ DEMO data':''}</h3>
+    <div class="small" style="margin:2px 0 4px">Covered <b>${a.withData} of ${a.attempted}</b> assets · <b>${a.assets}</b> produced trades · ${a.noSignal} had no signal in this window${a.failed?` · ${a.failed} couldn't load${d.loggedIn===false?' (log in for stocks/commodities)':''}`:''}</div>
     <div class="btwarn">⚠️ <b>Read before trusting these numbers.</b> Long-only: enter on a BUY signal, exit at Target 1 or the ATR stop. <b>No brokerage, STT, taxes or slippage are deducted — your real results will be worse.</b> Past performance does not predict the future. This is one test of a fallible strategy. The key comparison is <b>Strategy vs Buy &amp; Hold</b>: if the strategy isn't clearly ahead of just holding, the signals aren't adding value for you.</div>
     <div class="btgrid">
       <div class="btstat"><div class="k">Win rate</div><div class="v">${a.winRate.toFixed(0)}%</div></div>
@@ -297,8 +301,9 @@ function ladder(s){const v=[s.stop,s.entry,...s.targets],lo=Math.min(...v),hi=Ma
 function sizingBlock(asset,setup){const z=posSize(asset,setup);if(z.qty<=0)return `<div class="sizing"><h4>📐 Your trade plan</h4><div class="row"><span>Set Capital & Risk % above to size this trade.</span></div></div>`;
   const q=z.fractional?z.qty:z.qty.toLocaleString('en-IN');
   const unit=asset.cls==='Crypto'?(asset.tk||'units'):'shares';
-  return `<div class="sizing"><h4>📐 Your trade plan · ${getRisk()}% risk${z.lev>1?` · ${z.lev}× margin`:''}</h4>
+  return `<div class="sizing"><h4>📐 Your trade plan · ${getRisk()}% risk${z.lev>1?` · ${z.lev}× ${z.auto?'(auto)':''}`:' · 1× (delivery)'}</h4>
     <div class="row"><span>Buy quantity</span><span class="v">${q} ${unit}</span></div>
+    <div class="row"><span>⚙️ Suggested leverage (ceiling)</span><span class="v">${z.suggested}×${z.auto?' · in use':''}</span></div>
     <div class="row"><span>💰 Amount to invest</span><span class="v">${money(z.posValue,0)}</span></div>
     <div class="row"><span>💵 Cash / margin to block</span><span class="v">${money(z.margin,0)}${z.capWarn?' ⚠ &gt; your capital':''}</span></div>
     <div class="row"><span>🟢 Max profit @ T1 / T2 / T3</span><span class="v profit">${money(z.profit[0],0)} · ${money(z.profit[1],0)} · ${money(z.profit[2],0)}</span></div>
@@ -308,11 +313,11 @@ function exportCSV(){if(!lastResults.length){alert('Wait for a scan.');return;}
   const buys=lastResults.filter(r=>r.sig.verdict==='BUY').sort((a,b)=>b.sig.score-a.sig.score);
   const sells=lastResults.filter(r=>r.sig.verdict==='SELL').sort((a,b)=>a.sig.score-b.sig.score);
   const rows=[...buys,...sells];
-  const head=['Symbol','Name','Class','Verdict','Action','Signal Since','Score','Trade Type','As Of','Current Price','Entry Low','Entry High','Stop Loss','Target 1','Target 2','Target 3','Return T1%','Return T2%','Return T3%','Risk:Reward','Risk%','Holding','Qty','Amount to Invest','Leverage','Cash/Margin Needed','Max Loss','Profit T1','Profit T2','Profit T3','Reasons For','Reasons Against','Invalidation'];
+  const head=['Symbol','Name','Class','Verdict','Action','Signal Since','Score','Trade Type','As Of','Current Price','Entry Low','Entry High','Stop Loss','Target 1','Target 2','Target 3','Return T1%','Return T2%','Return T3%','Risk:Reward','Risk%','Holding','Qty','Amount to Invest','Suggested Leverage','Leverage Used','Cash/Margin Needed','Max Loss','Profit T1','Profit T2','Profit T3','Reasons For','Reasons Against','Invalidation'];
   const esc=v=>{const s=String(v==null?'':v);return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s;};const n=(v,d=2)=>v==null?'':Number(v).toFixed(d);
   const L=[head.join(',')];
   rows.forEach(r=>{const s=r.setup,z=posSize(r.asset,s);
-    L.push([r.asset.sym,r.asset.name,r.asset.cls,r.sig.verdict,r.action.txt.replace(/[🟢🔴⏳⏸]/g,'').trim(),r.action.since||'',r.sig.score,s.type,r.asof,n(r.sig.price),n(s.entryLo),n(s.entryHi),n(s.stop),n(s.targets[0]),n(s.targets[1]),n(s.targets[2]),n(s.ret[0]),n(s.ret[1]),n(s.ret[2]),s.rrr.toFixed(1)+':1',n(s.riskPct),s.hold,z.qty,n(z.posValue,0),z.lev+'x',n(z.margin,0),n(z.actualRisk,0),n(z.profit[0],0),n(z.profit[1],0),n(z.profit[2],0),r.reasons.forR.join(' | '),r.reasons.against.join(' | '),r.reasons.inval.join(' | ')].map(esc).join(','));});
+    L.push([r.asset.sym,r.asset.name,r.asset.cls,r.sig.verdict,r.action.txt.replace(/[🟢🔴⏳⏸]/g,'').trim(),r.action.since||'',r.sig.score,s.type,r.asof,n(r.sig.price),n(s.entryLo),n(s.entryHi),n(s.stop),n(s.targets[0]),n(s.targets[1]),n(s.targets[2]),n(s.ret[0]),n(s.ret[1]),n(s.ret[2]),s.rrr.toFixed(1)+':1',n(s.riskPct),s.hold,z.qty,n(z.posValue,0),z.suggested+'x',z.lev+'x',n(z.margin,0),n(z.actualRisk,0),n(z.profit[0],0),n(z.profit[1],0),n(z.profit[2],0),r.reasons.forR.join(' | '),r.reasons.against.join(' | '),r.reasons.inval.join(' | ')].map(esc).join(','));});
   const stamp=new Date().toISOString().slice(0,16).replace(/[:T]/g,'-');
   const b=new Blob(['﻿'+L.join('\n')],{type:'text/csv;charset=utf-8;'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=`growth-intelligence_${activeTab.replace(/\W+/g,'-')}_${timeframe}_${stamp}.csv`;document.body.appendChild(a);a.click();a.remove();}
 

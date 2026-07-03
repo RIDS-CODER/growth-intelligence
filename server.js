@@ -98,8 +98,13 @@ function buildSetup(sig,tf){
   const entry=anchor, R=P.stopMult*atr, stop=anchor-dir*R;   // stop sits BELOW support → accounts for a deeper fall
   const targets=P.t.map(m=>entry+dir*m*R), ret=targets.map(t=>dir*(t-entry)/entry*100);
   const gap=dir*(entry-price)/price*100;                     // how far the ideal entry is from current price (−ve = below)
+  const riskPct=Math.abs(dir*(stop-entry)/entry*100);
+  // Suggested leverage CEILING: leverage so a stop-out costs ~15% of the margin blocked, capped by volatility.
+  const volPct=atr/price*100;
+  const cap = volPct>4 ? 3 : volPct>2 ? 4 : 5;               // more volatile → lower ceiling
+  const suggestedLev = Math.max(1, Math.min(cap, Math.floor(15/Math.max(riskPct,0.1))));
   return {type,hold:P.hold,dir,entryLo:eLo,entryHi:eHi,entry,stop,targets,ret,rrr:P.t[0],atr,
-    riskPct:Math.abs(dir*(stop-entry)/entry*100),entryGapPct:gap,support:dir>0?anchor:null,resistance:dir<0?anchor:null};
+    riskPct,entryGapPct:gap,support:dir>0?anchor:null,resistance:dir<0?anchor:null,suggestedLev};
 }
 function actionNow(sig,setup,since,fmt){
   const dir=setup.dir,p=sig.price,t=fmt(since.sinceTime),ago=since.barsAgo;
@@ -490,10 +495,10 @@ async function backtest(tab,tf){
   const ck="bt:"+tab+":"+tf;const hit=cGet(ck,10*60*1000);if(hit)return{...hit,cached:true};
   if(tab==='Crypto'||tab==='All')try{await ensureCryptoUniverse();}catch(e){}
   if(tab==='Commodities'||tab==='All')try{await ensureCommodities();}catch(e){}
-  const uni=universeFor(tab).slice(0,80);      // cap for runtime
+  const uni=universeFor(tab).slice(0,250);     // cover the whole universe (single tabs are well under this)
   const li=loggedIn();
   if(!DEMO && uni.some(a=>a.src==='upstox') && li)await ensureInstruments();
-  const per=await mapLimit(uni,8,async asset=>{
+  const per=await mapLimit(uni,10,async asset=>{
     let data;
     if(asset.src==='cg')data=await loadCrypto(asset,tf);
     else{if(!DEMO&&!li)throw new Error("login");const key=DEMO?("D|"+asset.sym):keyForAsset(asset);if(!key)throw new Error("nokey");
@@ -501,12 +506,15 @@ async function backtest(tab,tf){
     if(!data||data.close.length<120)throw new Error("short");
     return {sym:asset.sym,name:asset.name,cls:asset.cls,...backtestSeries(data.close,data.high,data.low,tf)};
   });
-  const ok=per.filter(x=>x&&!x.__err&&x.trades>0);
+  const withData=per.filter(x=>x&&!x.__err);          // fetched + backtested (may have 0 trades)
+  const failed=per.filter(x=>x&&x.__err).length;      // couldn't fetch (login/data)
+  const ok=withData.filter(x=>x.trades>0);            // produced at least one trade
+  const noSignal=withData.length-ok.length;           // valid data but strategy never fired
   let TT=0,TW=0,sumRet=0,sumBH=0,pfW=0,pfL=0;
   ok.forEach(a=>{TT+=a.trades;TW+=a.wins;sumRet+=a.totalRet;sumBH+=a.buyHold;
     const losses=a.trades-a.wins;pfW+=a.avgWin/100*a.wins;pfL+=Math.abs(a.avgLoss/100*losses);});
-  const agg={assets:ok.length,totalTrades:TT,winRate:TT?TW/TT*100:0,
-    avgTotalRet:ok.length?sumRet/ok.length:0,avgBuyHold:ok.length?sumBH/ok.length:0,
+  const agg={assets:ok.length,attempted:uni.length,withData:withData.length,noSignal,failed,totalTrades:TT,
+    winRate:TT?TW/TT*100:0,avgTotalRet:ok.length?sumRet/ok.length:0,avgBuyHold:ok.length?sumBH/ok.length:0,
     profitFactor:pfL>0?pfW/pfL:(pfW>0?99:0),beatBuyHold:ok.filter(a=>a.totalRet>a.buyHold).length};
   const out={tab,tf,agg,perAsset:ok.sort((a,b)=>b.totalRet-a.totalRet),ts:Date.now(),demo:DEMO,loggedIn:li};
   if(ok.length)cSet(ck,out);
