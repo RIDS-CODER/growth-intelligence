@@ -45,6 +45,19 @@
   .infobox h3{font-size:15px;margin-bottom:8px;color:#c7d2fe}.infobox p{margin-bottom:8px}
   .infobox .scale{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
   .infobox .pill{padding:3px 11px;border-radius:20px;font-size:11px;font-family:var(--mono);font-weight:700}
+  .btpanel{background:linear-gradient(160deg,var(--panel),var(--panel2));border:1px solid rgba(240,185,11,.35);border-radius:14px;padding:16px 18px;margin:14px 0}
+  .btpanel h3{font-size:15px;margin-bottom:4px}
+  .btwarn{font-size:11.5px;color:#e8c766;background:var(--hold-bg);border:1px solid rgba(240,185,11,.3);border-radius:9px;padding:9px 12px;margin:10px 0;line-height:1.6}
+  .btgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin:12px 0}
+  .btstat{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:11px 12px}
+  .btstat .k{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
+  .btstat .v{font-family:var(--mono);font-size:19px;font-weight:800;margin-top:3px}
+  .bttable{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px}
+  .bttable th{text-align:right;color:var(--muted);font-weight:600;padding:6px 8px;border-bottom:1px solid var(--line);font-size:10.5px;text-transform:uppercase;letter-spacing:.4px}
+  .bttable th:first-child,.bttable td:first-child{text-align:left}
+  .bttable td{text-align:right;padding:6px 8px;border-bottom:1px solid var(--line);font-family:var(--mono)}
+  .bttable tr:hover td{background:rgba(255,255,255,.02)}
+  .up{color:var(--buy)}.down{color:var(--sell)}
   .summary{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:20px 0 6px}@media(max-width:760px){.summary{grid-template-columns:1fr}}
   .hero{border-radius:16px;padding:18px 20px;border:1px solid var(--line);background:linear-gradient(160deg,var(--panel),var(--panel2))}
   .hero .lbl{font-size:11px;text-transform:uppercase;letter-spacing:1.2px;color:var(--muted);font-weight:700}
@@ -111,9 +124,11 @@
     <label class="rl">Min score <input id="minscore" type="range" min="0" max="60" step="1" value="0" oninput="onMinScore()"> <b id="minscoreVal" style="color:var(--txt);font-family:var(--mono);min-width:22px;display:inline-block">0</b></label>
     <button class="btn" id="strongBtn" onclick="setStrong()">💪 Strong only</button>
     <button class="btn" onclick="toggleScoreInfo()">ℹ️ What does the score mean?</button>
+    <button class="btn" id="btBtn" onclick="runBacktest()" style="border-color:var(--hold);background:var(--hold-bg);color:var(--hold)">📊 Backtest this tab</button>
     <span class="pstat" id="filterNote"></span>
   </div>
   <div id="scoreInfo" style="display:none"></div>
+  <div id="btPanel"></div>
 
   <div class="summary" id="summary"></div>
   <h2 class="sec">📈 BUY now / Long <span class="count" id="buyCount">0</span></h2>
@@ -196,6 +211,35 @@ function scoreInfoHTML(){return `<div class="infobox">
   </div>
   <p class="small">Use the <b>Min score</b> slider above to hide weaker setups (e.g. set it to 20 to see only moderate-and-up). Higher conviction still does <b>not</b> mean a guaranteed win — even strong setups fail, which is exactly why every card carries a stop-loss and invalidation. The score helps you <b>prioritise</b>, not predict.</p>
 </div>`;}
+
+async function runBacktest(){
+  const btn=document.getElementById('btBtn'),el=document.getElementById('btPanel');
+  btn.disabled=true;btn.textContent='📊 Backtesting…';
+  el.innerHTML='<div class="btpanel">⏳ Backtesting <b>'+activeTab+'</b> on <b>'+timeframe+'</b> — running the exact signals over history. Can take 10–30s'+(activeTab==='All'?' (All is large — try one tab for speed)':'')+'.</div>';
+  try{const d=await(await fetch('/api/backtest?tab='+encodeURIComponent(activeTab)+'&tf='+timeframe)).json();if(d.error)throw new Error(d.error);renderBacktest(d);}
+  catch(e){el.innerHTML='<div class="btpanel">Backtest error: '+e.message+'</div>';}
+  btn.disabled=false;btn.textContent='📊 Backtest this tab';
+}
+function renderBacktest(d){
+  const el=document.getElementById('btPanel'),a=d.agg;
+  if(!a||!a.assets){el.innerHTML='<div class="btpanel"><b>No backtest results.</b> '+((d.loggedIn===false&&activeTab!=='Crypto')?'Stocks &amp; commodities need Upstox login — log in first, or try the Crypto tab (no login needed).':'Not enough history for this selection.')+'</div>';return;}
+  const pf=a.profitFactor>=99?'∞':a.profitFactor.toFixed(2), beat=a.assets?Math.round(a.beatBuyHold/a.assets*100):0;
+  const rows=d.perAsset.map(x=>`<tr><td>${x.name||x.sym}</td><td>${x.trades}</td><td>${x.winRate.toFixed(0)}%</td><td class="${x.totalRet>=0?'up':'down'}">${x.totalRet>=0?'+':''}${x.totalRet.toFixed(1)}%</td><td class="${x.buyHold>=0?'up':'down'}">${x.buyHold>=0?'+':''}${x.buyHold.toFixed(1)}%</td><td class="down">${x.maxDD.toFixed(1)}%</td></tr>`).join('');
+  el.innerHTML=`<div class="btpanel">
+    <h3>📊 Backtest — ${d.tab} · ${d.tf} · ${a.assets} assets${d.cached?' (cached)':''}${d.demo?' · ⚠ DEMO data':''}</h3>
+    <div class="btwarn">⚠️ <b>Read before trusting these numbers.</b> Long-only: enter on a BUY signal, exit at Target 1 or the ATR stop. <b>No brokerage, STT, taxes or slippage are deducted — your real results will be worse.</b> Past performance does not predict the future. This is one test of a fallible strategy. The key comparison is <b>Strategy vs Buy &amp; Hold</b>: if the strategy isn't clearly ahead of just holding, the signals aren't adding value for you.</div>
+    <div class="btgrid">
+      <div class="btstat"><div class="k">Win rate</div><div class="v">${a.winRate.toFixed(0)}%</div></div>
+      <div class="btstat"><div class="k">Total trades</div><div class="v">${a.totalTrades}</div></div>
+      <div class="btstat"><div class="k">Profit factor</div><div class="v">${pf}</div></div>
+      <div class="btstat"><div class="k">Avg strategy return</div><div class="v ${a.avgTotalRet>=0?'up':'down'}">${a.avgTotalRet>=0?'+':''}${a.avgTotalRet.toFixed(1)}%</div></div>
+      <div class="btstat"><div class="k">Avg buy &amp; hold</div><div class="v ${a.avgBuyHold>=0?'up':'down'}">${a.avgBuyHold>=0?'+':''}${a.avgBuyHold.toFixed(1)}%</div></div>
+      <div class="btstat"><div class="k">Assets beating hold</div><div class="v">${beat}%</div></div>
+    </div>
+    <table class="bttable"><thead><tr><th>Asset</th><th>Trades</th><th>Win%</th><th>Strategy</th><th>Buy&amp;Hold</th><th>Max DD</th></tr></thead><tbody>${rows}</tbody></table>
+    <p class="small" style="margin-top:8px">Profit factor = gross wins ÷ gross losses (&gt;1 = profitable before costs; you want comfortably &gt;1.3 to survive real fees/taxes). Strategy &amp; Buy&amp;Hold are the average per-asset return over the tested window. Fewer than ~30 trades total = too small a sample to trust.</p>
+  </div>`;
+}
 
 function render(results){
   lastResults=results;

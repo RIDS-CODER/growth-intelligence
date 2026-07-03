@@ -61,7 +61,15 @@ function computeSignal(close,high,low,thr){
   const prior=close.slice(0,n),hi20=IND.highest(prior,20),lo20=IND.lowest(prior,20);
   let wsum=0,ssum=0;out.forEach(o=>{wsum+=o.weight;ssum+=o.score*o.weight;});
   const score=wsum?Math.round(ssum/wsum*100):0,verdict=score>=thr?'BUY':score<=-thr?'SELL':'HOLD';
-  return {score,verdict,components:out,price,rsiV:rsi[n],s50:s50[n],s200:s200[n],atr:IND.atr(close,high,low)[n],hi20,lo20,brkUp:price>=hi20,brkDn:price<=lo20};
+  return {score,verdict,components:out,price,rsiV:rsi[n],s50:s50[n],s200:s200[n],atr:IND.atr(close,high,low)[n],hi20,lo20,brkUp:price>=hi20,brkDn:price<=lo20,
+    bbL:bb.lower[n],bbU:bb.upper[n],ema20:IND.ema(close,20)[n],lo10:IND.lowest(low,10),hi10:IND.highest(high,10)};
+}
+// nearest support below price (for buy-the-dip entries) / resistance above (for shorts)
+function nearestLevel(dir,price,atr,cands){
+  if(dir>0){const c=cands.filter(v=>v!=null&&v<price);let s=c.length?Math.max(...c):price-0.8*atr;
+    return Math.min(Math.max(s,price-3*atr), price-0.12*atr);}          // strictly below, not absurdly far
+  const c=cands.filter(v=>v!=null&&v>price);let r=c.length?Math.min(...c):price+0.8*atr;
+  return Math.max(Math.min(r,price+3*atr), price+0.12*atr);
 }
 function signalSince(close,high,low,times){
   const e12=IND.ema(close,12),e26=IND.ema(close,26),rsi=IND.rsi(close,14),mh=IND.macd(close).hist;
@@ -77,22 +85,40 @@ function buildSetup(sig,tf){
   if(tf==='intraday')type=((sig.verdict==='BUY'&&sig.brkUp)||(sig.verdict==='SELL'&&sig.brkDn))?'Breakout':'Intraday';
   else type=(sig.verdict==='BUY'&&sig.brkUp)||(sig.verdict==='SELL'&&sig.brkDn)?'Breakout':'Swing';
   const P=TYPE[type],atr=sig.atr,price=sig.price;
-  let eLo,eHi;
-  if(type==='Breakout'){eLo=price;eHi=price+dir*0.45*atr;}else if(type==='Intraday'){eLo=price-0.2*atr;eHi=price+0.2*atr;}else{eLo=price-dir*0.5*atr;eHi=price+dir*0.2*atr;}
-  if(eLo>eHi){const t=eLo;eLo=eHi;eHi=t;}
-  const entry=(eLo+eHi)/2,R=P.stopMult*atr,stop=entry-dir*R,targets=P.t.map(m=>entry+dir*m*R),ret=targets.map(t=>dir*(t-entry)/entry*100);
-  return {type,hold:P.hold,dir,entryLo:eLo,entryHi:eHi,entry,stop,targets,ret,rrr:P.t[0],atr,riskPct:Math.abs(dir*(stop-entry)/entry*100)};
+  let eLo,eHi,anchor;
+  if(type==='Breakout'){
+    // momentum: enter on the break, near current price
+    eLo=price;eHi=price+dir*0.45*atr;if(eLo>eHi){const t=eLo;eLo=eHi;eHi=t;}anchor=(eLo+eHi)/2;
+  }else{
+    // pullback: buy the DIP into support (long) / rally into resistance (short) — not the current price
+    const cands = dir>0 ? [sig.lo10,sig.bbL,sig.ema20,sig.s50] : [sig.hi10,sig.bbU,sig.ema20,sig.s50];
+    anchor = nearestLevel(dir,price,atr,cands);
+    eLo=anchor-0.25*atr;eHi=anchor+0.25*atr;
+  }
+  const entry=anchor, R=P.stopMult*atr, stop=anchor-dir*R;   // stop sits BELOW support → accounts for a deeper fall
+  const targets=P.t.map(m=>entry+dir*m*R), ret=targets.map(t=>dir*(t-entry)/entry*100);
+  const gap=dir*(entry-price)/price*100;                     // how far the ideal entry is from current price (−ve = below)
+  return {type,hold:P.hold,dir,entryLo:eLo,entryHi:eHi,entry,stop,targets,ret,rrr:P.t[0],atr,
+    riskPct:Math.abs(dir*(stop-entry)/entry*100),entryGapPct:gap,support:dir>0?anchor:null,resistance:dir<0?anchor:null};
 }
 function actionNow(sig,setup,since,fmt){
   const dir=setup.dir,p=sig.price,t=fmt(since.sinceTime),ago=since.barsAgo;
   const s=since.sinceTime?`Signal active since ${t} (${ago} bar${ago===1?'':'s'} ago)`:'';
+  const d=v=>v<5?v.toFixed(4):v.toFixed(2);                       // price-appropriate decimals (crypto vs stocks)
+  const gap=Math.abs(setup.entryGapPct||0).toFixed(1);
   if(sig.verdict==='HOLD')return{cls:'wait',txt:'⏸ NO TRADE — signals mixed, stay flat',since:s};
-  if(dir>0){if(p>=setup.entryLo&&p<=setup.entryHi)return{cls:'now',txt:'🟢 BUY NOW — price in entry zone',since:s};
-    if(p<setup.entryLo)return{cls:'wait',txt:`⏳ WAIT to BUY — limit ₹${setup.entryLo.toFixed(2)}–${setup.entryHi.toFixed(2)}`,since:s};
-    return{cls:'wait',txt:`⏳ DON'T CHASE — buy a dip to ₹${setup.entryLo.toFixed(2)}–${setup.entryHi.toFixed(2)}`,since:s};}
-  if(p<=setup.entryHi&&p>=setup.entryLo)return{cls:'exit',txt:'🔴 SELL / EXIT NOW — price in sell zone',since:s};
-  if(p>setup.entryHi)return{cls:'exit',txt:`⏳ WAIT to SELL — trigger near ₹${setup.entryHi.toFixed(2)}`,since:s};
-  return{cls:'exit',txt:'🔴 SELL signal — already below zone',since:s};
+  if(dir>0){
+    if(p>=setup.entryLo&&p<=setup.entryHi)return{cls:'now',txt:`🟢 BUY NOW — price is at the support/dip zone (₹${d(setup.entryLo)}–${d(setup.entryHi)})`,since:s};
+    if(p>setup.entryHi)return{cls:'wait',txt:setup.type==='Breakout'
+      ? `🟢 BUY the breakout — ₹${d(setup.entryLo)}–${d(setup.entryHi)}`
+      : `⏳ WAIT for the dip — set a buy limit at ₹${d(setup.entryLo)}–${d(setup.entryHi)} (support, ~${gap}% below now). Don't chase.`,since:s};
+    return{cls:'wait',txt:`⚠ Below support — price already broke the dip zone; let it stabilize, it may keep falling to the stop`,since:s};
+  }
+  if(p<=setup.entryHi&&p>=setup.entryLo)return{cls:'exit',txt:`🔴 SELL / SHORT NOW — price is at the resistance zone (₹${d(setup.entryLo)}–${d(setup.entryHi)})`,since:s};
+  if(p<setup.entryLo)return{cls:'exit',txt:setup.type==='Breakout'
+    ? `🔴 SELL the breakdown — ₹${d(setup.entryHi)}–${d(setup.entryLo)}`
+    : `⏳ WAIT for the bounce — sell/short into ₹${d(setup.entryLo)}–${d(setup.entryHi)} (resistance, ~${gap}% above now)`,since:s};
+  return{cls:'exit',txt:`⚠ Above resistance — extended; wait for a pullback into the zone`,since:s};
 }
 function buildReasons(sig,setup,marketOpen,isCrypto){
   const dir=setup.dir,f=v=>v==null?'n/a':(+v).toFixed(2),forR=[],against=[],inval=[];
@@ -395,6 +421,97 @@ function processAsset(asset,data,tf){
   return {asset,sig,setup,since,action,reasons,scope,dec,isIndex,tf,asof:fmtTime(asofMs),
     priceTag:asset.src==='cg'?(cryptoMode==='coindcx'?'live · CoinDCX ₹':'live · global ₹'):(marketOpen()?'LIVE (broker)':'prev close'),series:data.close.slice(-80)};
 }
+/* ============================================================
+   BACKTEST — lookahead-free, long-only, ATR stop / T1 target
+   ============================================================ */
+function scoreSeriesArr(close,high,low){
+  const n=close.length;
+  const s50=IND.sma(close,50),s200=IND.sma(close,200),e12=IND.ema(close,12),e26=IND.ema(close,26),
+        rsi=IND.rsi(close,14),m=IND.macd(close),bb=IND.bollinger(close),st=IND.stoch(close,high,low),
+        roc=IND.roc(close,12),atr=IND.atr(close,high,low);
+  const scores=new Array(n).fill(0);
+  for(let i=0;i<n;i++){
+    let ws=0,ss=0;const add=(sc,w)=>{ws+=w;ss+=sc*w;};const price=close[i];
+    if(s50[i]!=null&&s200[i]!=null)add(Math.max(-1,Math.min(1,(s50[i]-s200[i])/s200[i]*15)),1.4);
+    if(e12[i]!=null&&e26[i]!=null)add(Math.max(-1,Math.min(1,(e12[i]-e26[i])/e26[i]*25)),1.2);
+    if(rsi[i]!=null){const r=rsi[i];let sc=r<30?(30-r)/30:r>70?-(r-70)/30:(50-r)/50*0.4;add(Math.max(-1,Math.min(1,sc)),1.1);}
+    if(m.hist[i]!=null)add(Math.max(-1,Math.min(1,m.hist[i]/price*200)),1.2);
+    if(bb.upper[i]!=null){const pos=(price-bb.mid[i])/((bb.upper[i]-bb.lower[i])/2||1);add(Math.max(-1,Math.min(1,-pos*0.7)),0.8);}
+    if(st.k[i]!=null){let k=st.k[i];let sc=k<20?(20-k)/20:k>80?-(k-80)/20:(50-k)/50*0.3;if(st.d[i]!=null)sc+=(st.k[i]-st.d[i])/100;add(Math.max(-1,Math.min(1,sc)),0.7);}
+    if(roc[i]!=null)add(Math.max(-1,Math.min(1,roc[i]/10)),0.9);
+    scores[i]=ws?Math.round(ss/ws*100):0;
+  }
+  return {scores,atr};
+}
+function backtestSeries(close,high,low,tf){
+  const {scores,atr}=scoreSeriesArr(close,high,low);
+  const thr=tf==='daily'?20:12;
+  const P=TYPE[tf==='daily'?'Swing':'Intraday'], stopMult=P.stopMult, tMul=P.t[0];  // exit at Target 1
+  const ema20=IND.ema(close,20), sma50=IND.sma(close,50), bb=IND.bollinger(close), n=close.length;
+  const lo10=new Array(n).fill(null), prevHi20=new Array(n).fill(null);
+  for(let i=0;i<n;i++){
+    if(i>=9){let m=Infinity;for(let j=i-9;j<=i;j++)m=Math.min(m,low[j]);lo10[i]=m;}
+    if(i>=20){let m=-Infinity;for(let j=i-20;j<i;j++)m=Math.max(m,high[j]);prevHi20[i]=m;}
+  }
+  let pos=0,entry=0,stop=0,tgt=0,entryIdx=-1,pending=null;
+  const rets=[]; let eq=1,peak=1,mdd=0; const FILLWIN=6;
+  for(let i=50;i<n;i++){
+    // manage open position
+    if(pos===1 && i>entryIdx){
+      let ex=null;
+      if(low[i]<=stop)ex=stop; else if(high[i]>=tgt)ex=tgt; else if(scores[i]<=-thr)ex=close[i];
+      if(ex!=null){const r=ex/entry-1;rets.push(r);eq*=(1+r);peak=Math.max(peak,eq);mdd=Math.min(mdd,eq/peak-1);pos=0;}
+    }
+    // pending pullback-limit fill (buy the dip only if it actually dips to support within the window)
+    if(pos===0 && pending && i>pending.sig){
+      if(low[i]<=pending.limit){entry=pending.limit;stop=entry-pending.R;tgt=entry+tMul*pending.R;pos=1;entryIdx=i;pending=null;}
+      else if(i>=pending.exp)pending=null;   // dip never came → no trade (honest: some signals are missed)
+    }
+    // new BUY signal → breakout=market entry, else pullback-limit at support
+    if(pos===0 && !pending && scores[i]>=thr && atr[i]>0){
+      const R=stopMult*atr[i], brk=prevHi20[i]!=null && close[i]>=prevHi20[i];
+      if(brk){entry=close[i];stop=entry-R;tgt=entry+tMul*R;pos=1;entryIdx=i;}
+      else{const sup=nearestLevel(1,close[i],atr[i],[lo10[i],bb.lower[i],ema20[i],sma50[i]]);pending={limit:sup,R,sig:i,exp:i+FILLWIN};}
+    }
+  }
+  if(pos===1){const r=close[n-1]/entry-1;rets.push(r);eq*=(1+r);peak=Math.max(peak,eq);mdd=Math.min(mdd,eq/peak-1);}
+  const wins=rets.filter(r=>r>0),losses=rets.filter(r=>r<=0);
+  const sumW=wins.reduce((a,b)=>a+b,0),sumL=losses.reduce((a,b)=>a+b,0);
+  const bh=close[50]>0?close[n-1]/close[50]-1:0;
+  return {trades:rets.length,wins:wins.length,
+    winRate:rets.length?wins.length/rets.length*100:0,
+    avgRet:rets.length?(rets.reduce((a,b)=>a+b,0)/rets.length)*100:0,
+    avgWin:wins.length?sumW/wins.length*100:0,
+    avgLoss:losses.length?sumL/losses.length*100:0,
+    profitFactor:sumL<0?sumW/Math.abs(sumL):(sumW>0?99:0),
+    totalRet:(eq-1)*100,maxDD:mdd*100,buyHold:bh*100};
+}
+async function backtest(tab,tf){
+  const ck="bt:"+tab+":"+tf;const hit=cGet(ck,10*60*1000);if(hit)return{...hit,cached:true};
+  if(tab==='Crypto'||tab==='All')try{await ensureCryptoUniverse();}catch(e){}
+  if(tab==='Commodities'||tab==='All')try{await ensureCommodities();}catch(e){}
+  const uni=universeFor(tab).slice(0,80);      // cap for runtime
+  const li=loggedIn();
+  if(!DEMO && uni.some(a=>a.src==='upstox') && li)await ensureInstruments();
+  const per=await mapLimit(uni,8,async asset=>{
+    let data;
+    if(asset.src==='cg')data=await loadCrypto(asset,tf);
+    else{if(!DEMO&&!li)throw new Error("login");const key=DEMO?("D|"+asset.sym):keyForAsset(asset);if(!key)throw new Error("nokey");
+      data=DEMO?synth(hashStr(asset.sym),tf==='daily'?500:400,0.03):await upstoxCandles(key,tf);}
+    if(!data||data.close.length<120)throw new Error("short");
+    return {sym:asset.sym,name:asset.name,cls:asset.cls,...backtestSeries(data.close,data.high,data.low,tf)};
+  });
+  const ok=per.filter(x=>x&&!x.__err&&x.trades>0);
+  let TT=0,TW=0,sumRet=0,sumBH=0,pfW=0,pfL=0;
+  ok.forEach(a=>{TT+=a.trades;TW+=a.wins;sumRet+=a.totalRet;sumBH+=a.buyHold;
+    const losses=a.trades-a.wins;pfW+=a.avgWin/100*a.wins;pfL+=Math.abs(a.avgLoss/100*losses);});
+  const agg={assets:ok.length,totalTrades:TT,winRate:TT?TW/TT*100:0,
+    avgTotalRet:ok.length?sumRet/ok.length:0,avgBuyHold:ok.length?sumBH/ok.length:0,
+    profitFactor:pfL>0?pfW/pfL:(pfW>0?99:0),beatBuyHold:ok.filter(a=>a.totalRet>a.buyHold).length};
+  const out={tab,tf,agg,perAsset:ok.sort((a,b)=>b.totalRet-a.totalRet),ts:Date.now(),demo:DEMO,loggedIn:li};
+  if(ok.length)cSet(ck,out);
+  return out;
+}
 async function scan(tab,tf){
   const ttl = tab==='Crypto' ? TTL_CRYPTO : (tf==='intraday'?TTL_INTRA:TTL_DAILY);
   const ck="scan:"+tab+":"+tf;const hit=cGet(ck,ttl);if(hit)return{...hit,cached:true};
@@ -473,6 +590,8 @@ async function handler(req,res){
       const data=await scan(u.searchParams.get("tab")||"Stocks",u.searchParams.get("tf")||"intraday");return sendJSON(res,data);}
     if(p==="/api/quotes"){
       return sendJSON(res,{quotes:await liveQuotes(u.searchParams.get("tab")||"Stocks"),loggedIn:loggedIn(),ts:Date.now()});}
+    if(p==="/api/backtest"){
+      const data=await backtest(u.searchParams.get("tab")||"Stocks",u.searchParams.get("tf")||"daily");return sendJSON(res,data);}
     // static — tolerate index.html living in /public OR the repo root
     let rel=path.normalize(p==="/"?"/index.html":p).replace(/^(\.\.[/\\])+/,"").replace(/^[/\\]+/,"");
     const candidates=[path.join(__dirname,"public",rel),path.join(__dirname,rel)];
@@ -492,4 +611,5 @@ if(require.main===module){
   });
 }
 module.exports={IND,computeSignal,buildSetup,buildReasons,signalSince,actionNow,parseCandles,authURL,scan,universeFor,fmtTime,
-  loadBinance,loadCoinDCX,loadCrypto,ensureCryptoUniverse,usdInr,resampleSeries,tfCfg,getCRYPTO:()=>CRYPTO,getMode:()=>cryptoMode};
+  loadBinance,loadCoinDCX,loadCrypto,ensureCryptoUniverse,usdInr,resampleSeries,tfCfg,getCRYPTO:()=>CRYPTO,getMode:()=>cryptoMode,
+  backtestSeries,scoreSeriesArr,backtest};
