@@ -47,6 +47,13 @@
   .infobox .pill{padding:3px 11px;border-radius:20px;font-size:11px;font-family:var(--mono);font-weight:700}
   .btpanel{background:linear-gradient(160deg,var(--panel),var(--panel2));border:1px solid rgba(240,185,11,.35);border-radius:14px;padding:16px 18px;margin:14px 0}
   .btpanel h3{font-size:15px;margin-bottom:4px}
+  .btscore{display:flex;align-items:center;gap:16px;margin:12px 0 10px}
+  .btscore .ring{flex:none;width:92px;height:92px;border-radius:50%;border:5px solid var(--line);display:grid;place-items:center;text-align:center}
+  .btscore .num{font-size:30px;font-weight:800;line-height:1;font-family:var(--mono)}
+  .btscore .den{font-size:10px;color:var(--muted);font-family:var(--mono)}
+  .btscore .verdict{flex:1}
+  .btscore .vtxt{font-size:16px;font-weight:800;margin-bottom:5px;line-height:1.3}
+  .btscore .vsum{font-size:12.5px;line-height:1.6}
   .btwarn{font-size:11.5px;color:#e8c766;background:var(--hold-bg);border:1px solid rgba(240,185,11,.3);border-radius:9px;padding:9px 12px;margin:10px 0;line-height:1.6}
   .btgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin:12px 0}
   .btstat{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:11px 12px}
@@ -74,6 +81,7 @@
   .verdict{font-size:13px;font-weight:800;padding:3px 11px;border-radius:7px;letter-spacing:.5px}
   .verdict.BUY{background:var(--buy-bg);color:var(--buy)}.verdict.SELL{background:var(--sell-bg);color:var(--sell)}.verdict.HOLD{background:var(--hold-bg);color:var(--hold)}
   .ttype{font-size:10px;font-family:var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-top:4px}
+  .btmini{display:inline-block;margin-top:6px;padding:1px 8px;border:1px solid var(--faint);border-radius:6px;font-family:var(--mono);font-size:11px;font-weight:700;cursor:help}
   .asof{font-size:10px;font-family:var(--mono);color:var(--accent2);margin-top:3px}
   .tc .bd{padding:0 16px 16px;border-top:1px solid var(--line);display:none}.tc.open .bd{display:block}
   .toplineRet{font-family:var(--mono);font-weight:800;font-size:15px}
@@ -226,22 +234,33 @@ async function runBacktest(){
 function renderBacktest(d){
   const el=document.getElementById('btPanel'),a=d.agg;
   if(!a||!a.assets){el.innerHTML='<div class="btpanel"><b>No backtest results.</b> '+((d.loggedIn===false&&activeTab!=='Crypto')?'Stocks &amp; commodities need Upstox login — log in first, or try the Crypto tab (no login needed).':'Not enough history for this selection.')+'</div>';return;}
+  const sc=a.btScore, col=sc>=70?'var(--buy)':sc>=55?'var(--accent2)':sc>=40?'var(--hold)':'var(--sell)';
   const pf=a.profitFactor>=99?'∞':a.profitFactor.toFixed(2), beat=a.assets?Math.round(a.beatBuyHold/a.assets*100):0;
   const rows=d.perAsset.map(x=>`<tr><td>${x.name||x.sym}</td><td>${x.trades}</td><td>${x.winRate.toFixed(0)}%</td><td class="${x.totalRet>=0?'up':'down'}">${x.totalRet>=0?'+':''}${x.totalRet.toFixed(1)}%</td><td class="${x.buyHold>=0?'up':'down'}">${x.buyHold>=0?'+':''}${x.buyHold.toFixed(1)}%</td><td class="down">${x.maxDD.toFixed(1)}%</td></tr>`).join('');
   el.innerHTML=`<div class="btpanel">
-    <h3>📊 Backtest — ${d.tab} · ${d.tf}${d.cached?' (cached)':''}${d.demo?' · ⚠ DEMO data':''}</h3>
-    <div class="small" style="margin:2px 0 4px">Covered <b>${a.withData} of ${a.attempted}</b> assets · <b>${a.assets}</b> produced trades · ${a.noSignal} had no signal in this window${a.failed?` · ${a.failed} couldn't load${d.loggedIn===false?' (log in for stocks/commodities)':''}`:''}</div>
-    <div class="btwarn">⚠️ <b>Read before trusting these numbers.</b> Long-only: enter on a BUY signal, exit at Target 1 or the ATR stop. <b>No brokerage, STT, taxes or slippage are deducted — your real results will be worse.</b> Past performance does not predict the future. This is one test of a fallible strategy. The key comparison is <b>Strategy vs Buy &amp; Hold</b>: if the strategy isn't clearly ahead of just holding, the signals aren't adding value for you.</div>
-    <div class="btgrid">
-      <div class="btstat"><div class="k">Win rate</div><div class="v">${a.winRate.toFixed(0)}%</div></div>
-      <div class="btstat"><div class="k">Total trades</div><div class="v">${a.totalTrades}</div></div>
-      <div class="btstat"><div class="k">Profit factor</div><div class="v">${pf}</div></div>
-      <div class="btstat"><div class="k">Avg strategy return</div><div class="v ${a.avgTotalRet>=0?'up':'down'}">${a.avgTotalRet>=0?'+':''}${a.avgTotalRet.toFixed(1)}%</div></div>
-      <div class="btstat"><div class="k">Avg buy &amp; hold</div><div class="v ${a.avgBuyHold>=0?'up':'down'}">${a.avgBuyHold>=0?'+':''}${a.avgBuyHold.toFixed(1)}%</div></div>
-      <div class="btstat"><div class="k">Assets beating hold</div><div class="v">${beat}%</div></div>
+    <h3>📊 Backtest — ${d.tab} · ${d.tf}${d.cached?' (cached)':''}${d.demo?' · ⚠ DEMO':''}</h3>
+    <div class="btscore">
+      <div class="ring" style="border-color:${col}"><div class="num" style="color:${col}">${sc}</div><div class="den">/ 100</div></div>
+      <div class="verdict">
+        <div class="vtxt" style="color:${col}">${a.btVerdict}</div>
+        <div class="vsum">Strategy averaged <b class="${a.avgTotalRet>=0?'up':'down'}">${a.avgTotalRet>=0?'+':''}${a.avgTotalRet.toFixed(1)}%</b> vs just holding <b class="${a.avgBuyHold>=0?'up':'down'}">${a.avgBuyHold>=0?'+':''}${a.avgBuyHold.toFixed(1)}%</b> · won <b>${a.winRate.toFixed(0)}%</b> of <b>${a.totalTrades}</b> trades.</div>
+        <div class="vsum" style="color:var(--muted)">Higher = better. Beat buy-and-hold on ${beat}% of assets. ${a.lowSample?'⚠ Small sample — treat as rough.':''} Gross of fees/taxes.</div>
+      </div>
     </div>
-    <table class="bttable"><thead><tr><th>Asset</th><th>Trades</th><th>Win%</th><th>Strategy</th><th>Buy&amp;Hold</th><th>Max DD</th></tr></thead><tbody>${rows}</tbody></table>
-    <p class="small" style="margin-top:8px">Profit factor = gross wins ÷ gross losses (&gt;1 = profitable before costs; you want comfortably &gt;1.3 to survive real fees/taxes). Strategy &amp; Buy&amp;Hold are the average per-asset return over the tested window. Fewer than ~30 trades total = too small a sample to trust.</p>
+    <button class="btn" style="font-size:12px;padding:6px 12px" onclick="const x=document.getElementById('btDetails');x.style.display=x.style.display==='none'?'block':'none';this.textContent=x.style.display==='none'?'▸ Show the numbers':'▾ Hide the numbers'">▸ Show the numbers</button>
+    <div id="btDetails" style="display:none;margin-top:12px">
+      <div class="small" style="margin:2px 0 6px">Covered <b>${a.withData} of ${a.attempted}</b> assets · <b>${a.assets}</b> produced trades · ${a.noSignal} had no signal${a.failed?` · ${a.failed} couldn't load${d.loggedIn===false?' (log in for stocks)':''}`:''}</div>
+      <div class="btgrid">
+        <div class="btstat"><div class="k">Win rate</div><div class="v">${a.winRate.toFixed(0)}%</div></div>
+        <div class="btstat"><div class="k">Total trades</div><div class="v">${a.totalTrades}</div></div>
+        <div class="btstat"><div class="k">Profit factor</div><div class="v">${pf}</div></div>
+        <div class="btstat"><div class="k">Avg return</div><div class="v ${a.avgTotalRet>=0?'up':'down'}">${a.avgTotalRet>=0?'+':''}${a.avgTotalRet.toFixed(1)}%</div></div>
+        <div class="btstat"><div class="k">Buy &amp; hold</div><div class="v ${a.avgBuyHold>=0?'up':'down'}">${a.avgBuyHold>=0?'+':''}${a.avgBuyHold.toFixed(1)}%</div></div>
+        <div class="btstat"><div class="k">Avg max drawdown</div><div class="v down">${a.avgMaxDD.toFixed(1)}%</div></div>
+      </div>
+      <table class="bttable"><thead><tr><th>Asset</th><th>Trades</th><th>Win%</th><th>Strategy</th><th>Buy&amp;Hold</th><th>Max DD</th></tr></thead><tbody>${rows}</tbody></table>
+      <p class="small" style="margin-top:8px">⚠️ No brokerage/STT/taxes/slippage deducted — real results are worse. Past ≠ future. The <b>Backtest Score</b> blends: did it beat buy-and-hold (40%), profit factor (25%), win rate (15%), drawdown control (20%), dimmed if too few trades. It's a quick read, not proof — validate forward with small size.</p>
+    </div>
   </div>`;
 }
 
@@ -266,14 +285,20 @@ function renderSummary(bb,bs){const make=(r,isBuy)=>{if(!r)return `<div class="h
   document.getElementById('summary').innerHTML=make(bb,true)+make(bs,false);}
 function renderCards(id,list,isBuy){const el=document.getElementById(id);if(!list.length){el.innerHTML='<div class="empty">No '+(isBuy?'long':'short')+' setups this scan.</div>';return;}el.innerHTML=list.map((r,i)=>card(r,i,isBuy)).join('');}
 function sparkline(a,isBuy){if(!a||a.length<2)return'';const lo=Math.min(...a),hi=Math.max(...a),sp=hi-lo||1,W=340,H=46;const pts=a.map((v,i)=>`${(i/(a.length-1)*W).toFixed(1)},${(H-(v-lo)/sp*H).toFixed(1)}`).join(' ');return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><polyline points="${pts}" fill="none" stroke="${isBuy?'#16c784':'#ea3943'}" stroke-width="1.6"/></svg>`;}
-function card(r,i,isBuy){const{asset,sig,setup,reasons,dec,action,scope,asof,isIndex,priceTag,series}=r,f=v=>fmtVal(v,dec,isIndex),open=i<3?'open':'';
+function btBadge(bt){
+  if(!bt)return '';
+  if(bt.score==null)return `<div class="btmini" style="border-color:var(--faint);color:var(--muted)" title="Too few historical trades to grade">BT –</div>`;
+  const s=bt.score,c=s>=70?'var(--buy)':s>=55?'var(--accent2)':s>=40?'var(--hold)':'var(--sell)';
+  return `<div class="btmini" style="border-color:${c};color:${c}" title="How this name backtested on this timeframe (${bt.trades} trades). Higher = better.">BT ${s}</div>`;
+}
+function card(r,i,isBuy){const{asset,sig,setup,reasons,dec,action,scope,asof,isIndex,priceTag,series,bt}=r,f=v=>fmtVal(v,dec,isIndex),open=i<3?'open':'';
   const tn=['Target 1','Target 2','Target 3'];
   const tgts=setup.targets.map((t,k)=>`<div class="lv t${k+1}"><div class="k">${tn[k]}</div><div class="v">${f(t)}</div><div class="r">${setup.ret[k]>=0?'+':''}${setup.ret[k].toFixed(1)}%</div></div>`).join('');
   return `<div class="tc ${open} ${isBuy?'':'sellcard'}">
     <div class="hd" onclick="this.parentNode.classList.toggle('open')">
       <div class="l"><div class="name">${asset.name}</div><div class="sub">${asset.tk?asset.tk+' · ':''}${asset.sym} · ${asset.cls}</div>
         <div class="ttype">${setup.type} · score ${sig.score>0?'+':''}${sig.score}</div><div class="asof">📡 ${asof||'—'} · ${priceTag}</div></div>
-      <div class="r"><span class="verdict ${sig.verdict}">${sig.verdict}</span><div class="toplineRet" style="color:${isBuy?'var(--buy)':'var(--sell)'};margin-top:6px">${setup.ret[0]>=0?'+':''}${setup.ret[0].toFixed(1)}%→T1</div></div>
+      <div class="r"><span class="verdict ${sig.verdict}">${sig.verdict}</span><div class="toplineRet" style="color:${isBuy?'var(--buy)':'var(--sell)'};margin-top:6px">${setup.ret[0]>=0?'+':''}${setup.ret[0].toFixed(1)}%→T1</div>${btBadge(bt)}</div>
     </div>
     <div class="bd">
       <div class="action ${action.cls}">${action.txt}<span class="since">${action.since||''}</span></div>

@@ -412,18 +412,24 @@ function scopeFlag(sig){
   }
 }
 function processAsset(asset,data,tf){
-  if(!data||!data.close||data.close.length<40)throw new Error("no data");
+  if(!data||!data.close||data.close.length<41)throw new Error("no data");
   const thr=tf==='daily'?20:12;             // looser threshold on all intraday frames = more opportunities
-  const sig=computeSignal(data.close,data.high,data.low,thr);
-  const setup=buildSetup(sig,tf==='daily'?'daily':'intraday');
-  const since=signalSince(data.close,data.high,data.low,data.times);
+  const live=data.price;                    // current (live) price
+  // Decide the signal on CLOSED candles only (drop the still-forming last bar) so a 15m call
+  // doesn't wobble every minute — it only changes when a new candle closes.
+  const cl=data.close.slice(0,-1),hi=data.high.slice(0,-1),lo=data.low.slice(0,-1),tm=data.times?data.times.slice(0,-1):null;
+  const sig=computeSignal(cl,hi,lo,thr);
+  const setup=buildSetup(sig,tf==='daily'?'daily':'intraday');   // entry/stop/targets anchored to the closed bar (stable)
+  sig.closedPrice=sig.price; sig.price=live;                     // now use LIVE price for the action + the card's Current Price
+  const since=signalSince(cl,hi,lo,tm);
   const action=actionNow(sig,setup,since,fmtTime);
   const reasons=buildReasons(sig,setup,marketOpen(),asset.src==='cg');
   const scope=scopeFlag(sig);
   const dec=asset.src==='cg'&&data.price<5?4:2;
   const isIndex=!!asset.isIndex||asset.sym.startsWith('^');
   const asofMs=data.mtime||(data.times?data.times[data.times.length-1]:Date.now());
-  return {asset,sig,setup,since,action,reasons,scope,dec,isIndex,tf,asof:fmtTime(asofMs),
+  const bt = cl.length>=120 ? assetBtScore(backtestSeries(cl,hi,lo,tf)) : null;   // historical grade for this name (same data, no extra fetch)
+  return {asset,sig,setup,since,action,reasons,scope,bt,dec,isIndex,tf,asof:fmtTime(asofMs),
     priceTag:asset.src==='cg'?(cryptoMode==='coindcx'?'live · CoinDCX ₹':'live · global ₹'):(marketOpen()?'LIVE (broker)':'prev close'),series:data.close.slice(-80)};
 }
 /* ============================================================
@@ -491,6 +497,17 @@ function backtestSeries(close,high,low,tf){
     profitFactor:sumL<0?sumW/Math.abs(sumL):(sumW>0?99:0),
     totalRet:(eq-1)*100,maxDD:mdd*100,buyHold:bh*100};
 }
+// one-asset 0–100 backtest grade (same idea as the aggregate score)
+function assetBtScore(b){
+  if(!b || b.trades<5) return {score:null,trades:b?b.trades:0};
+  const edge=Math.max(0,Math.min(1,(b.totalRet-b.buyHold)/40+0.5));       // vs buy-and-hold
+  const pfN =Math.max(0,Math.min(1,((b.profitFactor>=99?2.5:b.profitFactor)-1)/1.5));
+  const wrN =Math.max(0,Math.min(1,b.winRate/100));
+  const ddN =Math.max(0,Math.min(1,1-Math.abs(b.maxDD)/50));
+  let s=Math.round(40*edge+25*pfN+15*wrN+20*ddN);
+  if(b.trades<15) s=Math.min(s,50);                                        // small sample → capped
+  return {score:s,trades:b.trades,totalRet:b.totalRet,buyHold:b.buyHold,winRate:b.winRate};
+}
 async function backtest(tab,tf){
   const ck="bt:"+tab+":"+tf;const hit=cGet(ck,10*60*1000);if(hit)return{...hit,cached:true};
   if(tab==='Crypto'||tab==='All')try{await ensureCryptoUniverse();}catch(e){}
@@ -510,12 +527,26 @@ async function backtest(tab,tf){
   const failed=per.filter(x=>x&&x.__err).length;      // couldn't fetch (login/data)
   const ok=withData.filter(x=>x.trades>0);            // produced at least one trade
   const noSignal=withData.length-ok.length;           // valid data but strategy never fired
-  let TT=0,TW=0,sumRet=0,sumBH=0,pfW=0,pfL=0;
-  ok.forEach(a=>{TT+=a.trades;TW+=a.wins;sumRet+=a.totalRet;sumBH+=a.buyHold;
+  let TT=0,TW=0,sumRet=0,sumBH=0,sumDD=0,pfW=0,pfL=0;
+  ok.forEach(a=>{TT+=a.trades;TW+=a.wins;sumRet+=a.totalRet;sumBH+=a.buyHold;sumDD+=a.maxDD;
     const losses=a.trades-a.wins;pfW+=a.avgWin/100*a.wins;pfL+=Math.abs(a.avgLoss/100*losses);});
+  const winRate=TT?TW/TT*100:0, avgTotalRet=ok.length?sumRet/ok.length:0, avgBuyHold=ok.length?sumBH/ok.length:0,
+        avgMaxDD=ok.length?sumDD/ok.length:0, profitFactor=pfL>0?pfW/pfL:(pfW>0?99:0), beatBuyHold=ok.filter(a=>a.totalRet>a.buyHold).length;
+  // ---- one simple 0–100 Backtest Score (like the signal score) ----
+  const edge = ok.length ? beatBuyHold/ok.length : 0;                       // fraction of assets that beat holding
+  const pfN  = Math.max(0,Math.min(1,((profitFactor>=99?2.5:profitFactor)-1)/1.5));
+  const wrN  = Math.max(0,Math.min(1,winRate/100));
+  const ddN  = Math.max(0,Math.min(1,1-Math.abs(avgMaxDD)/50));
+  let btScore = Math.round(40*edge + 25*pfN + 15*wrN + 20*ddN);             // weighted blend
+  const lowSample = TT < 30;
+  if(lowSample) btScore = Math.min(btScore, 40);                            // can't score high on too few trades
+  const btVerdict = lowSample ? "Too few trades to judge — not enough data yet"
+    : btScore>=70 ? "Strong in backtest — still confirm with small live trades first"
+    : btScore>=55 ? "Promising — it beat buy-and-hold; validate forward with tiny size"
+    : btScore>=40 ? "Mixed — only a marginal edge; paper-trade before risking money"
+    : "Weak — it did NOT beat just holding; don't trade this as-is";
   const agg={assets:ok.length,attempted:uni.length,withData:withData.length,noSignal,failed,totalTrades:TT,
-    winRate:TT?TW/TT*100:0,avgTotalRet:ok.length?sumRet/ok.length:0,avgBuyHold:ok.length?sumBH/ok.length:0,
-    profitFactor:pfL>0?pfW/pfL:(pfW>0?99:0),beatBuyHold:ok.filter(a=>a.totalRet>a.buyHold).length};
+    winRate,avgTotalRet,avgBuyHold,avgMaxDD,profitFactor,beatBuyHold,btScore,btVerdict,lowSample};
   const out={tab,tf,agg,perAsset:ok.sort((a,b)=>b.totalRet-a.totalRet),ts:Date.now(),demo:DEMO,loggedIn:li};
   if(ok.length)cSet(ck,out);
   return out;
