@@ -169,10 +169,21 @@
 </div>
 <script>
 let activeTab="Stocks",timeframe="30m",lastResults=[],status={},refreshAt=0;
-let cryptoCcy="INR", usdtInr=0;                        // ₹/USDT toggle + CoinDCX's own USDT→INR rate
-const CRYPTO_N=80;                                     // top coins fetched client-side from CoinDCX
+let cryptoCcy="INR", usdtInr=0, cryptoSource="";       // ₹/USDT toggle + USDT→INR rate + active source label
+const CRYPTO_N=40;                                     // top coins fetched client-side (kept small so it's fast, not hanging)
 const CDX_INT_C={"15m":"15m","30m":"30m","1h":"1h","4h":"4h","6h":"6h","12h":"12h","daily":"1d"};
 const STABLE_C=new Set(["USDT","USDC","DAI","TUSD","BUSD","FDUSD","USDP","USDD","EUR","GBP","AEUR"]);
+// fetch with a hard timeout so a blocked/slow request can never hang the UI
+function fetchT(url,opts,ms){return Promise.race([fetch(url,opts||{}),new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),ms||6000))]);}
+// make sure we always have a USDT→INR rate so the toggle ALWAYS converts (CoinDCX ratio first, FX fallback)
+async function ensureRate(){
+  if(usdtInr>0)return usdtInr;
+  try{const t=await fetchT("https://api.coindcx.com/exchange/ticker",{},6000).then(r=>r.json());
+    if(Array.isArray(t)){const bt=t.find(x=>x.market==='BTCINR'),bu=t.find(x=>x.market==='BTCUSDT'),ui=t.find(x=>x.market==='USDTINR');
+      if(bt&&bu&&+bu.last_price>0)usdtInr=+bt.last_price/+bu.last_price;else if(ui&&+ui.last_price>0)usdtInr=+ui.last_price;}}catch(e){}
+  if(!(usdtInr>0)){try{const j=await fetchT("https://open.er-api.com/v6/latest/USD",{},6000).then(r=>r.json());if(j&&j.rates&&j.rates.INR)usdtInr=j.rates.INR;}catch(e){}}
+  return usdtInr;
+}
 const money=(v,d=2)=>v==null?'—':'₹'+Number(v).toLocaleString('en-IN',{minimumFractionDigits:d,maximumFractionDigits:d});
 const fmtVal=(v,d,ix)=>v==null?'—':(ix?Number(v).toLocaleString('en-IN',{minimumFractionDigits:d,maximumFractionDigits:d})+' pts':money(v,d));
 // crypto price in the chosen currency (server computes in ₹; convert to USDT for display via CoinDCX's rate)
@@ -182,16 +193,18 @@ function cryptoPrice(v){if(v==null)return '—';
 const fmtR=r=>v=>r.asset.cls==='Crypto'?cryptoPrice(v):fmtVal(v,r.dec,r.isIndex);   // per-result formatter
 async function mapLimitClient(items,limit,fn){const ret=[];let i=0;async function w(){while(i<items.length){const j=i++;ret[j]=await fn(items[j]);}}await Promise.all(Array.from({length:Math.min(limit,items.length)},w));return ret;}
 async function fetchCoinDCXCrypto(tf){
-  const t=await fetch("https://api.coindcx.com/exchange/ticker").then(r=>r.json());
+  const t=await fetchT("https://api.coindcx.com/exchange/ticker",{},7000).then(r=>r.json());   // 1 call, times out fast if blocked
   if(!Array.isArray(t))throw new Error("cdx ticker");
-  const usd=t.find(x=>x.market==='USDTINR'); if(usd&&+usd.last_price>0)usdtInr=+usd.last_price;
+  // USDT→INR from CoinDCX's own markets (BTCINR/BTCUSDT ratio, else USDTINR)
+  const bt=t.find(x=>x.market==='BTCINR'),bu=t.find(x=>x.market==='BTCUSDT'),ui=t.find(x=>x.market==='USDTINR');
+  if(bt&&bu&&+bu.last_price>0)usdtInr=+bt.last_price/+bu.last_price; else if(ui&&+ui.last_price>0)usdtInr=+ui.last_price;
   const rows=t.filter(x=>x.market&&x.market.endsWith("INR"))
     .map(x=>{const base=x.market.slice(0,-3);return {market:x.market,base,last:+x.last_price,vol:(+x.volume||0)*(+x.last_price||0)};})
     .filter(r=>r.last>0&&!STABLE_C.has(r.base)&&!/(UP|DOWN|BULL|BEAR)$/.test(r.base)&&!/^\d/.test(r.base))
     .sort((a,b)=>b.vol-a.vol).slice(0,CRYPTO_N);
   const interval=CDX_INT_C[tf]||"1h";
-  const assets=await mapLimitClient(rows,8,async r=>{
-    try{const j=await fetch(`https://public.coindcx.com/market_data/candles?pair=I-${r.base}_INR&interval=${interval}&limit=300`).then(x=>x.json());
+  const assets=await mapLimitClient(rows,10,async r=>{
+    try{const j=await fetchT(`https://public.coindcx.com/market_data/candles?pair=I-${r.base}_INR&interval=${interval}&limit=300`,{},7000).then(x=>x.json());
       if(!Array.isArray(j)||j.length<41)return null;
       const rev=j.slice().reverse();const close=[],high=[],low=[],times=[];
       for(const k of rev){const c=+k.close;if(!isFinite(c))continue;close.push(c);high.push(+k.high);low.push(+k.low);times.push(+k.time);}
@@ -297,7 +310,7 @@ function monitorTrades(prices){
 }
 async function monitorPoll(){
   const a=loadTrades();if(!a.length)return;const prices={};
-  if(a.some(t=>t.cls==='Crypto')){try{const t=await fetch('https://api.coindcx.com/exchange/ticker').then(r=>r.json());if(Array.isArray(t))t.forEach(x=>prices[x.market]=+x.last_price);}catch(e){}}
+  if(a.some(t=>t.cls==='Crypto')){try{const t=await fetchT('https://api.coindcx.com/exchange/ticker',{},6000).then(r=>r.json());if(Array.isArray(t))t.forEach(x=>prices[x.market]=+x.last_price);}catch(e){}}
   if(a.some(t=>t.cls!=='Crypto')&&!status.demo){try{const d=await(await fetch('/api/quotes?tab=All')).json();if(d.quotes)Object.assign(prices,d.quotes);}catch(e){}}
   monitorTrades(prices);
 }
@@ -329,7 +342,7 @@ async function checkReversals(){
     for(const tf in byTf){try{
       const assets=[];
       await mapLimitClient(byTf[tf],6,async t=>{try{const base=t.sym.slice(0,-3);
-        const j=await fetch(`https://public.coindcx.com/market_data/candles?pair=I-${base}_INR&interval=${CDX_INT_C[tf]||'1h'}&limit=300`).then(r=>r.json());
+        const j=await fetchT(`https://public.coindcx.com/market_data/candles?pair=I-${base}_INR&interval=${CDX_INT_C[tf]||'1h'}&limit=300`,{},6000).then(r=>r.json());
         if(Array.isArray(j)&&j.length>=41){const rev=j.slice().reverse();const close=[],high=[],low=[],times=[];for(const k of rev){const c=+k.close;if(!isFinite(c))continue;close.push(c);high.push(+k.high);low.push(+k.low);times.push(+k.time);}assets.push({sym:t.sym,tk:base,name:base,close,high,low,times,price:close[close.length-1]});}}catch(e){}});
       if(assets.length){const d=await(await fetch('/api/crypto-signals',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tf,assets})})).json();(d.results||[]).forEach(r=>verdicts[r.asset.sym]=r.sig.verdict);}
     }catch(e){}}}
@@ -351,19 +364,20 @@ async function runScan(){
   // CRYPTO: fetch from YOUR browser (India IP) → CoinDCX works, exact ₹ prices. Server only does the math.
   if(activeTab==='Crypto' && !status.demo){
     try{
-      document.getElementById('pstat').textContent='Fetching CoinDCX (your browser)…';
+      document.getElementById('pstat').textContent='Fetching CoinDCX from your browser…';
       const assets=await fetchCoinDCXCrypto(timeframe);
       if(!assets.length)throw new Error('no data');
       const d=await(await fetch('/api/crypto-signals',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tf:timeframe,assets})})).json();
       if(d.error)throw new Error(d.error);
-      document.getElementById('pf').style.width='100%';
+      cryptoSource='coindcx';document.getElementById('pf').style.width='100%';
       render(d.results);
       const now=new Date();document.getElementById('lastUpd').textContent='Updated '+now.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true});
-      document.getElementById('pstat').textContent=`${d.analyzed}/${d.total} live · CoinDCX ${cryptoCcy==='USDT'?'($)':'(₹)'}`;
+      document.getElementById('pstat').textContent=`✅ ${d.analyzed} coins · CoinDCX (your browser) · ${cryptoCcy}`;
       scanning=false;document.getElementById('scanBtn').disabled=false;scheduleRefresh();return;
     }catch(e){
-      document.getElementById('pstat').textContent='CoinDCX blocked in browser — using global feed';
-      // fall through to the server scan (global ₹) so the tab still shows something
+      cryptoSource='global';await ensureRate();     // keep the toggle working even on fallback
+      document.getElementById('pstat').textContent='⚠️ CoinDCX unreachable from your browser — using global ₹ feed';
+      // fall through to the server scan so the tab still shows something
     }
   }
   try{
@@ -375,7 +389,9 @@ async function runScan(){
     render(d.results);
     const now=new Date();
     document.getElementById('lastUpd').textContent='Updated '+now.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true});
-    document.getElementById('pstat').textContent=`${d.analyzed}/${d.total} live${d.cached?' (cached)':''}${d.note?' · ⚠ '+d.note:''}`;
+    document.getElementById('pstat').textContent=(activeTab==='Crypto'&&cryptoSource==='global')
+      ? `⚠️ CoinDCX blocked in browser — ${d.analyzed}/${d.total} on global ₹ feed`
+      : `${d.analyzed}/${d.total} live${d.cached?' (cached)':''}${d.note?' · ⚠ '+d.note:''}`;
   }catch(e){document.getElementById('pstat').textContent='Error';document.getElementById('buyCards').innerHTML='<div class="empty">Backend error: '+e.message+'</div>';}
   scanning=false;document.getElementById('scanBtn').disabled=false;scheduleRefresh();
 }
@@ -383,8 +399,9 @@ async function pollQuotes(){
   if(!lastResults.length||status.demo)return;
   // crypto: refresh prices straight from CoinDCX (your browser) so ₹ ticks in real time
   if(activeTab==='Crypto'){
-    try{const t=await fetch("https://api.coindcx.com/exchange/ticker").then(r=>r.json());
-      if(Array.isArray(t)){const by={};t.forEach(x=>by[x.market]=+x.last_price);const usd=t.find(x=>x.market==='USDTINR');if(usd&&+usd.last_price>0)usdtInr=+usd.last_price;
+    if(cryptoSource!=='coindcx')return;              // on global fallback the price comes from the scan, not CoinDCX
+    try{const t=await fetchT("https://api.coindcx.com/exchange/ticker",{},6000).then(r=>r.json());
+      if(Array.isArray(t)){const by={};t.forEach(x=>by[x.market]=+x.last_price);const bt=t.find(x=>x.market==='BTCINR'),bu=t.find(x=>x.market==='BTCUSDT');if(bt&&bu&&+bu.last_price>0)usdtInr=+bt.last_price/+bu.last_price;
         lastResults.forEach(r=>{const q=by[r.asset.sym];if(q&&isFinite(q)){r.sig.price=q;const el=document.getElementById('px_'+id4(r.asset.sym));if(el)el.textContent=fmtR(r)(q);}});
         const now=new Date();document.getElementById('lastUpd').textContent='LTP '+now.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true});}
     }catch(e){}
@@ -547,7 +564,7 @@ function updateMkt(){const st=document.getElementById('mktStatus');if(activeTab=
 function renderTabs(){const t=document.getElementById('tabs');t.innerHTML='';["Stocks","ETFs / Indices","Commodities","Crypto","All"].forEach(k=>{const b=document.createElement('div');b.className='tab'+(k===activeTab?' active':'');b.textContent=k;b.onclick=()=>{activeTab=k;renderTabs();updateMkt();runScan();};t.appendChild(b);});
   document.getElementById('ccy').style.display=activeTab==='Crypto'?'flex':'none';}
 document.getElementById('tf').addEventListener('click',e=>{const d=e.target.closest('[data-tf]');if(!d)return;timeframe=d.dataset.tf;[...document.querySelectorAll('#tf div')].forEach(x=>x.classList.toggle('on',x===d));runScan();});
-document.getElementById('ccy').addEventListener('click',e=>{const d=e.target.closest('[data-ccy]');if(!d)return;cryptoCcy=d.dataset.ccy;[...document.querySelectorAll('#ccy div')].forEach(x=>x.classList.toggle('on',x===d));if(lastResults.length)render(lastResults);});
+document.getElementById('ccy').addEventListener('click',async e=>{const d=e.target.closest('[data-ccy]');if(!d)return;cryptoCcy=d.dataset.ccy;[...document.querySelectorAll('#ccy div')].forEach(x=>x.classList.toggle('on',x===d));if(cryptoCcy==='USDT')await ensureRate();if(lastResults.length)render(lastResults);});
 setInterval(tickCountdown,1000);
 setInterval(pollQuotes,8000);
 setInterval(getStatus,60000);
