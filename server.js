@@ -329,6 +329,33 @@ async function usdInr(){
   return fxRate||86;
 }
 const isStableBase=b=>STABLE_TK.has(b)||/(UP|DOWN|BULL|BEAR)$/.test(b)||/^\d/.test(b);
+// CoinGecko fallback — works from ANY server region (incl. US), INR native. Uses your demo key if set.
+const cgHeaders=()=>COINGECKO_KEY?{"x-cg-demo-api-key":COINGECKO_KEY}:{};
+let geckoMap={};
+async function geckoLoadUniverse(){
+  const per=Math.min(250,CG_TOP);
+  const arr=await getJSON(`https://api.coingecko.com/api/v3/coins/markets?vs_currency=inr&order=market_cap_desc&per_page=${per}&page=1&sparkline=true&price_change_percentage=24h`,cgHeaders());
+  if(!Array.isArray(arr))throw new Error("gecko markets");
+  const list=[],map={};
+  arr.forEach(it=>{
+    if(isStableBase((it.symbol||"").toUpperCase()))return;
+    let close=((it.sparkline_in_7d&&it.sparkline_in_7d.price)||[]).slice();
+    if(close.length<60||!(it.current_price>0))return;
+    close[close.length-1]=it.current_price;
+    const mtime=it.last_updated?Date.parse(it.last_updated):Date.now();
+    list.push({sym:it.id,tk:(it.symbol||"").toUpperCase(),name:it.name,cls:"Crypto",src:"cg"});
+    map[it.id]={close,price:it.current_price,mtime};
+  });
+  if(list.length>=8){CRYPTO=list;geckoMap=map;}
+  return list;
+}
+function loadGecko(asset,tf){
+  const d=geckoMap[asset.sym]; if(!d)throw new Error("no gecko data");
+  const f={"4h":4,"6h":4,"12h":4}[tf]||1;                        // 7d hourly base → cap coarse frames at 4h
+  const close=d.close.slice(), now=d.mtime;
+  const s={close,high:close.slice(),low:close.slice(),times:close.map((_,i)=>now-(close.length-1-i)*36e5),price:d.price,mtime:now};
+  return f>1?resampleSeries(s,f):s;
+}
 let cryUniAt=0;
 async function ensureCryptoUniverse(){
   if(DEMO){cgOk=true;cryptoMode="binance";return CRYPTO;}
@@ -343,8 +370,13 @@ async function ensureCryptoUniverse(){
       CRYPTO=rows.map(r=>({sym:r.market,pair:"I-"+r.base+"_INR",binance:r.base+"USDT",tk:r.base,name:r.base,cls:"Crypto",src:"cg"}));
       cryptoMode="coindcx";cryUniAt=Date.now();cgOk=true;return CRYPTO;
     }
-  }catch(e){/* CoinDCX unreachable (geo?) → fall back to Binance */}
-  // 2) Fallback: Binance top USDT pairs by volume (global ₹ reference)
+  }catch(e){/* CoinDCX unreachable (geo?) → next source */}
+  // 2) CoinGecko — global (works from US Render), INR native, uses your demo key
+  try{
+    const l=await geckoLoadUniverse();
+    if(l.length>=8){cryptoMode="gecko";cryUniAt=Date.now();cgOk=true;return CRYPTO;}
+  }catch(e){/* → Binance */}
+  // 3) Binance (last resort; blocked from US IPs)
   try{
     const arr=await binanceGet("/api/v3/ticker/24hr");if(!Array.isArray(arr))throw new Error("bad ticker");
     const rows=arr.filter(t=>t.symbol&&t.symbol.endsWith("USDT")).map(t=>({sym:t.symbol,tk:t.symbol.slice(0,-4),qv:+t.quoteVolume||0}))
@@ -357,9 +389,10 @@ async function ensureCryptoUniverse(){
 // dispatcher
 async function loadCrypto(asset,tf){
   if(DEMO){let h=0;for(const ch of asset.sym)h=(h*31+ch.charCodeAt(0))>>>0;return synth(h,300,0.03);}
+  if(cryptoMode==="gecko") return loadGecko(asset,tf);
   if(cryptoMode==="coindcx" && asset.pair){
     try{ return await loadCoinDCX(asset,tf); }
-    catch(e){ if(asset.binance) return await loadBinance(asset,tf); throw e; } // per-coin fallback
+    catch(e){ if(geckoMap[asset.sym]) return loadGecko(asset,tf); if(asset.binance) return await loadBinance(asset,tf); throw e; }
   }
   return loadBinance(asset,tf);
 }
@@ -428,9 +461,9 @@ function processAsset(asset,data,tf){
   const dec=asset.src==='cg'&&data.price<5?4:2;
   const isIndex=!!asset.isIndex||asset.sym.startsWith('^');
   const asofMs=data.mtime||(data.times?data.times[data.times.length-1]:Date.now());
-  const bt = cl.length>=120 ? assetBtScore(backtestSeries(cl,hi,lo,tf)) : null;   // historical grade for this name (same data, no extra fetch)
+  const bt = cl.length>=120 ? assetBtScore(backtestSeries(cl,hi,lo,tf,costFor(asset))) : null;   // net-of-cost historical grade (same data)
   return {asset,sig,setup,since,action,reasons,scope,bt,dec,isIndex,tf,asof:fmtTime(asofMs),
-    priceTag:asset.src==='cg'?(cryptoMode==='coindcx'?'live · CoinDCX ₹':'live · global ₹'):(marketOpen()?'LIVE (broker)':'prev close'),series:data.close.slice(-80)};
+    priceTag:asset.src==='cg'?(cryptoMode==='coindcx'?'live · CoinDCX ₹':cryptoMode==='gecko'?'live · ₹ (CoinGecko)':'live · global ₹'):(marketOpen()?'LIVE (broker)':'prev close'),series:data.close.slice(-80)};
 }
 /* ============================================================
    BACKTEST — lookahead-free, long-only, ATR stop / T1 target
@@ -454,38 +487,48 @@ function scoreSeriesArr(close,high,low){
   }
   return {scores,atr};
 }
-function backtestSeries(close,high,low,tf){
+// per-FILL cost (brokerage + STT + GST + exchange + slippage). Round-trip ≈ 2×. Configurable.
+const BT_COST_EQ=(parseFloat(process.env.BT_COST_BPS_EQ)||parseFloat(CFG.backtestCostBpsEquity)||12)/10000;
+const BT_COST_CR=(parseFloat(process.env.BT_COST_BPS_CRYPTO)||parseFloat(CFG.backtestCostBpsCrypto)||40)/10000;
+const costFor=asset=>asset.cls==='Crypto'?BT_COST_CR:BT_COST_EQ;
+// Realistic exit: scale out 1/3 at each of T1/T2/T3, ratchet the stop up (breakeven after T1, T1 after T2).
+// Net of trading costs. Long-only, lookahead-free.
+function backtestSeries(close,high,low,tf,cost){
+  cost = cost==null ? BT_COST_EQ : cost;
   const {scores,atr}=scoreSeriesArr(close,high,low);
   const thr=tf==='daily'?20:12;
-  const P=TYPE[tf==='daily'?'Swing':'Intraday'], stopMult=P.stopMult, tMul=P.t[0];  // exit at Target 1
+  const P=TYPE[tf==='daily'?'Swing':'Intraday'], stopMult=P.stopMult, T=P.t;   // T = [t1,t2,t3] R-multiples
   const ema20=IND.ema(close,20), sma50=IND.sma(close,50), bb=IND.bollinger(close), n=close.length;
   const lo10=new Array(n).fill(null), prevHi20=new Array(n).fill(null);
   for(let i=0;i<n;i++){
     if(i>=9){let m=Infinity;for(let j=i-9;j<=i;j++)m=Math.min(m,low[j]);lo10[i]=m;}
     if(i>=20){let m=-Infinity;for(let j=i-20;j<i;j++)m=Math.max(m,high[j]);prevHi20[i]=m;}
   }
-  let pos=0,entry=0,stop=0,tgt=0,entryIdx=-1,pending=null;
+  let pos=0,entry=0,R=0,stop=0,t1=0,t2=0,t3=0,rem=0,taken=0,gross=0,entryIdx=-1,pending=null;
   const rets=[]; let eq=1,peak=1,mdd=0; const FILLWIN=6;
+  const enter=(px,r,idx)=>{entry=px;R=r;stop=px-r;t1=px+T[0]*r;t2=px+T[1]*r;t3=px+T[2]*r;rem=1;taken=0;gross=0;pos=1;entryIdx=idx;};
+  const finish=()=>{const net=gross-2*cost;rets.push(net);eq*=(1+net);peak=Math.max(peak,eq);mdd=Math.min(mdd,eq/peak-1);pos=0;gross=0;rem=0;taken=0;};
   for(let i=50;i<n;i++){
-    // manage open position
     if(pos===1 && i>entryIdx){
-      let ex=null;
-      if(low[i]<=stop)ex=stop; else if(high[i]>=tgt)ex=tgt; else if(scores[i]<=-thr)ex=close[i];
-      if(ex!=null){const r=ex/entry-1;rets.push(r);eq*=(1+r);peak=Math.max(peak,eq);mdd=Math.min(mdd,eq/peak-1);pos=0;}
+      if(low[i]<=stop && rem>0){ gross+=rem*(stop/entry-1); rem=0; finish(); }   // stop the remainder (conservative: checked first)
+      else{
+        if(rem>0 && taken<1 && high[i]>=t1){ gross+=(1/3)*(t1/entry-1); rem-=1/3; taken=1; stop=entry; }  // → breakeven
+        if(rem>0 && taken<2 && high[i]>=t2){ gross+=(1/3)*(t2/entry-1); rem-=1/3; taken=2; stop=t1; }     // → lock T1
+        if(rem>0 && taken<3 && high[i]>=t3){ gross+=rem*(t3/entry-1); rem=0; finish(); }                  // final third at T3
+        else if(pos===1 && rem>0 && scores[i]<=-thr){ gross+=rem*(close[i]/entry-1); rem=0; finish(); }   // signal died → exit rest
+      }
     }
-    // pending pullback-limit fill (buy the dip only if it actually dips to support within the window)
     if(pos===0 && pending && i>pending.sig){
-      if(low[i]<=pending.limit){entry=pending.limit;stop=entry-pending.R;tgt=entry+tMul*pending.R;pos=1;entryIdx=i;pending=null;}
-      else if(i>=pending.exp)pending=null;   // dip never came → no trade (honest: some signals are missed)
+      if(low[i]<=pending.limit){ enter(pending.limit,pending.R,i); pending=null; }
+      else if(i>=pending.exp) pending=null;   // the dip never came → no trade
     }
-    // new BUY signal → breakout=market entry, else pullback-limit at support
     if(pos===0 && !pending && scores[i]>=thr && atr[i]>0){
-      const R=stopMult*atr[i], brk=prevHi20[i]!=null && close[i]>=prevHi20[i];
-      if(brk){entry=close[i];stop=entry-R;tgt=entry+tMul*R;pos=1;entryIdx=i;}
-      else{const sup=nearestLevel(1,close[i],atr[i],[lo10[i],bb.lower[i],ema20[i],sma50[i]]);pending={limit:sup,R,sig:i,exp:i+FILLWIN};}
+      const r=stopMult*atr[i], brk=prevHi20[i]!=null && close[i]>=prevHi20[i];
+      if(brk) enter(close[i],r,i);            // breakout → market
+      else{ const sup=nearestLevel(1,close[i],atr[i],[lo10[i],bb.lower[i],ema20[i],sma50[i]]); pending={limit:sup,R:r,sig:i,exp:i+FILLWIN}; }
     }
   }
-  if(pos===1){const r=close[n-1]/entry-1;rets.push(r);eq*=(1+r);peak=Math.max(peak,eq);mdd=Math.min(mdd,eq/peak-1);}
+  if(pos===1){ gross+=rem*(close[n-1]/entry-1); rem=0; finish(); }
   const wins=rets.filter(r=>r>0),losses=rets.filter(r=>r<=0);
   const sumW=wins.reduce((a,b)=>a+b,0),sumL=losses.reduce((a,b)=>a+b,0);
   const bh=close[50]>0?close[n-1]/close[50]-1:0;
@@ -521,7 +564,7 @@ async function backtest(tab,tf){
     else{if(!DEMO&&!li)throw new Error("login");const key=DEMO?("D|"+asset.sym):keyForAsset(asset);if(!key)throw new Error("nokey");
       data=DEMO?synth(hashStr(asset.sym),tf==='daily'?500:400,0.03):await upstoxCandles(key,tf);}
     if(!data||data.close.length<120)throw new Error("short");
-    return {sym:asset.sym,name:asset.name,cls:asset.cls,...backtestSeries(data.close,data.high,data.low,tf)};
+    return {sym:asset.sym,name:asset.name,cls:asset.cls,...backtestSeries(data.close,data.high,data.low,tf,costFor(asset))};
   });
   const withData=per.filter(x=>x&&!x.__err);          // fetched + backtested (may have 0 trades)
   const failed=per.filter(x=>x&&x.__err).length;      // couldn't fetch (login/data)
@@ -582,7 +625,7 @@ async function scan(tab,tf){
   const cryptoAssets=uni.filter(a=>a.src==='cg');
   const cryptoFailed = cryptoAssets.length>0 && !DEMO && !ok.some(r=>r.asset.src==='cg');
   const out={tab,tf,analyzed:ok.length,total:uni.length,results:ok,ts:Date.now(),demo:DEMO,loggedIn:li,keyOf,
-    note: cryptoFailed?"Crypto (Binance) temporarily unreachable — retrying next refresh":undefined};
+    note: cryptoFailed?("Crypto sources unreachable from the server"+(COINGECKO_KEY?" — retrying":" — set a free COINGECKO_KEY env var on Render for a reliable global feed")):undefined};
   if(ok.length>0 && !cryptoFailed) cSet(ck,out);   // never cache an empty/failed scan
   return out;
 }
@@ -598,6 +641,10 @@ async function liveQuotes(tab){
     else if(cryptoMode==="coindcx"){
       try{await cdxGetTicker();const c={};cryptoIds.forEach(x=>{if(cdxTicker[x.sym]>0)c[x.sym]=cdxTicker[x.sym];});cgPriceCache=c;cgPriceAt=Date.now();Object.assign(out,c);}
       catch(e){if(cgPriceCache)Object.assign(out,cgPriceCache);}
+    }else if(cryptoMode==="gecko"){
+      try{const ids=cryptoIds.map(x=>x.sym).join(",");const m=await getJSON(`https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=inr`,cgHeaders());
+        const c={};cryptoIds.forEach(x=>{if(m[x.sym]&&m[x.sym].inr)c[x.sym]=m[x.sym].inr;});cgPriceCache=c;cgPriceAt=Date.now();Object.assign(out,c);}
+      catch(e){if(cgPriceCache)Object.assign(out,cgPriceCache);else cryptoIds.forEach(x=>{if(geckoMap[x.sym])out[x.sym]=geckoMap[x.sym].price;});}
     }else{
       try{const arr=await binanceGet("/api/v3/ticker/price");const r=await usdInr();
         const bySym={};if(Array.isArray(arr))arr.forEach(x=>{bySym[x.symbol]=+x.price*r;});

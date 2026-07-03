@@ -259,7 +259,7 @@ function renderBacktest(d){
         <div class="btstat"><div class="k">Avg max drawdown</div><div class="v down">${a.avgMaxDD.toFixed(1)}%</div></div>
       </div>
       <table class="bttable"><thead><tr><th>Asset</th><th>Trades</th><th>Win%</th><th>Strategy</th><th>Buy&amp;Hold</th><th>Max DD</th></tr></thead><tbody>${rows}</tbody></table>
-      <p class="small" style="margin-top:8px">⚠️ No brokerage/STT/taxes/slippage deducted — real results are worse. Past ≠ future. The <b>Backtest Score</b> blends: did it beat buy-and-hold (40%), profit factor (25%), win rate (15%), drawdown control (20%), dimmed if too few trades. It's a quick read, not proof — validate forward with small size.</p>
+      <p class="small" style="margin-top:8px">✅ Now <b>net of estimated trading costs</b> (brokerage + STT + GST + slippage, ~0.24% round-trip equity / ~0.8% crypto) and modelled with a realistic <b>scale-out</b> (⅓ at T1/T2/T3, stop ratchets to breakeven). <b>Income tax is NOT included.</b> Past ≠ future. The <b>Backtest Score</b> blends: beat buy-and-hold (40%), profit factor (25%), win rate (15%), drawdown control (20%); dimmed if too few trades. A quick read, not proof — validate forward with small size.</p>
     </div>
   </div>`;
 }
