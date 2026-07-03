@@ -155,6 +155,7 @@
     <span class="pstat" id="filterNote"></span>
   </div>
   <div id="scoreInfo" style="display:none"></div>
+  <div id="cryptoNote" style="display:none"></div>
   <div id="tradesPanel" style="display:none"></div>
   <div id="btPanel"></div>
   <div class="toast" id="toast"></div>
@@ -271,6 +272,7 @@ function healthOf(t){
   if(t.warnStall)return{l:'🟡 Giving back gains',c:'hold'};
   if(t.rMult>=1)return{l:`🟢 Winning · +${t.rMult.toFixed(1)}R`,c:'up'};
   if(t.rMult>0)return{l:'🟢 In profit',c:'up'};
+  if(Math.abs(t.rMult)<0.05)return{l:'⚪ At entry — waiting',c:'muted'};
   return{l:'🔻 In drawdown',c:'down'};
 }
 function adviceOf(t){
@@ -309,9 +311,13 @@ function monitorTrades(prices){
   if(changed)saveTrades(a);renderTrades();
 }
 async function monitorPoll(){
-  const a=loadTrades();if(!a.length)return;const prices={};
-  if(a.some(t=>t.cls==='Crypto')){try{const t=await fetchT('https://api.coindcx.com/exchange/ticker',{},6000).then(r=>r.json());if(Array.isArray(t))t.forEach(x=>prices[x.market]=+x.last_price);}catch(e){}}
-  if(a.some(t=>t.cls!=='Crypto')&&!status.demo){try{const d=await(await fetch('/api/quotes?tab=All')).json();if(d.quotes)Object.assign(prices,d.quotes);}catch(e){}}
+  const a=loadTrades();if(!a.length)return;const prices={},cbase={};
+  // Primary: server feed — covers stocks (Upstox) AND crypto (global, keyed by symbol). Works from any region.
+  if(!status.demo){try{const d=await fetchT('/api/quotes?tab=All',{},8000).then(r=>r.json());if(d&&d.quotes){Object.assign(prices,d.quotes);for(const k in d.quotes){const v=+d.quotes[k];if(v>0){const b=k.replace(/USDT$|INR$|USD$/,'');if(b)cbase[b]=v;}}}}catch(e){}}
+  // Override crypto with exact CoinDCX ₹ IF your browser can reach it (it usually can't from a hosted app)
+  if(a.some(t=>t.cls==='Crypto')){try{const t=await fetchT('https://api.coindcx.com/exchange/ticker',{},5000).then(r=>r.json());if(Array.isArray(t))t.forEach(x=>{const v=+x.last_price;if(v>0&&x.market){prices[x.market]=v;if(x.market.endsWith('INR'))cbase[x.market.slice(0,-3)]=v;}});}catch(e){}}
+  // Fallback: match a crypto trade by its base ticker if the exact symbol key isn't present
+  a.forEach(t=>{if(t.cls==='Crypto'&&!(prices[t.sym]>0)&&t.tk&&cbase[t.tk]>0)prices[t.sym]=cbase[t.tk];});
   monitorTrades(prices);
 }
 function toggleTrades(){const el=document.getElementById('tradesPanel');el.style.display=el.style.display==='none'?'block':'none';if(el.style.display==='block')renderTrades();}
@@ -329,29 +335,26 @@ function renderTrades(){
         <div class="mk now" style="left:${pos(p)}%"></div></div>
       <div class="tstatus">💡 ${adviceOf(t)}</div>
       <div class="tstatus">now ${tpx(t,p)} · in ${tpx(t,t.entry)} · stop ${tpx(t,t.stop)}${showTrail?` · <b style="color:var(--accent2)">suggested trail → ${tpx(t,trail)}</b>`:''}</div></div>`;}).join('');
-  el.innerHTML=`<div class="tradespanel"><h3>📋 My tracked trades (${a.length})</h3>${rows}<p class="small" style="margin-top:6px"><b>R</b> = profit measured against your original risk (+2R means you've made twice what you risked). Alerts fire while the app is open in any tab (even backgrounded) — allow notifications when prompted. Crypto prices from CoinDCX, stocks from your Upstox feed. Tracks levels &amp; gives guidance only — it does not place or close real orders.</p></div>`;
+  el.innerHTML=`<div class="tradespanel"><h3>📋 My tracked trades (${a.length})</h3>${rows}<p class="small" style="margin-top:6px"><b>R</b> = profit measured against your original risk (+2R means you've made twice what you risked). Alerts fire while the app is open in any tab (even backgrounded) — allow notifications when prompted. Crypto tracked on the live ₹ feed (CoinDCX when your browser can reach it, else the global ₹ feed); stocks from your Upstox feed. Tracks levels &amp; gives guidance only — it does not place or close real orders.</p></div>`;
 }
 setInterval(monitorPoll,15000);
 // Background reversal watcher — re-checks the live signal for EVERY open trade (even off-screen) every 60s
 async function checkReversals(){
   const open=loadTrades().filter(t=>!t.hitStop&&!t.reversedAlerted);if(!open.length)return;
   const verdicts={};
-  // crypto: fetch fresh CoinDCX candles (your browser) grouped by timeframe, ask server for the verdict
+  // crypto: use the server global scan (works from any region) grouped by timeframe; keyed by global sym (e.g. BTCUSDT)
   const cg=open.filter(t=>t.cls==='Crypto');
-  if(cg.length){const byTf={};cg.forEach(t=>{(byTf[t.tf]=byTf[t.tf]||[]).push(t);});
-    for(const tf in byTf){try{
-      const assets=[];
-      await mapLimitClient(byTf[tf],6,async t=>{try{const base=t.sym.slice(0,-3);
-        const j=await fetchT(`https://public.coindcx.com/market_data/candles?pair=I-${base}_INR&interval=${CDX_INT_C[tf]||'1h'}&limit=300`,{},6000).then(r=>r.json());
-        if(Array.isArray(j)&&j.length>=41){const rev=j.slice().reverse();const close=[],high=[],low=[],times=[];for(const k of rev){const c=+k.close;if(!isFinite(c))continue;close.push(c);high.push(+k.high);low.push(+k.low);times.push(+k.time);}assets.push({sym:t.sym,tk:base,name:base,close,high,low,times,price:close[close.length-1]});}}catch(e){}});
-      if(assets.length){const d=await(await fetch('/api/crypto-signals',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tf,assets})})).json();(d.results||[]).forEach(r=>verdicts[r.asset.sym]=r.sig.verdict);}
+  if(cg.length){const tfs=[...new Set(cg.map(t=>t.tf))];
+    for(const tf of tfs){try{
+      const d=await fetchT('/api/scan?tab=Crypto&tf='+encodeURIComponent(tf),{},9000).then(r=>r.json());
+      (d.results||[]).forEach(r=>{if(r.asset&&r.sig){verdicts[r.asset.sym]=r.sig.verdict;if(r.asset.tk)verdicts['base:'+r.asset.tk]=r.sig.verdict;}});
     }catch(e){}}}
   // stocks/ETFs/commodities: server fetches Upstox candles per symbol
   const st=open.filter(t=>t.cls!=='Crypto');
   if(st.length&&!status.demo){await mapLimitClient(st,4,async t=>{try{const d=await(await fetch('/api/signal?sym='+encodeURIComponent(t.sym)+'&tf='+t.tf)).json();if(d.verdict)verdicts[t.sym]=d.verdict;}catch(e){}});}
   // apply reversals
   const all=loadTrades();let changed=false;
-  all.forEach(t=>{if(t.hitStop||t.reversedAlerted)return;const v=verdicts[t.sym];if(!v)return;
+  all.forEach(t=>{if(t.hitStop||t.reversedAlerted)return;const v=verdicts[t.sym]||(t.cls==='Crypto'&&t.tk?verdicts['base:'+t.tk]:null);if(!v)return;
     if((t.dir>0&&v==='SELL')||(t.dir<0&&v==='BUY')){t.reversedAlerted=true;changed=true;notify('🔴 '+t.name+' signal reversed','The live signal flipped against your trade — momentum has turned. Exiting or tightening your stop is defensible.');}});
   if(changed){saveTrades(all);renderTrades();}
 }
@@ -562,7 +565,10 @@ function scheduleRefresh(){refreshAt=Date.now()+refreshSecs()*1000;}
 function tickCountdown(){if(!refreshAt)return;const left=Math.max(0,Math.round((refreshAt-Date.now())/1000));document.getElementById('nextRef').textContent=`⟳ refresh in ${left}s · ${timeframe}`;if(left<=0&&!scanning){refreshAt=0;runScan();}}
 function updateMkt(){const st=document.getElementById('mktStatus');if(activeTab==='Crypto'){st.className='badge open';st.textContent='Crypto · 24×7';return;}const o=status.marketOpen;st.className='badge '+(o?'open':'closed');st.textContent=o?'NSE/BSE · OPEN':'NSE/BSE · Closed';}
 function renderTabs(){const t=document.getElementById('tabs');t.innerHTML='';["Stocks","ETFs / Indices","Commodities","Crypto","All"].forEach(k=>{const b=document.createElement('div');b.className='tab'+(k===activeTab?' active':'');b.textContent=k;b.onclick=()=>{activeTab=k;renderTabs();updateMkt();runScan();};t.appendChild(b);});
-  document.getElementById('ccy').style.display=activeTab==='Crypto'?'flex':'none';}
+  document.getElementById('ccy').style.display=activeTab==='Crypto'?'flex':'none';
+  const cn=document.getElementById('cryptoNote');
+  if(activeTab==='Crypto'){cn.style.display='block';cn.innerHTML='<div class="infobox" style="border-color:rgba(240,185,11,.35)"><b>ℹ️ Crypto runs on the global market feed.</b> CoinDCX blocks access from outside India (browser <i>and</i> server), so exact CoinDCX prices aren’t available on a hosted app. <b>This does not affect your decisions:</b> the direction, signal, and all % levels (entry / stop / targets, risk:reward) are correct and match CoinDCX. The <b>$ USDT</b> values are exact global prices; the <b>₹</b> values run ~1–4% below your CoinDCX screen (the India premium). Place orders on CoinDCX using the setup’s direction and % levels. Want tick-exact CoinDCX prices? Run this app locally on your India computer — ask me and I’ll package it.</div>';}
+  else cn.style.display='none';}
 document.getElementById('tf').addEventListener('click',e=>{const d=e.target.closest('[data-tf]');if(!d)return;timeframe=d.dataset.tf;[...document.querySelectorAll('#tf div')].forEach(x=>x.classList.toggle('on',x===d));runScan();});
 document.getElementById('ccy').addEventListener('click',async e=>{const d=e.target.closest('[data-ccy]');if(!d)return;cryptoCcy=d.dataset.ccy;[...document.querySelectorAll('#ccy div')].forEach(x=>x.classList.toggle('on',x===d));if(cryptoCcy==='USDT')await ensureRate();if(lastResults.length)render(lastResults);});
 setInterval(tickCountdown,1000);
