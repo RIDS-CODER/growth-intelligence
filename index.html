@@ -279,6 +279,7 @@ function card(r,i,isBuy){const{asset,sig,setup,reasons,dec,action,scope,asof,isI
         <div class="k">Current Price</div><div class="v" id="px_${id4(asset.sym)}">${f(sig.price)}</div>
         <div class="k">Trade Type</div><div class="v">${setup.type}</div>
         <div class="k">Entry Zone</div><div class="v">${f(setup.entryLo)} – ${f(setup.entryHi)}</div>
+        <div class="k">Support / Resistance</div><div class="v">${f(setup.dir>0?setup.support:sig.lo20)} / ${f(setup.dir>0?sig.hi20:setup.resistance)}</div>
         <div class="k">Risk : Reward</div><div class="v">${setup.rrr.toFixed(1)} : 1</div>
         <div class="k">Risk % to SL</div><div class="v">${setup.riskPct.toFixed(1)}%</div>
         <div class="k">Holding</div><div class="v">${setup.hold}</div>
