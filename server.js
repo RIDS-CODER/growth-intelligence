@@ -341,6 +341,9 @@ async function geckoLoadUniverse(){
     if(isStableBase((it.symbol||"").toUpperCase()))return;
     let close=((it.sparkline_in_7d&&it.sparkline_in_7d.price)||[]).slice();
     if(close.length<60||!(it.current_price>0))return;
+    // sparkline may come back in USD even when vs_currency=inr → normalize the WHOLE series to end at the live INR price
+    const lastSp=close[close.length-1];
+    if(lastSp>0){const f=it.current_price/lastSp; close=close.map(v=>v*f);}
     close[close.length-1]=it.current_price;
     const mtime=it.last_updated?Date.parse(it.last_updated):Date.now();
     list.push({sym:it.id,tk:(it.symbol||"").toUpperCase(),name:it.name,cls:"Crypto",src:"cg"});
@@ -371,12 +374,7 @@ async function ensureCryptoUniverse(){
       cryptoMode="coindcx";cryUniAt=Date.now();cgOk=true;return CRYPTO;
     }
   }catch(e){/* CoinDCX unreachable (geo?) → next source */}
-  // 2) CoinGecko — global (works from US Render), INR native, uses your demo key
-  try{
-    const l=await geckoLoadUniverse();
-    if(l.length>=8){cryptoMode="gecko";cryUniAt=Date.now();cgOk=true;return CRYPTO;}
-  }catch(e){/* → Binance */}
-  // 3) Binance (last resort; blocked from US IPs)
+  // 2) Binance (only works if the server is NOT in a US region)
   try{
     const arr=await binanceGet("/api/v3/ticker/24hr");if(!Array.isArray(arr))throw new Error("bad ticker");
     const rows=arr.filter(t=>t.symbol&&t.symbol.endsWith("USDT")).map(t=>({sym:t.symbol,tk:t.symbol.slice(0,-4),qv:+t.quoteVolume||0}))
@@ -389,10 +387,9 @@ async function ensureCryptoUniverse(){
 // dispatcher
 async function loadCrypto(asset,tf){
   if(DEMO){let h=0;for(const ch of asset.sym)h=(h*31+ch.charCodeAt(0))>>>0;return synth(h,300,0.03);}
-  if(cryptoMode==="gecko") return loadGecko(asset,tf);
   if(cryptoMode==="coindcx" && asset.pair){
     try{ return await loadCoinDCX(asset,tf); }
-    catch(e){ if(geckoMap[asset.sym]) return loadGecko(asset,tf); if(asset.binance) return await loadBinance(asset,tf); throw e; }
+    catch(e){ if(asset.binance) return await loadBinance(asset,tf); throw e; }
   }
   return loadBinance(asset,tf);
 }
@@ -463,7 +460,7 @@ function processAsset(asset,data,tf){
   const asofMs=data.mtime||(data.times?data.times[data.times.length-1]:Date.now());
   const bt = cl.length>=120 ? assetBtScore(backtestSeries(cl,hi,lo,tf,costFor(asset))) : null;   // net-of-cost historical grade (same data)
   return {asset,sig,setup,since,action,reasons,scope,bt,dec,isIndex,tf,asof:fmtTime(asofMs),
-    priceTag:asset.src==='cg'?(cryptoMode==='coindcx'?'live · CoinDCX ₹':cryptoMode==='gecko'?'live · ₹ (CoinGecko)':'live · global ₹'):(marketOpen()?'LIVE (broker)':'prev close'),series:data.close.slice(-80)};
+    priceTag:asset.src==='cg'?(cryptoMode==='coindcx'?'live · CoinDCX ₹':'live · global ₹'):(marketOpen()?'LIVE (broker)':'prev close'),series:data.close.slice(-80)};
 }
 /* ============================================================
    BACKTEST — lookahead-free, long-only, ATR stop / T1 target
@@ -625,7 +622,7 @@ async function scan(tab,tf){
   const cryptoAssets=uni.filter(a=>a.src==='cg');
   const cryptoFailed = cryptoAssets.length>0 && !DEMO && !ok.some(r=>r.asset.src==='cg');
   const out={tab,tf,analyzed:ok.length,total:uni.length,results:ok,ts:Date.now(),demo:DEMO,loggedIn:li,keyOf,
-    note: cryptoFailed?("Crypto sources unreachable from the server"+(COINGECKO_KEY?" — retrying":" — set a free COINGECKO_KEY env var on Render for a reliable global feed")):undefined};
+    note: cryptoFailed?"Crypto unreachable — this server region can't reach CoinDCX/Binance. Re-create the Render service in the Singapore region for live crypto.":undefined};
   if(ok.length>0 && !cryptoFailed) cSet(ck,out);   // never cache an empty/failed scan
   return out;
 }
@@ -641,10 +638,6 @@ async function liveQuotes(tab){
     else if(cryptoMode==="coindcx"){
       try{await cdxGetTicker();const c={};cryptoIds.forEach(x=>{if(cdxTicker[x.sym]>0)c[x.sym]=cdxTicker[x.sym];});cgPriceCache=c;cgPriceAt=Date.now();Object.assign(out,c);}
       catch(e){if(cgPriceCache)Object.assign(out,cgPriceCache);}
-    }else if(cryptoMode==="gecko"){
-      try{const ids=cryptoIds.map(x=>x.sym).join(",");const m=await getJSON(`https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=inr`,cgHeaders());
-        const c={};cryptoIds.forEach(x=>{if(m[x.sym]&&m[x.sym].inr)c[x.sym]=m[x.sym].inr;});cgPriceCache=c;cgPriceAt=Date.now();Object.assign(out,c);}
-      catch(e){if(cgPriceCache)Object.assign(out,cgPriceCache);else cryptoIds.forEach(x=>{if(geckoMap[x.sym])out[x.sym]=geckoMap[x.sym].price;});}
     }else{
       try{const arr=await binanceGet("/api/v3/ticker/price");const r=await usdInr();
         const bySym={};if(Array.isArray(arr))arr.forEach(x=>{bySym[x.symbol]=+x.price*r;});
@@ -661,6 +654,22 @@ async function liveQuotes(tab){
    HTTP
    ============================================================ */
 async function getJSON(url,headers){const r=await fetch(url,{headers});if(!r.ok)throw new Error("HTTP "+r.status+" "+url.slice(0,60));return r.json();}
+function readBody(req){return new Promise((resolve,reject)=>{let d="";req.on("data",c=>{d+=c;if(d.length>1.2e7)req.destroy();});req.on("end",()=>resolve(d));req.on("error",reject);});}
+// Compute signals from BROWSER-supplied CoinDCX candles (browser is in India → correct ₹ prices). tf + assets[{sym,tk,name,close[],high[],low[],times[],price}]
+function cryptoSignalsFrom(payload){
+  const tf=payload.tf||"1h", results=[];
+  (payload.assets||[]).forEach(a=>{
+    try{
+      if(!a.close||a.close.length<41)return;
+      const asset={sym:a.sym,tk:a.tk,name:a.name||a.tk,cls:"Crypto",src:"cg"};
+      const data={close:a.close,high:a.high,low:a.low,times:a.times,price:a.price};
+      const r=processAsset(asset,data,tf);
+      r.priceTag="live · CoinDCX ₹";     // browser-fetched from the Indian exchange
+      results.push(r);
+    }catch(e){}
+  });
+  return {results,tf,total:(payload.assets||[]).length,analyzed:results.length,source:"coindcx-client"};
+}
 function sendJSON(res,o,c=200){const b=JSON.stringify(o);res.writeHead(c,{"Content-Type":"application/json","Access-Control-Allow-Origin":"*"});res.end(b);}
 const MIME={".html":"text/html",".js":"text/javascript",".css":"text/css",".json":"application/json",".svg":"image/svg+xml"};
 async function handler(req,res){
@@ -678,6 +687,22 @@ async function handler(req,res){
       return sendJSON(res,{quotes:await liveQuotes(u.searchParams.get("tab")||"Stocks"),loggedIn:loggedIn(),ts:Date.now()});}
     if(p==="/api/backtest"){
       const data=await backtest(u.searchParams.get("tab")||"Stocks",u.searchParams.get("tf")||"daily");return sendJSON(res,data);}
+    if(p==="/api/crypto-signals" && req.method==="POST"){
+      const body=await readBody(req);let payload;try{payload=JSON.parse(body);}catch(e){return sendJSON(res,{error:"bad json"},400);}
+      return sendJSON(res,cryptoSignalsFrom(payload));}
+    if(p==="/api/signal"){   // current verdict for ONE Upstox instrument (used by the trade-reversal watcher)
+      const sym=u.searchParams.get("sym"), tf=u.searchParams.get("tf")||"1h";
+      if(sym&&sym.startsWith("MCX:")){try{await ensureCommodities();}catch(e){}}
+      const asset=[...STOCKS,...ETFS,...INDICES,...COMMODITIES].find(a=>a.sym===sym);
+      if(!asset)return sendJSON(res,{error:"unknown symbol"},404);
+      if(!DEMO&&!loggedIn())return sendJSON(res,{error:"login"},401);
+      if(!DEMO)await ensureInstruments();
+      const key=DEMO?("D|"+sym):keyForAsset(asset); if(!key)return sendJSON(res,{error:"no key"},404);
+      const data=DEMO?synth(hashStr(sym),tf==='daily'?500:400,0.03):await upstoxCandles(key,tf);
+      if(!data||data.close.length<41)return sendJSON(res,{error:"short"},200);
+      const cl=data.close.slice(0,-1),hi=data.high.slice(0,-1),lo=data.low.slice(0,-1);
+      const sig=computeSignal(cl,hi,lo,tf==='daily'?20:12);
+      return sendJSON(res,{sym,verdict:sig.verdict,score:sig.score});}
     // static — tolerate index.html living in /public OR the repo root
     let rel=path.normalize(p==="/"?"/index.html":p).replace(/^(\.\.[/\\])+/,"").replace(/^[/\\]+/,"");
     const candidates=[path.join(__dirname,"public",rel),path.join(__dirname,rel)];

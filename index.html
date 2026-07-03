@@ -82,6 +82,22 @@
   .verdict.BUY{background:var(--buy-bg);color:var(--buy)}.verdict.SELL{background:var(--sell-bg);color:var(--sell)}.verdict.HOLD{background:var(--hold-bg);color:var(--hold)}
   .ttype{font-size:10px;font-family:var(--mono);color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-top:4px}
   .btmini{display:inline-block;margin-top:6px;padding:1px 8px;border:1px solid var(--faint);border-radius:6px;font-family:var(--mono);font-size:11px;font-weight:700;cursor:help}
+  .placebtn{width:100%;margin-top:10px;padding:9px;border-radius:9px;border:1px solid var(--buy);background:var(--buy-bg);color:var(--buy);font-weight:700;cursor:pointer;font-size:12.5px}
+  .placebtn:hover{background:rgba(22,199,132,.22)}
+  .tradespanel{background:linear-gradient(160deg,var(--panel),var(--panel2));border:1px solid rgba(34,211,238,.35);border-radius:14px;padding:14px 16px;margin:14px 0}
+  .tradespanel h3{font-size:14px;margin-bottom:8px}
+  .trow{border:1px solid var(--line);border-radius:11px;padding:10px 12px;margin-bottom:9px}
+  .trow .th{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:13px}
+  .trow .nm{font-weight:700}.trow .sub{font-size:11px;color:var(--muted);font-family:var(--mono)}
+  .tpnl{font-family:var(--mono);font-weight:800;font-size:15px}
+  .tbar{height:26px;border-radius:7px;background:var(--panel2);position:relative;margin:9px 0 4px;border:1px solid var(--line);overflow:hidden}
+  .tbar .mk{position:absolute;top:0;bottom:0;width:2px}.tbar .now{width:3px;background:#fff;z-index:2}
+  .tbar .lab{position:absolute;font-size:9px;font-family:var(--mono);top:6px;transform:translateX(-50%)}
+  .tstatus{font-size:11.5px;color:var(--muted);margin-top:5px}
+  .tclose{float:right;font-size:11px;color:var(--sell);background:none;border:1px solid rgba(234,57,67,.4);border-radius:6px;padding:2px 9px;cursor:pointer}
+  .toast{position:fixed;right:16px;bottom:16px;z-index:9999;max-width:320px}
+  .toast .t{background:var(--panel);border:1px solid var(--accent2);border-radius:11px;padding:11px 13px;margin-top:8px;font-size:12.5px;box-shadow:0 6px 24px rgba(0,0,0,.4);animation:tin .3s}
+  @keyframes tin{from{transform:translateX(30px);opacity:0}to{transform:none;opacity:1}}
   .asof{font-size:10px;font-family:var(--mono);color:var(--accent2);margin-top:3px}
   .tc .bd{padding:0 16px 16px;border-top:1px solid var(--line);display:none}.tc.open .bd{display:block}
   .toplineRet{font-family:var(--mono);font-weight:800;font-size:15px}
@@ -117,6 +133,7 @@
   <div class="controls">
     <div class="tabs" id="tabs"></div>
     <div class="seg" id="tf"><div data-tf="15m">15m</div><div data-tf="30m" class="on">30m</div><div data-tf="1h">1h</div><div data-tf="4h">4h</div><div data-tf="6h">6h</div><div data-tf="12h">12h</div><div data-tf="daily">1D</div></div>
+    <div class="seg" id="ccy" style="display:none"><div data-ccy="INR" class="on">₹ INR</div><div data-ccy="USDT">$ USDT</div></div>
     <button class="btn" id="scanBtn" onclick="runScan()">↻ Refresh now</button>
     <div class="progress"><div class="pf" id="pf"></div></div>
     <div class="pstat" id="pstat">starting…</div>
@@ -134,10 +151,13 @@
     <button class="btn" id="strongBtn" onclick="setStrong()">💪 Strong only</button>
     <button class="btn" onclick="toggleScoreInfo()">ℹ️ What does the score mean?</button>
     <button class="btn" id="btBtn" onclick="runBacktest()" style="border-color:var(--hold);background:var(--hold-bg);color:var(--hold)">📊 Backtest this tab</button>
+    <button class="btn" id="tradesBtn" onclick="toggleTrades()" style="border-color:var(--accent2);background:rgba(34,211,238,.12);color:#a5f3fc">📋 My Trades (0)</button>
     <span class="pstat" id="filterNote"></span>
   </div>
   <div id="scoreInfo" style="display:none"></div>
+  <div id="tradesPanel" style="display:none"></div>
   <div id="btPanel"></div>
+  <div class="toast" id="toast"></div>
 
   <div class="summary" id="summary"></div>
   <h2 class="sec">📈 BUY now / Long <span class="count" id="buyCount">0</span></h2>
@@ -149,8 +169,38 @@
 </div>
 <script>
 let activeTab="Stocks",timeframe="30m",lastResults=[],status={},refreshAt=0;
+let cryptoCcy="INR", usdtInr=0;                        // ₹/USDT toggle + CoinDCX's own USDT→INR rate
+const CRYPTO_N=80;                                     // top coins fetched client-side from CoinDCX
+const CDX_INT_C={"15m":"15m","30m":"30m","1h":"1h","4h":"4h","6h":"6h","12h":"12h","daily":"1d"};
+const STABLE_C=new Set(["USDT","USDC","DAI","TUSD","BUSD","FDUSD","USDP","USDD","EUR","GBP","AEUR"]);
 const money=(v,d=2)=>v==null?'—':'₹'+Number(v).toLocaleString('en-IN',{minimumFractionDigits:d,maximumFractionDigits:d});
 const fmtVal=(v,d,ix)=>v==null?'—':(ix?Number(v).toLocaleString('en-IN',{minimumFractionDigits:d,maximumFractionDigits:d})+' pts':money(v,d));
+// crypto price in the chosen currency (server computes in ₹; convert to USDT for display via CoinDCX's rate)
+function cryptoPrice(v){if(v==null)return '—';
+  if(cryptoCcy==='USDT'&&usdtInr>0){const u=v/usdtInr;return '$'+u.toLocaleString('en-US',{minimumFractionDigits:u<5?4:2,maximumFractionDigits:u<5?4:2});}
+  return '₹'+Number(v).toLocaleString('en-IN',{minimumFractionDigits:v<5?4:2,maximumFractionDigits:v<5?4:2});}
+const fmtR=r=>v=>r.asset.cls==='Crypto'?cryptoPrice(v):fmtVal(v,r.dec,r.isIndex);   // per-result formatter
+async function mapLimitClient(items,limit,fn){const ret=[];let i=0;async function w(){while(i<items.length){const j=i++;ret[j]=await fn(items[j]);}}await Promise.all(Array.from({length:Math.min(limit,items.length)},w));return ret;}
+async function fetchCoinDCXCrypto(tf){
+  const t=await fetch("https://api.coindcx.com/exchange/ticker").then(r=>r.json());
+  if(!Array.isArray(t))throw new Error("cdx ticker");
+  const usd=t.find(x=>x.market==='USDTINR'); if(usd&&+usd.last_price>0)usdtInr=+usd.last_price;
+  const rows=t.filter(x=>x.market&&x.market.endsWith("INR"))
+    .map(x=>{const base=x.market.slice(0,-3);return {market:x.market,base,last:+x.last_price,vol:(+x.volume||0)*(+x.last_price||0)};})
+    .filter(r=>r.last>0&&!STABLE_C.has(r.base)&&!/(UP|DOWN|BULL|BEAR)$/.test(r.base)&&!/^\d/.test(r.base))
+    .sort((a,b)=>b.vol-a.vol).slice(0,CRYPTO_N);
+  const interval=CDX_INT_C[tf]||"1h";
+  const assets=await mapLimitClient(rows,8,async r=>{
+    try{const j=await fetch(`https://public.coindcx.com/market_data/candles?pair=I-${r.base}_INR&interval=${interval}&limit=300`).then(x=>x.json());
+      if(!Array.isArray(j)||j.length<41)return null;
+      const rev=j.slice().reverse();const close=[],high=[],low=[],times=[];
+      for(const k of rev){const c=+k.close;if(!isFinite(c))continue;close.push(c);high.push(+k.high);low.push(+k.low);times.push(+k.time);}
+      if(close.length<41)return null; if(close.length)close[close.length-1]=r.last;
+      return {sym:r.market,tk:r.base,name:r.base,close,high,low,times,price:r.last};
+    }catch(e){return null;}
+  });
+  return assets.filter(Boolean);
+}
 const id4=s=>s.replace(/[^a-z0-9]/gi,'');
 const getCap=()=>Math.max(0,+document.getElementById('capital').value||0);
 const getRisk=()=>Math.max(0,+document.getElementById('riskpct').value||0);
@@ -178,10 +228,144 @@ function posSize(asset,setup){
   return {qty:q,posValue,margin,actualRisk,profit,fractional:fr,lev,suggested:setup.suggestedLev||1,auto:autoLevOn(),capWarn:margin>cap};
 }
 
+/* ---------- Trade tracker + live alerts (localStorage + browser notifications) ---------- */
+function loadTrades(){try{return JSON.parse(localStorage.getItem('gip_trades')||'[]');}catch{return[];}}
+function saveTrades(a){try{localStorage.setItem('gip_trades',JSON.stringify(a));}catch{}updateTradesBtn();}
+function updateTradesBtn(){const b=document.getElementById('tradesBtn');if(b)b.textContent='📋 My Trades ('+loadTrades().length+')';}
+function requestNotify(){try{if('Notification'in window&&Notification.permission==='default')Notification.requestPermission();}catch(e){}}
+function notify(title,body){toast(title+' — '+body);try{if('Notification'in window&&Notification.permission==='granted')new Notification(title,{body});}catch(e){}}
+function toast(msg){const c=document.getElementById('toast');if(!c)return;const d=document.createElement('div');d.className='t';d.textContent=msg;c.appendChild(d);setTimeout(()=>d.remove(),9000);}
+function tpx(t,v){return t.cls==='Crypto'?cryptoPrice(v):fmtVal(v,t.dec,t.isIndex);}
+function tpnl(t){return t.price>0?(t.dir>0?(t.price/t.entry-1):(t.entry/t.price-1))*100:0;}
+function placeTrade(sym){
+  const r=lastResults.find(x=>x.asset.sym===sym);if(!r){toast('Trade not found — rescan and retry');return;}
+  requestNotify();
+  const t={id:Date.now()+'_'+sym,sym,tk:r.asset.tk||'',name:r.asset.name,cls:r.asset.cls,dir:r.setup.dir,
+    entry:r.sig.price,stop:r.setup.stop,initStop:r.setup.stop,targets:r.setup.targets.slice(),dec:r.dec,isIndex:r.isIndex,tf:timeframe,
+    placedAt:Date.now(),price:r.sig.price,peak:r.sig.price,rMult:0,lastR:0,
+    hitStop:false,hitTgts:[false,false,false],half:false,warnStop:false,warnStall:false,reversedAlerted:false};
+  const a=loadTrades();a.push(t);saveTrades(a);document.getElementById('tradesPanel').style.display='block';renderTrades();
+  notify('✅ Tracking '+t.name,'Entry '+tpx(t,t.entry)+' — I\'ll alert you on targets & the stop');
+}
+function closeTrade(id){saveTrades(loadTrades().filter(t=>t.id!==id));renderTrades();}
+const R0=t=>Math.abs(t.entry-(t.initStop||t.stop))||1;                       // initial risk per unit (1R)
+function suggestTrail(t){const dir=t.dir,r=R0(t),be=t.entry,behind=dir>0?t.peak-r:t.peak+r;   // keep stop ~1R behind the high, never below breakeven past 1R
+  return dir>0?Math.max(be,behind,t.stop):Math.min(be,behind,t.stop);}
+function healthOf(t){
+  if(t.hitStop)return{l:'🛑 Stopped out',c:'down'};
+  if(t.reversedAlerted)return{l:'🔴 Signal reversed against you',c:'down'};
+  if(t.warnStop)return{l:'⚠️ Near your stop',c:'down'};
+  if(t.warnStall)return{l:'🟡 Giving back gains',c:'hold'};
+  if(t.rMult>=1)return{l:`🟢 Winning · +${t.rMult.toFixed(1)}R`,c:'up'};
+  if(t.rMult>0)return{l:'🟢 In profit',c:'up'};
+  return{l:'🔻 In drawdown',c:'down'};
+}
+function adviceOf(t){
+  if(t.hitStop)return 'Exit done — review the setup, don’t revenge-trade.';
+  if(t.reversedAlerted)return 'The live signal flipped against you — momentum turned. Exiting here is defensible.';
+  if(t.warnStop)return 'Price is close to your stop — decide before it hits, don’t widen the stop.';
+  if(t.warnStall)return 'Pulled back from its high — trail your stop to '+tpx(t,suggestTrail(t))+' to protect gains.';
+  if(t.rMult>=2)return 'Strong winner (+'+t.rMult.toFixed(1)+'R) — trail stop to '+tpx(t,suggestTrail(t))+' and let it run.';
+  if(t.rMult>=1)return 'In good profit — move stop to at least breakeven ('+tpx(t,t.entry)+'); risk-free from here.';
+  if(t.rMult>0)return 'Working but young — give it room to your stop, don’t exit early.';
+  return 'Underwater — respect your stop, don’t average down.';
+}
+function monitorTrades(prices){
+  const a=loadTrades();if(!a.length){renderTrades();return;}let changed=false;
+  a.forEach(t=>{const p=prices[t.sym];if(!(p>0))return;t.price=p;const dir=t.dir,r=R0(t);
+    if(t.peak==null||(dir>0?p>t.peak:p<t.peak))t.peak=p;
+    t.rMult=(dir>0?(p-t.entry):(t.entry-p))/r;
+    // stop / targets
+    if(!t.hitStop&&((dir>0&&p<=t.stop)||(dir<0&&p>=t.stop))){t.hitStop=true;changed=true;notify('🛑 Stop hit — '+t.name,'Exit now · '+tpnl(t).toFixed(1)+'% ('+t.rMult.toFixed(1)+'R). '+adviceOf(t));}
+    t.targets.forEach((tg,k)=>{if(!t.hitTgts[k]&&((dir>0&&p>=tg)||(dir<0&&p<=tg))){t.hitTgts[k]=true;changed=true;notify('🎯 Target '+(k+1)+' hit — '+t.name,'+'+tpnl(t).toFixed(1)+'% ('+t.rMult.toFixed(1)+'R)'+(k===0?' · move stop to breakeven & let the rest run':k===2?' · trade complete':' · book a third, trail the rest'));}});
+    // R milestones (+1R, +2R, ...) with a trail suggestion
+    const rInt=Math.floor(t.rMult);
+    if(t.rMult>=1&&rInt>t.lastR){t.lastR=rInt;changed=true;notify('💪 '+t.name+' up +'+rInt+'R','Lock it in — trail your stop to '+tpx(t,suggestTrail(t))+'.');}
+    // early "nearing your stop" warning (within 25% of remaining risk)
+    const distStopR=(dir>0?(p-t.stop):(t.stop-p))/r;
+    if(!t.hitStop&&!t.warnStop&&distStopR<0.25){t.warnStop=true;changed=true;notify('⚠️ '+t.name+' nearing your stop','Only ~'+Math.max(0,distStopR*100).toFixed(0)+'% of your risk left — be ready to exit.');}
+    if(distStopR>0.5)t.warnStop=false;
+    // giving-back-gains: pulled back >0.6R from the peak while in profit
+    const pull=(dir>0?(t.peak-p):(p-t.peak))/r;
+    if(t.lastR>=1&&!t.warnStall&&pull>0.6){t.warnStall=true;changed=true;notify('🟡 '+t.name+' giving back gains','Down '+pull.toFixed(1)+'R from its high — consider booking / tightening.');}
+    if(pull<0.25)t.warnStall=false;
+    // signal reversal (when the asset is in the current scan)
+    const r2=lastResults.find(x=>x.asset.sym===t.sym);
+    if(r2&&!t.reversedAlerted){const rev=(dir>0&&r2.sig.verdict==='SELL')||(dir<0&&r2.sig.verdict==='BUY');if(rev){t.reversedAlerted=true;changed=true;notify('🔴 '+t.name+' signal reversed','Live signal flipped against your trade — momentum turned. '+adviceOf({...t,reversedAlerted:true}));}}
+  });
+  if(changed)saveTrades(a);renderTrades();
+}
+async function monitorPoll(){
+  const a=loadTrades();if(!a.length)return;const prices={};
+  if(a.some(t=>t.cls==='Crypto')){try{const t=await fetch('https://api.coindcx.com/exchange/ticker').then(r=>r.json());if(Array.isArray(t))t.forEach(x=>prices[x.market]=+x.last_price);}catch(e){}}
+  if(a.some(t=>t.cls!=='Crypto')&&!status.demo){try{const d=await(await fetch('/api/quotes?tab=All')).json();if(d.quotes)Object.assign(prices,d.quotes);}catch(e){}}
+  monitorTrades(prices);
+}
+function toggleTrades(){const el=document.getElementById('tradesPanel');el.style.display=el.style.display==='none'?'block':'none';if(el.style.display==='block')renderTrades();}
+function renderTrades(){
+  const el=document.getElementById('tradesPanel');updateTradesBtn();const a=loadTrades();
+  if(!a.length){el.innerHTML='<div class="tradespanel"><b>No tracked trades.</b> Hit “✅ I placed this trade” on any card to track it and get alerts.</div>';return;}
+  const rows=a.map(t=>{const pnl=tpnl(t),lv=[t.stop,t.entry,...t.targets],lo=Math.min(...lv),hi=Math.max(...lv),sp=hi-lo||1,pos=v=>Math.max(0,Math.min(100,((v-lo)/sp)*100)),p=t.price||t.entry;
+    const H=healthOf(t), trail=suggestTrail(t), showTrail=(t.rMult>=1)&&(t.dir>0?trail>t.stop:trail<t.stop)&&!t.hitStop;
+    return `<div class="trow"><div class="th"><div><span class="nm">${t.name}</span> <span class="sub">${t.tk?t.tk+' · ':''}${t.dir>0?'LONG':'SHORT'} · ${t.tf}</span></div>
+      <div style="text-align:right"><span class="tpnl ${pnl>=0?'up':'down'}">${pnl>=0?'+':''}${pnl.toFixed(2)}%</span> <span class="sub">${t.rMult>=0?'+':''}${t.rMult.toFixed(1)}R</span> <button class="tclose" onclick="closeTrade('${t.id}')">Close</button></div></div>
+      <div class="tstatus" style="color:var(--${H.c});font-weight:700;margin:4px 0">${H.l}</div>
+      <div class="tbar"><div class="mk" style="left:${pos(t.stop)}%;background:var(--sell)"></div><div class="lab" style="left:${pos(t.stop)}%;color:var(--sell)">SL</div>
+        <div class="mk" style="left:${pos(t.entry)}%;background:var(--muted)"></div><div class="lab" style="left:${pos(t.entry)}%;color:var(--muted)">In</div>
+        ${t.targets.map((tg,k)=>`<div class="mk" style="left:${pos(tg)}%;background:var(--buy)"></div><div class="lab" style="left:${pos(tg)}%;color:var(--buy)">T${k+1}</div>`).join('')}
+        <div class="mk now" style="left:${pos(p)}%"></div></div>
+      <div class="tstatus">💡 ${adviceOf(t)}</div>
+      <div class="tstatus">now ${tpx(t,p)} · in ${tpx(t,t.entry)} · stop ${tpx(t,t.stop)}${showTrail?` · <b style="color:var(--accent2)">suggested trail → ${tpx(t,trail)}</b>`:''}</div></div>`;}).join('');
+  el.innerHTML=`<div class="tradespanel"><h3>📋 My tracked trades (${a.length})</h3>${rows}<p class="small" style="margin-top:6px"><b>R</b> = profit measured against your original risk (+2R means you've made twice what you risked). Alerts fire while the app is open in any tab (even backgrounded) — allow notifications when prompted. Crypto prices from CoinDCX, stocks from your Upstox feed. Tracks levels &amp; gives guidance only — it does not place or close real orders.</p></div>`;
+}
+setInterval(monitorPoll,15000);
+// Background reversal watcher — re-checks the live signal for EVERY open trade (even off-screen) every 60s
+async function checkReversals(){
+  const open=loadTrades().filter(t=>!t.hitStop&&!t.reversedAlerted);if(!open.length)return;
+  const verdicts={};
+  // crypto: fetch fresh CoinDCX candles (your browser) grouped by timeframe, ask server for the verdict
+  const cg=open.filter(t=>t.cls==='Crypto');
+  if(cg.length){const byTf={};cg.forEach(t=>{(byTf[t.tf]=byTf[t.tf]||[]).push(t);});
+    for(const tf in byTf){try{
+      const assets=[];
+      await mapLimitClient(byTf[tf],6,async t=>{try{const base=t.sym.slice(0,-3);
+        const j=await fetch(`https://public.coindcx.com/market_data/candles?pair=I-${base}_INR&interval=${CDX_INT_C[tf]||'1h'}&limit=300`).then(r=>r.json());
+        if(Array.isArray(j)&&j.length>=41){const rev=j.slice().reverse();const close=[],high=[],low=[],times=[];for(const k of rev){const c=+k.close;if(!isFinite(c))continue;close.push(c);high.push(+k.high);low.push(+k.low);times.push(+k.time);}assets.push({sym:t.sym,tk:base,name:base,close,high,low,times,price:close[close.length-1]});}}catch(e){}});
+      if(assets.length){const d=await(await fetch('/api/crypto-signals',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tf,assets})})).json();(d.results||[]).forEach(r=>verdicts[r.asset.sym]=r.sig.verdict);}
+    }catch(e){}}}
+  // stocks/ETFs/commodities: server fetches Upstox candles per symbol
+  const st=open.filter(t=>t.cls!=='Crypto');
+  if(st.length&&!status.demo){await mapLimitClient(st,4,async t=>{try{const d=await(await fetch('/api/signal?sym='+encodeURIComponent(t.sym)+'&tf='+t.tf)).json();if(d.verdict)verdicts[t.sym]=d.verdict;}catch(e){}});}
+  // apply reversals
+  const all=loadTrades();let changed=false;
+  all.forEach(t=>{if(t.hitStop||t.reversedAlerted)return;const v=verdicts[t.sym];if(!v)return;
+    if((t.dir>0&&v==='SELL')||(t.dir<0&&v==='BUY')){t.reversedAlerted=true;changed=true;notify('🔴 '+t.name+' signal reversed','The live signal flipped against your trade — momentum has turned. Exiting or tightening your stop is defensible.');}});
+  if(changed){saveTrades(all);renderTrades();}
+}
+setInterval(checkReversals,60000);
+
 let scanning=false;
 async function runScan(){
   if(scanning)return;scanning=true;document.getElementById('scanBtn').disabled=true;
   document.getElementById('pf').style.width='20%';document.getElementById('pstat').textContent='Scanning '+activeTab+'…';
+  // CRYPTO: fetch from YOUR browser (India IP) → CoinDCX works, exact ₹ prices. Server only does the math.
+  if(activeTab==='Crypto' && !status.demo){
+    try{
+      document.getElementById('pstat').textContent='Fetching CoinDCX (your browser)…';
+      const assets=await fetchCoinDCXCrypto(timeframe);
+      if(!assets.length)throw new Error('no data');
+      const d=await(await fetch('/api/crypto-signals',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tf:timeframe,assets})})).json();
+      if(d.error)throw new Error(d.error);
+      document.getElementById('pf').style.width='100%';
+      render(d.results);
+      const now=new Date();document.getElementById('lastUpd').textContent='Updated '+now.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true});
+      document.getElementById('pstat').textContent=`${d.analyzed}/${d.total} live · CoinDCX ${cryptoCcy==='USDT'?'($)':'(₹)'}`;
+      scanning=false;document.getElementById('scanBtn').disabled=false;scheduleRefresh();return;
+    }catch(e){
+      document.getElementById('pstat').textContent='CoinDCX blocked in browser — using global feed';
+      // fall through to the server scan (global ₹) so the tab still shows something
+    }
+  }
   try{
     const r=await fetch('/api/scan?tab='+encodeURIComponent(activeTab)+'&tf='+timeframe);
     const d=await r.json();
@@ -197,6 +381,15 @@ async function runScan(){
 }
 async function pollQuotes(){
   if(!lastResults.length||status.demo)return;
+  // crypto: refresh prices straight from CoinDCX (your browser) so ₹ ticks in real time
+  if(activeTab==='Crypto'){
+    try{const t=await fetch("https://api.coindcx.com/exchange/ticker").then(r=>r.json());
+      if(Array.isArray(t)){const by={};t.forEach(x=>by[x.market]=+x.last_price);const usd=t.find(x=>x.market==='USDTINR');if(usd&&+usd.last_price>0)usdtInr=+usd.last_price;
+        lastResults.forEach(r=>{const q=by[r.asset.sym];if(q&&isFinite(q)){r.sig.price=q;const el=document.getElementById('px_'+id4(r.asset.sym));if(el)el.textContent=fmtR(r)(q);}});
+        const now=new Date();document.getElementById('lastUpd').textContent='LTP '+now.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true});}
+    }catch(e){}
+    return;
+  }
   try{const d=await(await fetch('/api/quotes?tab='+encodeURIComponent(activeTab))).json();
     if(!d.quotes)return;let touched=false;
     lastResults.forEach(r=>{const q=d.quotes[r.asset.sym];if(q&&isFinite(q)){r.sig.price=q;touched=true;
@@ -280,7 +473,7 @@ function renderSummary(bb,bs){const make=(r,isBuy)=>{if(!r)return `<div class="h
     <div class="nm">${r.asset.name} <small>${r.asset.tk?r.asset.tk+' · ':''}${r.asset.sym} · ${r.setup.type}</small></div>
     <div class="ret">${ret>=0?'+':''}${ret.toFixed(1)}% <span style="font-size:13px;color:var(--muted)">→ Target 1</span></div>
     <div class="act" style="color:${a.cls==='now'?'var(--buy)':a.cls==='exit'?'var(--sell)':'var(--hold)'}">${a.txt}</div>
-    <div class="meta">Entry ${fmtVal(r.setup.entryLo,r.dec,r.isIndex)}–${fmtVal(r.setup.entryHi,r.dec,r.isIndex)} · SL ${fmtVal(r.setup.stop,r.dec,r.isIndex)} · RRR ${r.setup.rrr.toFixed(1)}:1</div>
+    <div class="meta">Entry ${fmtR(r)(r.setup.entryLo)}–${fmtR(r)(r.setup.entryHi)} · SL ${fmtR(r)(r.setup.stop)} · RRR ${r.setup.rrr.toFixed(1)}:1</div>
     ${z.qty>0?`<div class="meta" style="margin-top:6px;color:var(--txt)">💰 Invest ${money(z.posValue,0)} · 💵 cash ${money(z.margin,0)}${z.lev>1?` (${z.lev}×)`:''} · risk <span style="color:var(--sell)">−${money(z.actualRisk,0)}</span> → make <span style="color:${isBuy?'var(--buy)':'var(--sell)'}">${money(z.profit[2],0)}</span> at T3</div>`:''}</div>`;};
   document.getElementById('summary').innerHTML=make(bb,true)+make(bs,false);}
 function renderCards(id,list,isBuy){const el=document.getElementById(id);if(!list.length){el.innerHTML='<div class="empty">No '+(isBuy?'long':'short')+' setups this scan.</div>';return;}el.innerHTML=list.map((r,i)=>card(r,i,isBuy)).join('');}
@@ -291,7 +484,7 @@ function btBadge(bt){
   const s=bt.score,c=s>=70?'var(--buy)':s>=55?'var(--accent2)':s>=40?'var(--hold)':'var(--sell)';
   return `<div class="btmini" style="border-color:${c};color:${c}" title="How this name backtested on this timeframe (${bt.trades} trades). Higher = better.">BT ${s}</div>`;
 }
-function card(r,i,isBuy){const{asset,sig,setup,reasons,dec,action,scope,asof,isIndex,priceTag,series,bt}=r,f=v=>fmtVal(v,dec,isIndex),open=i<3?'open':'';
+function card(r,i,isBuy){const{asset,sig,setup,reasons,dec,action,scope,asof,isIndex,priceTag,series,bt}=r,f=fmtR(r),open=i<3?'open':'';
   const tn=['Target 1','Target 2','Target 3'];
   const tgts=setup.targets.map((t,k)=>`<div class="lv t${k+1}"><div class="k">${tn[k]}</div><div class="v">${f(t)}</div><div class="r">${setup.ret[k]>=0?'+':''}${setup.ret[k].toFixed(1)}%</div></div>`).join('');
   return `<div class="tc ${open} ${isBuy?'':'sellcard'}">
@@ -316,6 +509,7 @@ function card(r,i,isBuy){const{asset,sig,setup,reasons,dec,action,scope,asof,isI
       ${ladder(setup)}
       <div class="levels"><div class="lv stop"><div class="k">Stop Loss</div><div class="v">${f(setup.stop)}</div><div class="r" style="color:var(--sell)">−${setup.riskPct.toFixed(1)}%</div></div>${tgts}</div>
       ${sizingBlock(asset,setup)}
+      <button class="placebtn" onclick="event.stopPropagation();placeTrade('${asset.sym}')">✅ I placed this trade — track &amp; alert me</button>
       <div class="reasons"><h4 class="for">✅ Reasons FOR</h4><ul>${reasons.forR.map(x=>`<li class="for">${x}</li>`).join('')}</ul>
       <h4 class="against">⚠️ Reasons AGAINST</h4><ul>${reasons.against.map(x=>`<li class="against">${x}</li>`).join('')}</ul>
       <h4 class="inval">🛑 Invalidation</h4><ul>${reasons.inval.map(x=>`<li class="inval">${x}</li>`).join('')}</ul></div>
@@ -350,13 +544,15 @@ function refreshSecs(){return (activeTab!=='Crypto'&&!status.marketOpen)?120:60;
 function scheduleRefresh(){refreshAt=Date.now()+refreshSecs()*1000;}
 function tickCountdown(){if(!refreshAt)return;const left=Math.max(0,Math.round((refreshAt-Date.now())/1000));document.getElementById('nextRef').textContent=`⟳ refresh in ${left}s · ${timeframe}`;if(left<=0&&!scanning){refreshAt=0;runScan();}}
 function updateMkt(){const st=document.getElementById('mktStatus');if(activeTab==='Crypto'){st.className='badge open';st.textContent='Crypto · 24×7';return;}const o=status.marketOpen;st.className='badge '+(o?'open':'closed');st.textContent=o?'NSE/BSE · OPEN':'NSE/BSE · Closed';}
-function renderTabs(){const t=document.getElementById('tabs');t.innerHTML='';["Stocks","ETFs / Indices","Commodities","Crypto","All"].forEach(k=>{const b=document.createElement('div');b.className='tab'+(k===activeTab?' active':'');b.textContent=k;b.onclick=()=>{activeTab=k;renderTabs();updateMkt();runScan();};t.appendChild(b);});}
+function renderTabs(){const t=document.getElementById('tabs');t.innerHTML='';["Stocks","ETFs / Indices","Commodities","Crypto","All"].forEach(k=>{const b=document.createElement('div');b.className='tab'+(k===activeTab?' active':'');b.textContent=k;b.onclick=()=>{activeTab=k;renderTabs();updateMkt();runScan();};t.appendChild(b);});
+  document.getElementById('ccy').style.display=activeTab==='Crypto'?'flex':'none';}
 document.getElementById('tf').addEventListener('click',e=>{const d=e.target.closest('[data-tf]');if(!d)return;timeframe=d.dataset.tf;[...document.querySelectorAll('#tf div')].forEach(x=>x.classList.toggle('on',x===d));runScan();});
+document.getElementById('ccy').addEventListener('click',e=>{const d=e.target.closest('[data-ccy]');if(!d)return;cryptoCcy=d.dataset.ccy;[...document.querySelectorAll('#ccy div')].forEach(x=>x.classList.toggle('on',x===d));if(lastResults.length)render(lastResults);});
 setInterval(tickCountdown,1000);
 setInterval(pollQuotes,8000);
 setInterval(getStatus,60000);
 
-renderTabs();onRiskChange();onMinScore();getStatus().then(runScan);
+renderTabs();onRiskChange();onMinScore();updateTradesBtn();renderTrades();monitorPoll();checkReversals();getStatus().then(runScan);
 </script>
 </body>
 </html>
