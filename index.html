@@ -171,6 +171,20 @@
 <script>
 let activeTab="Stocks",timeframe="30m",lastResults=[],status={},refreshAt=0;
 let cryptoCcy="INR", usdtInr=0, cryptoSource="";       // ₹/USDT toggle + USDT→INR rate + active source label
+let lastCryptoMode="";                                  // 'coindcx' (browser) | 'server-coindcx' (India host) | 'global'
+function setCryptoNote(mode){
+  const cn=document.getElementById('cryptoNote'); if(!cn) return;
+  if(activeTab!=='Crypto'){cn.style.display='none';return;}
+  cn.style.display='block';
+  if(mode==='coindcx'||mode==='server-coindcx'){
+    const via = mode==='coindcx' ? 'your browser' : 'the India server';
+    cn.innerHTML='<div class="infobox" style="border-color:rgba(34,197,94,.4)"><b>✅ Exact CoinDCX ₹ — live.</b> Prices come from CoinDCX via '+via+', so the ₹ here matches your CoinDCX screen. Both ₹ and $ USDT are exact. Place orders on CoinDCX using the setup’s direction and entry / stop / target levels.</div>';
+  } else if(mode==='global'){
+    cn.innerHTML='<div class="infobox" style="border-color:rgba(240,185,11,.35)"><b>ℹ️ Crypto is on the global ₹ feed right now.</b> This server can’t reach CoinDCX, so ₹ values run ~1–4% below your CoinDCX screen (the India premium). <b>Your decisions are unaffected:</b> direction, signal and all % levels (entry / stop / targets, risk:reward) match CoinDCX, and $ USDT values are exact. For exact ₹, host in an India region or run locally.</div>';
+  } else {
+    cn.innerHTML='<div class="infobox"><b>⏳ Loading crypto feed…</b></div>';
+  }
+}
 const CRYPTO_N=40;                                     // top coins fetched client-side (kept small so it's fast, not hanging)
 const CDX_INT_C={"15m":"15m","30m":"30m","1h":"1h","4h":"4h","6h":"6h","12h":"12h","daily":"1d"};
 const STABLE_C=new Set(["USDT","USDC","DAI","TUSD","BUSD","FDUSD","USDP","USDD","EUR","GBP","AEUR"]);
@@ -389,7 +403,7 @@ async function runScan(){
       if(!assets.length)throw new Error('no data');
       const d=await(await fetch('/api/crypto-signals',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tf:timeframe,assets})})).json();
       if(d.error)throw new Error(d.error);
-      cryptoSource='coindcx';document.getElementById('pf').style.width='100%';
+      cryptoSource='coindcx';lastCryptoMode='coindcx';setCryptoNote('coindcx');document.getElementById('pf').style.width='100%';
       render(d.results);
       const now=new Date();document.getElementById('lastUpd').textContent='Updated '+now.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true});
       document.getElementById('pstat').textContent=`✅ ${d.analyzed} coins · CoinDCX (your browser) · ${cryptoCcy}`;
@@ -409,9 +423,15 @@ async function runScan(){
     render(d.results);
     const now=new Date();
     document.getElementById('lastUpd').textContent='Updated '+now.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true});
-    document.getElementById('pstat').textContent=(activeTab==='Crypto'&&cryptoSource==='global')
-      ? `⚠️ CoinDCX blocked in browser — ${d.analyzed}/${d.total} on global ₹ feed`
-      : `${d.analyzed}/${d.total} live${d.cached?' (cached)':''}${d.note?' · ⚠ '+d.note:''}`;
+    if(activeTab==='Crypto'){
+      const src=(d.cryptoMode==='coindcx')?'server-coindcx':'global';
+      cryptoSource=(src==='server-coindcx')?'server-coindcx':'global';lastCryptoMode=src;setCryptoNote(src);
+      document.getElementById('pstat').textContent=(src==='server-coindcx')
+        ? `✅ Exact CoinDCX ₹ (India server) — ${d.analyzed}/${d.total} live`
+        : `⚠️ Global ₹ feed — ${d.analyzed}/${d.total} (server can’t reach CoinDCX)`;
+    } else {
+      document.getElementById('pstat').textContent=`${d.analyzed}/${d.total} live${d.cached?' (cached)':''}${d.note?' · ⚠ '+d.note:''}`;
+    }
   }catch(e){document.getElementById('pstat').textContent='Error';document.getElementById('buyCards').innerHTML='<div class="empty">Backend error: '+e.message+'</div>';}
   scanning=false;document.getElementById('scanBtn').disabled=false;scheduleRefresh();
 }
@@ -583,9 +603,8 @@ function tickCountdown(){if(!refreshAt)return;const left=Math.max(0,Math.round((
 function updateMkt(){const st=document.getElementById('mktStatus');if(activeTab==='Crypto'){st.className='badge open';st.textContent='Crypto · 24×7';return;}const o=status.marketOpen;st.className='badge '+(o?'open':'closed');st.textContent=o?'NSE/BSE · OPEN':'NSE/BSE · Closed';}
 function renderTabs(){const t=document.getElementById('tabs');t.innerHTML='';["Stocks","ETFs / Indices","Commodities","Crypto","All"].forEach(k=>{const b=document.createElement('div');b.className='tab'+(k===activeTab?' active':'');b.textContent=k;b.onclick=()=>{activeTab=k;renderTabs();updateMkt();runScan();};t.appendChild(b);});
   document.getElementById('ccy').style.display=activeTab==='Crypto'?'flex':'none';
-  const cn=document.getElementById('cryptoNote');
-  if(activeTab==='Crypto'){cn.style.display='block';cn.innerHTML='<div class="infobox" style="border-color:rgba(240,185,11,.35)"><b>ℹ️ Crypto runs on the global market feed.</b> CoinDCX blocks access from outside India (browser <i>and</i> server), so exact CoinDCX prices aren’t available on a hosted app. <b>This does not affect your decisions:</b> the direction, signal, and all % levels (entry / stop / targets, risk:reward) are correct and match CoinDCX. The <b>$ USDT</b> values are exact global prices; the <b>₹</b> values run ~1–4% below your CoinDCX screen (the India premium). Place orders on CoinDCX using the setup’s direction and % levels. Want tick-exact CoinDCX prices? Run this app locally on your India computer — ask me and I’ll package it.</div>';}
-  else cn.style.display='none';}
+  if(activeTab==='Crypto'){setCryptoNote(lastCryptoMode);}
+  else document.getElementById('cryptoNote').style.display='none';}
 document.getElementById('tf').addEventListener('click',e=>{const d=e.target.closest('[data-tf]');if(!d)return;timeframe=d.dataset.tf;[...document.querySelectorAll('#tf div')].forEach(x=>x.classList.toggle('on',x===d));runScan();});
 document.getElementById('ccy').addEventListener('click',async e=>{const d=e.target.closest('[data-ccy]');if(!d)return;cryptoCcy=d.dataset.ccy;[...document.querySelectorAll('#ccy div')].forEach(x=>x.classList.toggle('on',x===d));if(cryptoCcy==='USDT')await ensureRate();if(lastResults.length)render(lastResults);});
 setInterval(tickCountdown,1000);
