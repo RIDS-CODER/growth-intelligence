@@ -254,18 +254,26 @@ function tpnl(t){return t.price>0?(t.dir>0?(t.price/t.entry-1):(t.entry/t.price-
 function placeTrade(sym){
   const r=lastResults.find(x=>x.asset.sym===sym);if(!r){toast('Trade not found — rescan and retry');return;}
   requestNotify();
-  const t={id:Date.now()+'_'+sym,sym,tk:r.asset.tk||'',name:r.asset.name,cls:r.asset.cls,dir:r.setup.dir,
-    entry:r.sig.price,stop:r.setup.stop,initStop:r.setup.stop,targets:r.setup.targets.slice(),dec:r.dec,isIndex:r.isIndex,tf:timeframe,
-    placedAt:Date.now(),price:r.sig.price,peak:r.sig.price,rMult:0,lastR:0,
+  const dir=r.setup.dir,p0=r.sig.price,lo=r.setup.entryLo,hi=r.setup.entryHi;
+  // Are we entering at market now, or resting a limit at the dip/bounce zone?
+  const atMarket = dir>0 ? (p0<=hi) : (p0>=lo);   // long: price already in/below the buy zone; short: in/above the sell zone
+  const planEntry = dir>0 ? hi : lo;              // your limit sits at the near edge of the entry zone
+  const entry = atMarket ? p0 : planEntry;        // filled at current price now, OR (pending) your limit level at the dip
+  const t={id:Date.now()+'_'+sym,sym,tk:r.asset.tk||'',name:r.asset.name,cls:r.asset.cls,dir,
+    entry, planEntry, entryLo:lo, entryHi:hi, stop:r.setup.stop,initStop:r.setup.stop,targets:r.setup.targets.slice(),dec:r.dec,isIndex:r.isIndex,tf:timeframe,
+    filled:atMarket, placedAt:Date.now(), filledAt:atMarket?Date.now():null,
+    price:p0, peak:entry, rMult:0,lastR:0,
     hitStop:false,hitTgts:[false,false,false],half:false,warnStop:false,warnStall:false,reversedAlerted:false};
   const a=loadTrades();a.push(t);saveTrades(a);document.getElementById('tradesPanel').style.display='block';renderTrades();
-  notify('✅ Tracking '+t.name,'Entry '+tpx(t,t.entry)+' — I\'ll alert you on targets & the stop');
+  if(atMarket) notify('✅ Tracking '+t.name,'Entered at '+tpx(t,entry)+' — I\'ll alert you on targets & the stop');
+  else notify('⏳ Watching '+t.name,'Waiting for the '+(dir>0?'dip':'bounce')+' to '+tpx(t,entry)+' before the trade goes live. I\'ll tell you the moment it fills.');
 }
 function closeTrade(id){saveTrades(loadTrades().filter(t=>t.id!==id));renderTrades();}
 const R0=t=>Math.abs(t.entry-(t.initStop||t.stop))||1;                       // initial risk per unit (1R)
 function suggestTrail(t){const dir=t.dir,r=R0(t),be=t.entry,behind=dir>0?t.peak-r:t.peak+r;   // keep stop ~1R behind the high, never below breakeven past 1R
   return dir>0?Math.max(be,behind,t.stop):Math.min(be,behind,t.stop);}
 function healthOf(t){
+  if(t.filled===false)return{l:'⏳ Waiting for entry '+tpx(t,t.entry),c:'hold'};
   if(t.hitStop)return{l:'🛑 Stopped out',c:'down'};
   if(t.reversedAlerted)return{l:'🔴 Signal reversed against you',c:'down'};
   if(t.warnStop)return{l:'⚠️ Near your stop',c:'down'};
@@ -276,6 +284,7 @@ function healthOf(t){
   return{l:'🔻 In drawdown',c:'down'};
 }
 function adviceOf(t){
+  if(t.filled===false)return 'Not in yet — rest a buy limit at '+tpx(t,t.entry)+'. P&L starts only once price reaches it. Don’t chase above the zone.';
   if(t.hitStop)return 'Exit done — review the setup, don’t revenge-trade.';
   if(t.reversedAlerted)return 'The live signal flipped against you — momentum turned. Exiting here is defensible.';
   if(t.warnStop)return 'Price is close to your stop — decide before it hits, don’t widen the stop.';
@@ -287,7 +296,14 @@ function adviceOf(t){
 }
 function monitorTrades(prices){
   const a=loadTrades();if(!a.length){renderTrades();return;}let changed=false;
-  a.forEach(t=>{const p=prices[t.sym];if(!(p>0))return;t.price=p;const dir=t.dir,r=R0(t);
+  a.forEach(t=>{const p=prices[t.sym];if(!(p>0))return;t.price=p;const dir=t.dir;
+    // Pending limit at the dip/bounce zone — not live until price actually reaches it
+    if(t.filled===false){
+      const reached = dir>0 ? (p<=t.entry) : (p>=t.entry);
+      if(reached){t.filled=true;t.filledAt=Date.now();t.peak=t.entry;changed=true;notify('✅ '+t.name+' filled','Price hit your entry '+tpx(t,t.entry)+' — trade is now live. Stop '+tpx(t,t.stop)+'.');}
+      else return;   // still waiting for the dip; don't compute P&L off the current price
+    }
+    const r=R0(t);
     if(t.peak==null||(dir>0?p>t.peak:p<t.peak))t.peak=p;
     t.rMult=(dir>0?(p-t.entry):(t.entry-p))/r;
     // stop / targets
@@ -325,9 +341,10 @@ function renderTrades(){
   const el=document.getElementById('tradesPanel');updateTradesBtn();const a=loadTrades();
   if(!a.length){el.innerHTML='<div class="tradespanel"><b>No tracked trades.</b> Hit “✅ I placed this trade” on any card to track it and get alerts.</div>';return;}
   const rows=a.map(t=>{const pnl=tpnl(t),lv=[t.stop,t.entry,...t.targets],lo=Math.min(...lv),hi=Math.max(...lv),sp=hi-lo||1,pos=v=>Math.max(0,Math.min(100,((v-lo)/sp)*100)),p=t.price||t.entry;
-    const H=healthOf(t), trail=suggestTrail(t), showTrail=(t.rMult>=1)&&(t.dir>0?trail>t.stop:trail<t.stop)&&!t.hitStop;
+    const H=healthOf(t), trail=suggestTrail(t), showTrail=(t.filled!==false)&&(t.rMult>=1)&&(t.dir>0?trail>t.stop:trail<t.stop)&&!t.hitStop;
+    const pending=t.filled===false;
     return `<div class="trow"><div class="th"><div><span class="nm">${t.name}</span> <span class="sub">${t.tk?t.tk+' · ':''}${t.dir>0?'LONG':'SHORT'} · ${t.tf}</span></div>
-      <div style="text-align:right"><span class="tpnl ${pnl>=0?'up':'down'}">${pnl>=0?'+':''}${pnl.toFixed(2)}%</span> <span class="sub">${t.rMult>=0?'+':''}${t.rMult.toFixed(1)}R</span> <button class="tclose" onclick="closeTrade('${t.id}')">Close</button></div></div>
+      <div style="text-align:right">${pending?`<span class="sub">⏳ pending fill</span>`:`<span class="tpnl ${pnl>=0?'up':'down'}">${pnl>=0?'+':''}${pnl.toFixed(2)}%</span> <span class="sub">${t.rMult>=0?'+':''}${t.rMult.toFixed(1)}R</span>`} <button class="tclose" onclick="closeTrade('${t.id}')">Close</button></div></div>
       <div class="tstatus" style="color:var(--${H.c});font-weight:700;margin:4px 0">${H.l}</div>
       <div class="tbar"><div class="mk" style="left:${pos(t.stop)}%;background:var(--sell)"></div><div class="lab" style="left:${pos(t.stop)}%;color:var(--sell)">SL</div>
         <div class="mk" style="left:${pos(t.entry)}%;background:var(--muted)"></div><div class="lab" style="left:${pos(t.entry)}%;color:var(--muted)">In</div>
