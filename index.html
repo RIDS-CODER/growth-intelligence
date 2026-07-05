@@ -268,19 +268,33 @@ function tpnl(t){return t.price>0?(t.dir>0?(t.price/t.entry-1):(t.entry/t.price-
 function placeTrade(sym){
   const r=lastResults.find(x=>x.asset.sym===sym);if(!r){toast('Trade not found — rescan and retry');return;}
   requestNotify();
-  const dir=r.setup.dir,p0=r.sig.price,lo=r.setup.entryLo,hi=r.setup.entryHi;
-  // Are we entering at market now, or resting a limit at the dip/bounce zone?
-  const atMarket = dir>0 ? (p0<=hi) : (p0>=lo);   // long: price already in/below the buy zone; short: in/above the sell zone
-  const planEntry = dir>0 ? hi : lo;              // your limit sits at the near edge of the entry zone
-  const entry = atMarket ? p0 : planEntry;        // filled at current price now, OR (pending) your limit level at the dip
+  const dir=r.setup.dir,p0=r.sig.price,lo=r.setup.entryLo,hi=r.setup.entryHi,mid=r.setup.entry;
+  const fmt=v=>r.asset.cls==='Crypto'?cryptoPrice(v):fmtVal(v,r.dec,r.isIndex);
+  // Price already in / through the entry zone? Then you're likely entering at market now.
+  const atMarketable = dir>0 ? (p0<=hi) : (p0>=lo);
+  // Ask for the REAL fill price so tracking is exact — not an assumed edge of the zone.
+  const ans = prompt(
+    'Track "'+r.asset.name+'"  ('+(dir>0?'LONG':'SHORT')+')\n\n'+
+    'Type the price you were actually filled at.\n'+
+    (atMarketable
+      ? 'Leave blank to use the live price '+fmt(p0)+'.'
+      : 'Not in yet? Leave blank to WAIT for the '+(dir>0?'dip':'bounce')+' to '+fmt(mid)+' — I\'ll start tracking the moment it fills.'),
+    atMarketable ? String(+(+p0).toFixed(r.dec||2)) : ''
+  );
+  if(ans===null) return;                                   // cancelled
+  const typed = ans.trim()!=='' ? parseFloat(ans.replace(/[^0-9.]/g,'')) : NaN;
+  let entry, filled;
+  if(isFinite(typed)&&typed>0){ entry=typed; filled=true; }         // your real fill — most accurate
+  else if(atMarketable){ entry=p0; filled=true; }                    // blank + tradable now → live price
+  else { entry=mid; filled=false; }                                  // blank + waiting → pending at the zone midpoint
   const t={id:Date.now()+'_'+sym,sym,tk:r.asset.tk||'',name:r.asset.name,cls:r.asset.cls,dir,
-    entry, planEntry, entryLo:lo, entryHi:hi, stop:r.setup.stop,initStop:r.setup.stop,targets:r.setup.targets.slice(),dec:r.dec,isIndex:r.isIndex,tf:timeframe,
-    filled:atMarket, placedAt:Date.now(), filledAt:atMarket?Date.now():null,
-    price:p0, peak:entry, rMult:0,lastR:0,
+    entry, planEntry:entry, entryLo:lo, entryHi:hi, stop:r.setup.stop,initStop:r.setup.stop,targets:r.setup.targets.slice(),dec:r.dec,isIndex:r.isIndex,tf:timeframe,
+    filled, placedAt:Date.now(), filledAt:filled?Date.now():null,
+    price:filled?entry:p0, peak:entry, rMult:0,lastR:0, sigAgainst:false,
     hitStop:false,hitTgts:[false,false,false],half:false,warnStop:false,warnStall:false,reversedAlerted:false};
   const a=loadTrades();a.push(t);saveTrades(a);document.getElementById('tradesPanel').style.display='block';renderTrades();
-  if(atMarket) notify('✅ Tracking '+t.name,'Entered at '+tpx(t,entry)+' — I\'ll alert you on targets & the stop');
-  else notify('⏳ Watching '+t.name,'Waiting for the '+(dir>0?'dip':'bounce')+' to '+tpx(t,entry)+' before the trade goes live. I\'ll tell you the moment it fills.');
+  if(filled) notify('✅ Tracking '+t.name,'Entered at '+tpx(t,entry)+' — stop '+tpx(t,t.stop)+'. I\'ll alert on targets, the stop, and momentum shifts.');
+  else notify('⏳ Watching '+t.name,'Waiting for the '+(dir>0?'dip':'bounce')+' to '+tpx(t,entry)+' before it goes live. I\'ll tell you the moment it fills.');
 }
 function closeTrade(id){saveTrades(loadTrades().filter(t=>t.id!==id));renderTrades();}
 const R0=t=>Math.abs(t.entry-(t.initStop||t.stop))||1;                       // initial risk per unit (1R)
@@ -289,7 +303,7 @@ function suggestTrail(t){const dir=t.dir,r=R0(t),be=t.entry,behind=dir>0?t.peak-
 function healthOf(t){
   if(t.filled===false)return{l:'⏳ Waiting for entry '+tpx(t,t.entry),c:'hold'};
   if(t.hitStop)return{l:'🛑 Stopped out',c:'down'};
-  if(t.reversedAlerted)return{l:'🔴 Signal reversed against you',c:'down'};
+  if(t.sigAgainst)return{l:t.rMult>=1?`⚠️ Momentum cooled · still +${t.rMult.toFixed(1)}R`:'⚠️ Momentum turned — holding to plan',c:'hold'};
   if(t.warnStop)return{l:'⚠️ Near your stop',c:'down'};
   if(t.warnStall)return{l:'🟡 Giving back gains',c:'hold'};
   if(t.rMult>=1)return{l:`🟢 Winning · +${t.rMult.toFixed(1)}R`,c:'up'};
@@ -297,10 +311,15 @@ function healthOf(t){
   if(Math.abs(t.rMult)<0.05)return{l:'⚪ At entry — waiting',c:'muted'};
   return{l:'🔻 In drawdown',c:'down'};
 }
+function reversalAdvice(t){
+  if(t.rMult>=1)return 'Momentum cooled, but you’re up +'+t.rMult.toFixed(1)+'R. No need to dump at market — trail your stop to '+tpx(t,suggestTrail(t))+' and let the plan finish. Reversals often shake out and resume.';
+  if(t.rMult>0)return 'Signal softened while you’re slightly green. Move your stop toward breakeven ('+tpx(t,t.entry)+') and give it room — don’t panic-exit; it may turn back.';
+  return 'Signal is against you with no cushion yet. Let your stop at '+tpx(t,t.stop)+' do the work — that’s what it’s for. Only exit early if you have a real reason, and don’t widen the stop.';
+}
 function adviceOf(t){
-  if(t.filled===false)return 'Not in yet — rest a buy limit at '+tpx(t,t.entry)+'. P&L starts only once price reaches it. Don’t chase above the zone.';
+  if(t.filled===false)return 'Not in yet — rest a limit at '+tpx(t,t.entry)+'. P&L starts only once price reaches it. Don’t chase above the zone.';
   if(t.hitStop)return 'Exit done — review the setup, don’t revenge-trade.';
-  if(t.reversedAlerted)return 'The live signal flipped against you — momentum turned. Exiting here is defensible.';
+  if(t.sigAgainst)return reversalAdvice(t);
   if(t.warnStop)return 'Price is close to your stop — decide before it hits, don’t widen the stop.';
   if(t.warnStall)return 'Pulled back from its high — trail your stop to '+tpx(t,suggestTrail(t))+' to protect gains.';
   if(t.rMult>=2)return 'Strong winner (+'+t.rMult.toFixed(1)+'R) — trail stop to '+tpx(t,suggestTrail(t))+' and let it run.';
@@ -334,9 +353,12 @@ function monitorTrades(prices){
     const pull=(dir>0?(t.peak-p):(p-t.peak))/r;
     if(t.lastR>=1&&!t.warnStall&&pull>0.6){t.warnStall=true;changed=true;notify('🟡 '+t.name+' giving back gains','Down '+pull.toFixed(1)+'R from its high — consider booking / tightening.');}
     if(pull<0.25)t.warnStall=false;
-    // signal reversal (when the asset is in the current scan)
+    // signal momentum — re-evaluating, NOT a one-time "exit": warn when it turns, tell you when it recovers
     const r2=lastResults.find(x=>x.asset.sym===t.sym);
-    if(r2&&!t.reversedAlerted){const rev=(dir>0&&r2.sig.verdict==='SELL')||(dir<0&&r2.sig.verdict==='BUY');if(rev){t.reversedAlerted=true;changed=true;notify('🔴 '+t.name+' signal reversed','Live signal flipped against your trade — momentum turned. '+adviceOf({...t,reversedAlerted:true}));}}
+    if(r2){const against=(dir>0&&r2.sig.verdict==='SELL')||(dir<0&&r2.sig.verdict==='BUY');
+      const favor=(dir>0&&r2.sig.verdict==='BUY')||(dir<0&&r2.sig.verdict==='SELL');
+      if(against&&!t.sigAgainst){t.sigAgainst=true;changed=true;notify('⚠️ '+t.name+' momentum turned',reversalAdvice(t));}
+      else if(favor&&t.sigAgainst){t.sigAgainst=false;changed=true;notify('🟢 '+t.name+' signal recovered','Momentum is back in your favor — hold per your plan, your targets are still valid.');}}
   });
   if(changed)saveTrades(a);renderTrades();
 }
@@ -371,7 +393,7 @@ function renderTrades(){
 setInterval(monitorPoll,15000);
 // Background reversal watcher — re-checks the live signal for EVERY open trade (even off-screen) every 60s
 async function checkReversals(){
-  const open=loadTrades().filter(t=>!t.hitStop&&!t.reversedAlerted);if(!open.length)return;
+  const open=loadTrades().filter(t=>!t.hitStop&&t.filled!==false);if(!open.length)return;
   const verdicts={};
   // crypto: use the server global scan (works from any region) grouped by timeframe; keyed by global sym (e.g. BTCUSDT)
   const cg=open.filter(t=>t.cls==='Crypto');
@@ -383,10 +405,13 @@ async function checkReversals(){
   // stocks/ETFs/commodities: server fetches Upstox candles per symbol
   const st=open.filter(t=>t.cls!=='Crypto');
   if(st.length&&!status.demo){await mapLimitClient(st,4,async t=>{try{const d=await(await fetch('/api/signal?sym='+encodeURIComponent(t.sym)+'&tf='+t.tf)).json();if(d.verdict)verdicts[t.sym]=d.verdict;}catch(e){}});}
-  // apply reversals
+  // apply momentum changes (two-way: turn against → warn with context; recover → reassure)
   const all=loadTrades();let changed=false;
-  all.forEach(t=>{if(t.hitStop||t.reversedAlerted)return;const v=verdicts[t.sym]||(t.cls==='Crypto'&&t.tk?verdicts['base:'+t.tk]:null);if(!v)return;
-    if((t.dir>0&&v==='SELL')||(t.dir<0&&v==='BUY')){t.reversedAlerted=true;changed=true;notify('🔴 '+t.name+' signal reversed','The live signal flipped against your trade — momentum has turned. Exiting or tightening your stop is defensible.');}});
+  all.forEach(t=>{if(t.hitStop||t.filled===false)return;const v=verdicts[t.sym]||(t.cls==='Crypto'&&t.tk?verdicts['base:'+t.tk]:null);if(!v)return;
+    const against=(t.dir>0&&v==='SELL')||(t.dir<0&&v==='BUY');
+    const favor=(t.dir>0&&v==='BUY')||(t.dir<0&&v==='SELL');
+    if(against&&!t.sigAgainst){t.sigAgainst=true;changed=true;notify('⚠️ '+t.name+' momentum turned',reversalAdvice(t));}
+    else if(favor&&t.sigAgainst){t.sigAgainst=false;changed=true;notify('🟢 '+t.name+' signal recovered','Momentum is back in your favor — hold per your plan, your targets are still valid.');}});
   if(changed){saveTrades(all);renderTrades();}
 }
 setInterval(checkReversals,60000);
