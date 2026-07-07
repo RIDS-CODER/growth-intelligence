@@ -89,6 +89,12 @@
   .trow{border:1px solid var(--line);border-radius:11px;padding:10px 12px;margin-bottom:9px}
   .trow .th{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:13px}
   .trow .nm{font-weight:700}.trow .sub{font-size:11px;color:var(--muted);font-family:var(--mono)}
+  .rztab{padding:7px 12px;border-radius:9px;border:1px solid var(--line);background:var(--panel2);color:var(--muted);font-size:12px;font-weight:700;cursor:pointer;font-family:var(--mono)}
+  .rztab.on{border-color:#a78bfa;background:rgba(167,139,250,.16);color:#ddd6fe}
+  .rztbl{width:100%;border-collapse:collapse;margin-top:6px;font-size:12px}
+  .rztbl th{color:var(--muted);text-transform:uppercase;letter-spacing:.5px;font-size:10px;text-align:left;padding:4px 8px;border-bottom:1px solid var(--line)}
+  .rztbl td{padding:5px 8px;border-bottom:1px solid var(--line);font-family:var(--mono)}
+  .rzk{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
   .tpnl{font-family:var(--mono);font-weight:800;font-size:15px}
   .tbar{height:26px;border-radius:7px;background:var(--panel2);position:relative;margin:9px 0 4px;border:1px solid var(--line);overflow:hidden}
   .tbar .mk{position:absolute;top:0;bottom:0;width:2px}.tbar .now{width:3px;background:#fff;z-index:2}
@@ -152,10 +158,12 @@
     <button class="btn" onclick="toggleScoreInfo()">ℹ️ What does the score mean?</button>
     <button class="btn" id="btBtn" onclick="runBacktest()" style="border-color:var(--hold);background:var(--hold-bg);color:var(--hold)">📊 Backtest this tab</button>
     <button class="btn" id="tradesBtn" onclick="toggleTrades()" style="border-color:var(--accent2);background:rgba(34,211,238,.12);color:#a5f3fc">📋 My Trades (0)</button>
+    <button class="btn" id="researchBtn" onclick="toggleResearch()" style="border-color:#a78bfa;background:rgba(167,139,250,.14);color:#ddd6fe">🔎 Research a coin</button>
     <span class="pstat" id="filterNote"></span>
   </div>
   <div id="scoreInfo" style="display:none"></div>
   <div id="cryptoNote" style="display:none"></div>
+  <div id="researchPanel" style="display:none"></div>
   <div id="tradesPanel" style="display:none"></div>
   <div id="btPanel"></div>
   <div class="toast" id="toast"></div>
@@ -373,6 +381,60 @@ async function monitorPoll(){
   monitorTrades(prices);
 }
 function toggleTrades(){const el=document.getElementById('tradesPanel');el.style.display=el.style.display==='none'?'block':'none';if(el.style.display==='block')renderTrades();}
+/* ---- Research a coin: one blended plan across several timeframes (short or long horizon) ---- */
+let researchHorizon='short', researchBusy=false, researchLast='';
+function toggleResearch(){const el=document.getElementById('researchPanel');const show=el.style.display==='none';el.style.display=show?'block':'none';if(show)renderResearchShell();}
+function setHorizon(h){researchHorizon=h;document.querySelectorAll('.rztab').forEach(x=>x.classList.toggle('on',x.dataset.h===h));if((document.getElementById('rzSym')||{}).value)runResearch();}
+function renderResearchShell(){
+  const el=document.getElementById('researchPanel');
+  el.innerHTML=`<div class="tradespanel" style="border-color:rgba(167,139,250,.4)"><h3>🔎 Research a coin — one plan, averaged across timeframes</h3>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:6px 0">
+      <input id="rzSym" placeholder="Coin symbol — e.g. SOL, DOGE, BTC" value="${researchLast}" style="flex:1;min-width:150px;padding:9px 12px;border-radius:9px;border:1px solid var(--line);background:var(--panel2);color:var(--txt);font-family:var(--mono)" onkeydown="if(event.key==='Enter')runResearch()">
+      <div style="display:flex;gap:5px">
+        <div class="rztab ${researchHorizon==='short'?'on':''}" data-h="short" onclick="setHorizon('short')">Short-term · 15m–1h</div>
+        <div class="rztab ${researchHorizon==='long'?'on':''}" data-h="long" onclick="setHorizon('long')">Long-term · 4h–1D</div>
+      </div>
+      <button class="btn" onclick="runResearch()" style="border-color:#a78bfa;background:rgba(167,139,250,.14);color:#ddd6fe">Analyze →</button>
+    </div>
+    <p class="small" style="margin:2px 0 8px;color:var(--muted)">Pulls fresh data now and blends the timeframes that agree into <b>one</b> entry / stop / targets — so your stop isn’t different on every timeframe. Ideal for re-checking a coin you already hold.</p>
+    <div id="researchOut"></div></div>`;
+  if(researchLast)runResearch();
+}
+async function runResearch(){
+  const inp=document.getElementById('rzSym'); if(!inp)return;
+  const sym=inp.value.trim(); const out=document.getElementById('researchOut');
+  if(!sym){out.innerHTML='<div class="empty">Type a coin symbol first (e.g. SOL).</div>';return;}
+  if(researchBusy)return; researchBusy=true; researchLast=sym;
+  out.innerHTML='<div class="empty">Researching '+sym.toUpperCase()+' across '+(researchHorizon==='long'?'4h–1D':'15m–1h')+'… (fresh pull)</div>';
+  try{
+    const d=await fetchT('/api/research?sym='+encodeURIComponent(sym)+'&horizon='+researchHorizon,{},22000).then(r=>r.json());
+    if(d.error){out.innerHTML='<div class="empty">'+d.error+'</div>';}
+    else renderResearchResult(d);
+  }catch(e){out.innerHTML='<div class="empty">Research failed — try again. ('+e.message+')</div>';}
+  researchBusy=false;
+}
+function renderResearchResult(d){
+  const c=d.consensus, out=document.getElementById('researchOut'), P=v=>cryptoPrice(v);
+  const vCol=c.verdict==='BUY'?'buy':c.verdict==='SELL'?'sell':'muted';
+  const vLabel=c.verdict==='BUY'?'🟢 CONSENSUS: BUY / LONG':c.verdict==='SELL'?'🔴 CONSENSUS: SELL / SHORT':'⚪ NO CONSENSUS';
+  const frames=c.frames.map(f=>`<tr><td>${f.tf}</td><td style="color:var(--${f.verdict==='BUY'?'buy':f.verdict==='SELL'?'sell':'muted'})">${f.verdict}</td><td>${f.score>0?'+':''}${f.score}</td><td>${P(f.stop)}</td><td>${f.bt!=null?f.bt:'—'}</td></tr>`).join('');
+  let plan;
+  if(c.verdict!=='HOLD'&&c.entry){
+    const tgts=c.targets.map((t,i)=>`<span class="rzk">T${i+1}</span> <b>${P(t)}</b> <span class="sub">(${c.ret[i]>=0?'+':''}${c.ret[i].toFixed(1)}%)</span>`).join(' &nbsp;·&nbsp; ');
+    plan=`<div style="margin:9px 0;line-height:2">
+      <div><span class="rzk">Averaged entry</span> <b>${P(c.entry)}</b> &nbsp;·&nbsp; <span class="rzk">Stop</span> <b style="color:var(--sell)">${P(c.stop)}</b> <span class="sub">(risk ${c.riskPct.toFixed(1)}%)</span> &nbsp;·&nbsp; <span class="rzk">R:R</span> <b>${c.rrr.toFixed(1)}:1</b></div>
+      <div>${tgts}</div>
+      <div class="sub" style="margin-top:5px">Per-timeframe stops disagreed by <b>${c.stopSpreadPct.toFixed(1)}%</b> — this averaged stop smooths that out.${c.btAvg!=null?' · Avg backtest grade <b>'+c.btAvg+'/100</b>':''}</div></div>`;
+  } else {
+    plan=`<div class="sub" style="margin:9px 0">Only ${c.agree}% of the timeframes agree on a direction — no clean trade. Better to wait than force one.</div>`;
+  }
+  out.innerHTML=`<div class="trow" style="border-color:rgba(167,139,250,.35)">
+    <div class="th"><div><span class="nm">${d.sym}</span> <span class="sub">${d.horizon==='long'?'Long-term':'Short-term'} · live ${P(c.price)}</span></div>
+      <div style="text-align:right"><b style="color:var(--${vCol})">${vLabel}</b><br><span class="sub">${c.agree}% of timeframes agree</span></div></div>
+    ${plan}
+    <table class="rztbl"><thead><tr><th>TF</th><th>Signal</th><th>Score</th><th>Stop</th><th>Grade</th></tr></thead><tbody>${frames}</tbody></table>
+    <p class="small" style="margin-top:6px;color:var(--muted)">Guidance only — blends standard indicator signals across timeframes; not a guarantee. Use the averaged stop as your risk anchor and size so one loss is small.</p></div>`;
+}
 function renderTrades(){
   const el=document.getElementById('tradesPanel');updateTradesBtn();const a=loadTrades();
   if(!a.length){el.innerHTML='<div class="tradespanel"><b>No tracked trades.</b> Hit “✅ I placed this trade” on any card to track it and get alerts.</div>';return;}

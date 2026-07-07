@@ -670,6 +670,53 @@ function cryptoSignalsFrom(payload){
   });
   return {results,tf,total:(payload.assets||[]).length,analyzed:results.length,source:"coindcx-client"};
 }
+/* ---------- Deep research: ONE coin across several timeframes → averaged consensus ----------
+   Fixes the "each timeframe gives a different stop" risk by blending the frames that agree
+   on direction into a single entry / stop / targets, so the risk is consistent. */
+function blendResearch(per){
+  const avg=arr=>arr.reduce((s,x)=>s+x,0)/arr.length;
+  const votes={BUY:0,SELL:0,HOLD:0};
+  per.forEach(r=>{votes[r.sig.verdict]=(votes[r.sig.verdict]||0)+1;});
+  let verdict="HOLD";
+  if(votes.BUY>votes.SELL&&votes.BUY>=votes.HOLD)verdict="BUY";
+  else if(votes.SELL>votes.BUY&&votes.SELL>=votes.HOLD)verdict="SELL";
+  const dir=verdict==="SELL"?-1:1;
+  const agree=per.length?Math.round((votes[verdict]||0)/per.length*100):0;
+  const price=per[per.length-1].sig.price;
+  // blend only the frames whose verdict matches the consensus (all frames if HOLD)
+  const match=verdict==="HOLD"?per:per.filter(r=>r.sig.verdict===verdict);
+  let entry=null,stop=null,targets=[],ret=[],rrr=0,riskPct=0,stopSpreadPct=0;
+  if(match.length){
+    entry=avg(match.map(r=>r.setup.entry));
+    stop =avg(match.map(r=>r.setup.stop));
+    const nT=Math.max(...match.map(r=>r.setup.targets.length));
+    for(let k=0;k<nT;k++){const v=match.map(r=>r.setup.targets[k]).filter(x=>isFinite(x));if(v.length)targets.push(avg(v));}
+    ret=targets.map(t=>dir*(t-entry)/entry*100);
+    const R=Math.abs(entry-stop)||1; rrr=targets.length?Math.abs(targets[0]-entry)/R:0;
+    riskPct=Math.abs((entry-stop)/entry*100);
+    const stops=match.map(r=>r.setup.stop);
+    stopSpreadPct=stops.length>1?Math.abs(Math.max(...stops)-Math.min(...stops))/entry*100:0;   // how much the per-frame stops disagreed
+  }
+  const grades=per.map(r=>r.bt&&r.bt.score).filter(v=>v!=null);
+  const btAvg=grades.length?Math.round(avg(grades)):null;
+  return {verdict,dir,agree,price,entry,stop,targets,ret,rrr,riskPct,stopSpreadPct,btAvg,
+    frames:per.map(r=>({tf:r.tf,verdict:r.sig.verdict,score:r.sig.score,entry:r.setup.entry,stop:r.setup.stop,t1:r.setup.targets[0],bt:r.bt&&r.bt.score}))};
+}
+async function researchCoin(rawSym,horizon){
+  try{await ensureCryptoUniverse();}catch(e){}
+  const base=(rawSym||"").toUpperCase().replace(/USDT$|INR$|_INR$|-INR$/,"").replace(/[^A-Z0-9]/g,"");
+  if(!base)return {error:"Enter a coin symbol (e.g. SOL, DOGE, BTC)."};
+  const uni=(typeof getCRYPTO==='function'?getCRYPTO():CRYPTO)||CRYPTO;
+  let asset=uni.find(a=>a.tk===base);
+  if(!asset)asset = cryptoMode==="coindcx"
+    ? {sym:base+"INR",pair:"I-"+base+"_INR",binance:base+"USDT",tk:base,name:base,cls:"Crypto",src:"cg"}
+    : {sym:base+"USDT",binance:base+"USDT",tk:base,name:base,cls:"Crypto",src:"cg"};
+  const tfs = horizon==="long" ? ["4h","12h","daily"] : ["15m","30m","1h"];
+  const per=[];
+  for(const tf of tfs){try{const data=await loadCrypto(asset,tf);per.push(processAsset(asset,data,tf));}catch(e){}}
+  if(!per.length)return {error:'No data for "'+base+'". Check the symbol — it may not trade on your exchange.'};
+  return {sym:base,horizon,dec:per[0].dec,cryptoMode,consensus:blendResearch(per),ts:Date.now()};
+}
 function sendJSON(res,o,c=200){const b=JSON.stringify(o);res.writeHead(c,{"Content-Type":"application/json","Access-Control-Allow-Origin":"*"});res.end(b);}
 const MIME={".html":"text/html",".js":"text/javascript",".css":"text/css",".json":"application/json",".svg":"image/svg+xml"};
 async function handler(req,res){
@@ -690,6 +737,9 @@ async function handler(req,res){
     if(p==="/api/crypto-signals" && req.method==="POST"){
       const body=await readBody(req);let payload;try{payload=JSON.parse(body);}catch(e){return sendJSON(res,{error:"bad json"},400);}
       return sendJSON(res,cryptoSignalsFrom(payload));}
+    if(p==="/api/research"){   // one coin, several timeframes, averaged consensus (short or long horizon)
+      const sym=u.searchParams.get("sym")||"", horizon=u.searchParams.get("horizon")==="long"?"long":"short";
+      return sendJSON(res,await researchCoin(sym,horizon));}
     if(p==="/api/signal"){   // current verdict for ONE Upstox instrument (used by the trade-reversal watcher)
       const sym=u.searchParams.get("sym"), tf=u.searchParams.get("tf")||"1h";
       if(sym&&sym.startsWith("MCX:")){try{await ensureCommodities();}catch(e){}}
