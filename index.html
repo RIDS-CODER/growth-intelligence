@@ -95,6 +95,11 @@
   .rztbl th{color:var(--muted);text-transform:uppercase;letter-spacing:.5px;font-size:10px;text-align:left;padding:4px 8px;border-bottom:1px solid var(--line)}
   .rztbl td{padding:5px 8px;border-bottom:1px solid var(--line);font-family:var(--mono)}
   .rzk{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
+  .hz{display:inline-block;font-size:10px;font-weight:800;font-family:var(--mono);padding:2px 8px;border-radius:20px;margin-top:3px;letter-spacing:.3px}
+  .hz.short{background:rgba(34,211,238,.14);color:#67e8f9;border:1px solid rgba(34,211,238,.4)}
+  .hz.long{background:rgba(167,139,250,.16);color:#ddd6fe;border:1px solid rgba(167,139,250,.4)}
+  .avgbtn{width:100%;margin:8px 0 2px;padding:8px 12px;border-radius:9px;border:1px dashed rgba(167,139,250,.5);background:rgba(167,139,250,.1);color:#ddd6fe;font-weight:700;font-size:12px;cursor:pointer}
+  .avgbtn:hover{background:rgba(167,139,250,.18)}
   .tpnl{font-family:var(--mono);font-weight:800;font-size:15px}
   .tbar{height:26px;border-radius:7px;background:var(--panel2);position:relative;margin:9px 0 4px;border:1px solid var(--line);overflow:hidden}
   .tbar .mk{position:absolute;top:0;bottom:0;width:2px}.tbar .now{width:3px;background:#fff;z-index:2}
@@ -383,6 +388,12 @@ async function monitorPoll(){
 function toggleTrades(){const el=document.getElementById('tradesPanel');el.style.display=el.style.display==='none'?'block':'none';if(el.style.display==='block')renderTrades();}
 /* ---- Research a coin: one blended plan across several timeframes (short or long horizon) ---- */
 let researchHorizon='short', researchBusy=false, researchLast='';
+function tfHorizon(tf){return ['15m','30m','1h','intraday'].includes(tf)?'short':'long';}
+function openResearchFor(sym,horizon){
+  researchHorizon=horizon||'short'; researchLast=sym;
+  const el=document.getElementById('researchPanel'); el.style.display='block'; renderResearchShell();
+  el.scrollIntoView({behavior:'smooth',block:'center'});
+}
 function toggleResearch(){const el=document.getElementById('researchPanel');const show=el.style.display==='none';el.style.display=show?'block':'none';if(show)renderResearchShell();}
 function setHorizon(h){researchHorizon=h;document.querySelectorAll('.rztab').forEach(x=>x.classList.toggle('on',x.dataset.h===h));if((document.getElementById('rzSym')||{}).value)runResearch();}
 function renderResearchShell(){
@@ -613,7 +624,7 @@ function render(results){
 }
 function renderSummary(bb,bs){const make=(r,isBuy)=>{if(!r)return `<div class="hero"><div class="lbl">${isBuy?'Best long':'Best short'}</div><div class="nm" style="color:var(--muted)">No qualifying setup</div></div>`;
   const ret=r.setup.ret[0],a=r.action,z=posSize(r.asset,r.setup);
-  return `<div class="hero ${isBuy?'buy':'sell'}"><div class="lbl">${isBuy?'🏆 Top BUY now':'🏆 Top SELL / Short now'}</div>
+  return `<div class="hero ${isBuy?'buy':'sell'}"><div class="lbl">${isBuy?'🏆 Top BUY now':'🏆 Top SELL / Short now'} <span class="hz ${tfHorizon(timeframe)}">${tfHorizon(timeframe)==='short'?'⏱ Short-term':'📆 Long-term'}</span></div>
     <div class="nm">${r.asset.name} <small>${r.asset.tk?r.asset.tk+' · ':''}${r.asset.sym} · ${r.setup.type}</small></div>
     <div class="ret">${ret>=0?'+':''}${ret.toFixed(1)}% <span style="font-size:13px;color:var(--muted)">→ Target 1</span></div>
     <div class="act" style="color:${a.cls==='now'?'var(--buy)':a.cls==='exit'?'var(--sell)':'var(--hold)'}">${a.txt}</div>
@@ -631,10 +642,11 @@ function btBadge(bt){
 function card(r,i,isBuy){const{asset,sig,setup,reasons,dec,action,scope,asof,isIndex,priceTag,series,bt}=r,f=fmtR(r),open=i<3?'open':'';
   const tn=['Target 1','Target 2','Target 3'];
   const tgts=setup.targets.map((t,k)=>`<div class="lv t${k+1}"><div class="k">${tn[k]}</div><div class="v">${f(t)}</div><div class="r">${setup.ret[k]>=0?'+':''}${setup.ret[k].toFixed(1)}%</div></div>`).join('');
+  const hz=tfHorizon(timeframe), hzLabel=hz==='short'?'⏱ Short-term':'📆 Long-term';
   return `<div class="tc ${open} ${isBuy?'':'sellcard'}">
     <div class="hd" onclick="this.parentNode.classList.toggle('open')">
       <div class="l"><div class="name">${asset.name}</div><div class="sub">${asset.tk?asset.tk+' · ':''}${asset.sym} · ${asset.cls}</div>
-        <div class="ttype">${setup.type} · score ${sig.score>0?'+':''}${sig.score}</div><div class="asof">📡 ${asof||'—'} · ${priceTag}</div></div>
+        <div class="ttype">${setup.type} · score ${sig.score>0?'+':''}${sig.score}</div><span class="hz ${hz}">${hzLabel}</span><div class="asof">📡 ${asof||'—'} · ${priceTag}</div></div>
       <div class="r"><span class="verdict ${sig.verdict}">${sig.verdict}</span><div class="toplineRet" style="color:${isBuy?'var(--buy)':'var(--sell)'};margin-top:6px">${setup.ret[0]>=0?'+':''}${setup.ret[0].toFixed(1)}%→T1</div>${btBadge(bt)}</div>
     </div>
     <div class="bd">
@@ -653,6 +665,7 @@ function card(r,i,isBuy){const{asset,sig,setup,reasons,dec,action,scope,asof,isI
       ${ladder(setup)}
       <div class="levels"><div class="lv stop"><div class="k">Stop Loss</div><div class="v">${f(setup.stop)}</div><div class="r" style="color:var(--sell)">−${setup.riskPct.toFixed(1)}%</div></div>${tgts}</div>
       ${sizingBlock(asset,setup)}
+      ${asset.cls==='Crypto'?`<button class="avgbtn" onclick="event.stopPropagation();openResearchFor('${asset.tk||asset.sym}','${hz}')">🔎 Averaged stop across ${hz==='short'?'15m–1h':'4h–1D'} — smooth out the per-timeframe risk</button>`:''}
       <button class="placebtn" onclick="event.stopPropagation();placeTrade('${asset.sym}')">✅ I placed this trade — track &amp; alert me</button>
       <div class="reasons"><h4 class="for">✅ Reasons FOR</h4><ul>${reasons.forR.map(x=>`<li class="for">${x}</li>`).join('')}</ul>
       <h4 class="against">⚠️ Reasons AGAINST</h4><ul>${reasons.against.map(x=>`<li class="against">${x}</li>`).join('')}</ul>
