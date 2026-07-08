@@ -100,6 +100,10 @@
   .hz.long{background:rgba(167,139,250,.16);color:#ddd6fe;border:1px solid rgba(167,139,250,.4)}
   .avgbtn{width:100%;margin:8px 0 2px;padding:8px 12px;border-radius:9px;border:1px dashed rgba(167,139,250,.5);background:rgba(167,139,250,.1);color:#ddd6fe;font-weight:700;font-size:12px;cursor:pointer}
   .avgbtn:hover{background:rgba(167,139,250,.18)}
+  .tc.stale{opacity:.72}
+  .ribbon{margin:0;padding:8px 16px;background:rgba(234,57,67,.16);border-bottom:1px solid rgba(234,57,67,.4);color:#fca5a5;font-size:12px;font-weight:700}
+  .ribbon.warn{background:rgba(240,185,11,.14);border-color:rgba(240,185,11,.4);color:#fcd34d}
+  .editin{width:80px;padding:1px 5px;border-radius:5px;border:1px solid var(--line);background:var(--panel2);color:var(--txt);font-family:var(--mono);font-size:11px}
   .tpnl{font-family:var(--mono);font-weight:800;font-size:15px}
   .tbar{height:26px;border-radius:7px;background:var(--panel2);position:relative;margin:9px 0 4px;border:1px solid var(--line);overflow:hidden}
   .tbar .mk{position:absolute;top:0;bottom:0;width:2px}.tbar .now{width:3px;background:#fff;z-index:2}
@@ -278,6 +282,11 @@ function notify(title,body){toast(title+' — '+body);try{if('Notification'in wi
 function toast(msg){const c=document.getElementById('toast');if(!c)return;const d=document.createElement('div');d.className='t';d.textContent=msg;c.appendChild(d);setTimeout(()=>d.remove(),9000);}
 function tpx(t,v){return t.cls==='Crypto'?cryptoPrice(v):fmtVal(v,t.dec,t.isIndex);}
 function tpnl(t){return t.price>0?(t.dir>0?(t.price/t.entry-1):(t.entry/t.price-1))*100:0;}
+const TF_MIN={'15m':15,'30m':30,'1h':60,'4h':240,'6h':360,'12h':720,'daily':1440,'intraday':30};
+const FILL_BARS=6;                                   // a limit that doesn't fill within ~6 bars is treated as missed
+function tfMin(tf){return TF_MIN[tf]||30;}
+function fillWindowText(tf){const m=tfMin(tf)*FILL_BARS;return m<90?'~'+m+' min':m<1440?'~'+(m/60).toFixed(m%60?1:0)+' h':'~'+(m/1440).toFixed(m%1440?1:0)+' days';}
+function editTrade(id,val){const a=loadTrades();const t=a.find(x=>x.id===id);if(!t)return;const v=parseFloat(String(val).replace(/[^0-9.]/g,''));if(!(v>0))return;t.entry=v;t.planEntry=v;t.filled=true;t.filledAt=t.filledAt||Date.now();t.expired=false;t.peak=v;saveTrades(a);renderTrades();}
 function placeTrade(sym){
   const r=lastResults.find(x=>x.asset.sym===sym);if(!r){toast('Trade not found — rescan and retry');return;}
   requestNotify();
@@ -285,36 +294,35 @@ function placeTrade(sym){
   const fmt=v=>r.asset.cls==='Crypto'?cryptoPrice(v):fmtVal(v,r.dec,r.isIndex);
   // Price already in / through the entry zone? Then you're likely entering at market now.
   const atMarketable = dir>0 ? (p0<=hi) : (p0>=lo);
-  // Ask for the REAL fill price so tracking is exact — not an assumed edge of the zone.
-  const ans = prompt(
+  // Optionally capture your REAL fill price. IMPORTANT: cancelling or a blocked dialog must NEVER drop the trade.
+  let ans=null; try{ ans=prompt(
     'Track "'+r.asset.name+'"  ('+(dir>0?'LONG':'SHORT')+')\n\n'+
-    'Type the price you were actually filled at.\n'+
+    'Type the price you were actually filled at (optional).\n'+
     (atMarketable
-      ? 'Leave blank to use the live price '+fmt(p0)+'.'
-      : 'Not in yet? Leave blank to WAIT for the '+(dir>0?'dip':'bounce')+' to '+fmt(mid)+' — I\'ll start tracking the moment it fills.'),
+      ? 'Blank / Cancel = use the live price '+fmt(p0)+'.'
+      : 'Not in yet? Blank / Cancel = WAIT for the '+(dir>0?'dip':'bounce')+' to '+fmt(mid)+' — tracking starts the moment it fills.'),
     atMarketable ? String(+(+p0).toFixed(r.dec||2)) : ''
-  );
-  if(ans===null) return;                                   // cancelled
-  const typed = ans.trim()!=='' ? parseFloat(ans.replace(/[^0-9.]/g,'')) : NaN;
+  ); }catch(e){ ans=null; }
+  const typed = (ans && ans.trim()!=='') ? parseFloat(ans.replace(/[^0-9.]/g,'')) : NaN;
   let entry, filled;
-  if(isFinite(typed)&&typed>0){ entry=typed; filled=true; }         // your real fill — most accurate
-  else if(atMarketable){ entry=p0; filled=true; }                    // blank + tradable now → live price
-  else { entry=mid; filled=false; }                                  // blank + waiting → pending at the zone midpoint
+  if(isFinite(typed)&&typed>0){ entry=typed; filled=true; }          // your real fill — most accurate
+  else if(atMarketable){ entry=p0; filled=true; }                    // default: tradable now → live price
+  else { entry=mid; filled=false; }                                  // default: waiting → pending at the zone midpoint
   const t={id:Date.now()+'_'+sym,sym,tk:r.asset.tk||'',name:r.asset.name,cls:r.asset.cls,dir,
     entry, planEntry:entry, entryLo:lo, entryHi:hi, stop:r.setup.stop,initStop:r.setup.stop,targets:r.setup.targets.slice(),dec:r.dec,isIndex:r.isIndex,tf:timeframe,
-    filled, placedAt:Date.now(), filledAt:filled?Date.now():null,
+    filled, placedAt:Date.now(), filledAt:filled?Date.now():null, expired:false,
     price:filled?entry:p0, peak:entry, rMult:0,lastR:0, sigAgainst:false,
     hitStop:false,hitTgts:[false,false,false],half:false,warnStop:false,warnStall:false,reversedAlerted:false};
   const a=loadTrades();a.push(t);saveTrades(a);document.getElementById('tradesPanel').style.display='block';renderTrades();
-  if(filled) notify('✅ Tracking '+t.name,'Entered at '+tpx(t,entry)+' — stop '+tpx(t,t.stop)+'. I\'ll alert on targets, the stop, and momentum shifts.');
-  else notify('⏳ Watching '+t.name,'Waiting for the '+(dir>0?'dip':'bounce')+' to '+tpx(t,entry)+' before it goes live. I\'ll tell you the moment it fills.');
+  if(filled) notify('✅ Tracking '+t.name,'Entered at '+tpx(t,entry)+' — stop '+tpx(t,t.stop)+'. Tap ✎ in My Trades to correct the fill. I\'ll alert on targets, the stop & momentum.');
+  else notify('⏳ Watching '+t.name,'Waiting for the '+(dir>0?'dip':'bounce')+' to '+tpx(t,entry)+' (expires in ~6 bars, '+fillWindowText(t.tf)+'). I\'ll tell you the moment it fills.');
 }
 function closeTrade(id){saveTrades(loadTrades().filter(t=>t.id!==id));renderTrades();}
 const R0=t=>Math.abs(t.entry-(t.initStop||t.stop))||1;                       // initial risk per unit (1R)
 function suggestTrail(t){const dir=t.dir,r=R0(t),be=t.entry,behind=dir>0?t.peak-r:t.peak+r;   // keep stop ~1R behind the high, never below breakeven past 1R
   return dir>0?Math.max(be,behind,t.stop):Math.min(be,behind,t.stop);}
 function healthOf(t){
-  if(t.filled===false)return{l:'⏳ Waiting for entry '+tpx(t,t.entry),c:'hold'};
+  if(t.filled===false)return t.expired?{l:'⌛ Entry expired — never filled',c:'muted'}:{l:'⏳ Waiting for entry '+tpx(t,t.entry),c:'hold'};
   if(t.hitStop)return{l:'🛑 Stopped out',c:'down'};
   if(t.sigAgainst)return{l:t.rMult>=1?`⚠️ Momentum cooled · still +${t.rMult.toFixed(1)}R`:'⚠️ Momentum turned — holding to plan',c:'hold'};
   if(t.warnStop)return{l:'⚠️ Near your stop',c:'down'};
@@ -330,7 +338,9 @@ function reversalAdvice(t){
   return 'Signal is against you with no cushion yet. Let your stop at '+tpx(t,t.stop)+' do the work — that’s what it’s for. Only exit early if you have a real reason, and don’t widen the stop.';
 }
 function adviceOf(t){
-  if(t.filled===false)return 'Not in yet — rest a limit at '+tpx(t,t.entry)+'. P&L starts only once price reaches it. Don’t chase above the zone.';
+  if(t.filled===false)return t.expired
+    ? 'The '+(t.dir>0?'dip':'bounce')+' to '+tpx(t,t.entry)+' never came within ~6 bars, so you never got in. Don’t chase — look for a fresh setup, or Close this.'
+    : 'Not in yet — rest a '+(t.dir>0?'buy':'sell')+' limit at '+tpx(t,t.entry)+'. Should fill within ~6 bars ('+fillWindowText(t.tf)+') or it expires. P&L starts only once filled — tap the entry to correct your fill price.';
   if(t.hitStop)return 'Exit done — review the setup, don’t revenge-trade.';
   if(t.sigAgainst)return reversalAdvice(t);
   if(t.warnStop)return 'Price is close to your stop — decide before it hits, don’t widen the stop.';
@@ -346,8 +356,12 @@ function monitorTrades(prices){
     // Pending limit at the dip/bounce zone — not live until price actually reaches it
     if(t.filled===false){
       const reached = dir>0 ? (p<=t.entry) : (p>=t.entry);
-      if(reached){t.filled=true;t.filledAt=Date.now();t.peak=t.entry;changed=true;notify('✅ '+t.name+' filled','Price hit your entry '+tpx(t,t.entry)+' — trade is now live. Stop '+tpx(t,t.stop)+'.');}
-      else return;   // still waiting for the dip; don't compute P&L off the current price
+      if(reached){t.filled=true;t.filledAt=Date.now();t.expired=false;t.peak=t.entry;changed=true;notify('✅ '+t.name+' filled','Price hit your entry '+tpx(t,t.entry)+' — trade is now live. Stop '+tpx(t,t.stop)+'.');}
+      else{
+        const expMs=t.placedAt+FILL_BARS*tfMin(t.tf)*60000;   // ~6 bars to fill, else it's a missed setup
+        if(Date.now()>expMs && !t.expired){t.expired=true;changed=true;notify('⌛ '+t.name+' entry expired','The '+(dir>0?'dip':'bounce')+' to '+tpx(t,t.entry)+' didn’t arrive within ~6 bars. Not filled — look for a fresh setup. (Still here so you can review or close it.)');}
+        return;   // still waiting / expired — never compute P&L off an unfilled entry
+      }
     }
     const r=R0(t);
     if(t.peak==null||(dir>0?p>t.peak:p<t.peak))t.peak=p;
@@ -460,7 +474,7 @@ function renderTrades(){
         ${t.targets.map((tg,k)=>`<div class="mk" style="left:${pos(tg)}%;background:var(--buy)"></div><div class="lab" style="left:${pos(tg)}%;color:var(--buy)">T${k+1}</div>`).join('')}
         <div class="mk now" style="left:${pos(p)}%"></div></div>
       <div class="tstatus">💡 ${adviceOf(t)}</div>
-      <div class="tstatus">now ${tpx(t,p)} · in ${tpx(t,t.entry)} · stop ${tpx(t,t.stop)}${showTrail?` · <b style="color:var(--accent2)">suggested trail → ${tpx(t,trail)}</b>`:''}</div></div>`;}).join('');
+      <div class="tstatus">now ${tpx(t,p)} · in <input class="editin" value="${(+t.entry).toFixed(t.dec||2)}" onchange="editTrade('${t.id}',this.value)" title="Your fill price — edit to correct"> · stop ${tpx(t,t.stop)}${showTrail?` · <b style="color:var(--accent2)">suggested trail → ${tpx(t,trail)}</b>`:''}</div></div>`;}).join('');
   el.innerHTML=`<div class="tradespanel"><h3>📋 My tracked trades (${a.length})</h3>${rows}<p class="small" style="margin-top:6px"><b>R</b> = profit measured against your original risk (+2R means you've made twice what you risked). Alerts fire while the app is open in any tab (even backgrounded) — allow notifications when prompted. Crypto tracked on the live ₹ feed (CoinDCX when your browser can reach it, else the global ₹ feed); stocks from your Upstox feed. Tracks levels &amp; gives guidance only — it does not place or close real orders.</p></div>`;
 }
 setInterval(monitorPoll,15000);
@@ -533,23 +547,38 @@ async function runScan(){
   }catch(e){document.getElementById('pstat').textContent='Error';document.getElementById('buyCards').innerHTML='<div class="empty">Backend error: '+e.message+'</div>';}
   scanning=false;document.getElementById('scanBtn').disabled=false;scheduleRefresh();
 }
+// Is this recommendation "late" — has the LIVE price already run past the entry toward the stop?
+function liveStale(r){
+  const s=r.setup,p=r.sig.price; if(!s||!(p>0)||r.sig.verdict==='HOLD')return false;
+  const R=Math.abs(s.entry-s.stop)||s.atr||1;
+  const roomR=s.dir>0?(p-s.stop)/R:(s.stop-p)/R;      // R of room left from LIVE price to the stop
+  const pastEntry=s.dir>0?p<s.entryLo:p>s.entryHi;    // price already broke through the entry zone
+  return pastEntry || roomR<0.5;                       // <½R of room = too late / too risky to enter now
+}
+function liveRoomR(r){const s=r.setup,p=r.sig.price,R=Math.abs(s.entry-s.stop)||s.atr||1;return s.dir>0?(p-s.stop)/R:(s.stop-p)/R;}
+let _staleSig='';
+function refreshStaleFlags(){
+  const sig=lastResults.map(r=>(liveStale(r)?'1':'0')+r.asset.sym).join(',');
+  if(sig!==_staleSig){_staleSig=sig;render(lastResults);}   // re-sort/re-flag only when something actually changed
+}
+function applyQuotes(map){
+  let touched=false;
+  lastResults.forEach(r=>{const q=map[r.asset.sym];if(q&&isFinite(q)){r.sig.price=q;touched=true;const el=document.getElementById('px_'+id4(r.asset.sym));if(el)el.textContent=fmtR(r)(q);}});
+  if(touched){const now=new Date();document.getElementById('lastUpd').textContent='LTP '+now.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true});refreshStaleFlags();}
+}
 async function pollQuotes(){
   if(!lastResults.length||status.demo)return;
-  // crypto: refresh prices straight from CoinDCX (your browser) so ₹ ticks in real time
-  if(activeTab==='Crypto'){
-    if(cryptoSource!=='coindcx')return;              // on global fallback the price comes from the scan, not CoinDCX
+  // Local browser-CoinDCX fast path (exact ₹, ticks every few seconds when running on your India machine)
+  if(activeTab==='Crypto' && cryptoSource==='coindcx'){
     try{const t=await fetchT("https://api.coindcx.com/exchange/ticker",{},6000).then(r=>r.json());
       if(Array.isArray(t)){const by={};t.forEach(x=>by[x.market]=+x.last_price);const bt=t.find(x=>x.market==='BTCINR'),bu=t.find(x=>x.market==='BTCUSDT');if(bt&&bu&&+bu.last_price>0)usdtInr=+bt.last_price/+bu.last_price;
-        lastResults.forEach(r=>{const q=by[r.asset.sym];if(q&&isFinite(q)){r.sig.price=q;const el=document.getElementById('px_'+id4(r.asset.sym));if(el)el.textContent=fmtR(r)(q);}});
-        const now=new Date();document.getElementById('lastUpd').textContent='LTP '+now.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true});}
+        applyQuotes(by);}
     }catch(e){}
     return;
   }
+  // Everything else — including HOSTED crypto (India server reaches CoinDCX): live prices from the server every poll
   try{const d=await(await fetch('/api/quotes?tab='+encodeURIComponent(activeTab))).json();
-    if(!d.quotes)return;let touched=false;
-    lastResults.forEach(r=>{const q=d.quotes[r.asset.sym];if(q&&isFinite(q)){r.sig.price=q;touched=true;
-      const el=document.getElementById('px_'+id4(r.asset.sym));if(el)el.textContent=fmtVal(q,r.dec,r.isIndex);}});
-    if(touched){const now=new Date();document.getElementById('lastUpd').textContent='LTP '+now.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true});}
+    if(d.quotes)applyQuotes(d.quotes);
   }catch(e){}
 }
 
@@ -615,12 +644,15 @@ function renderBacktest(d){
 function render(results){
   lastResults=results;
   const ms=getMinScore();
-  const buys=results.filter(r=>r.sig.verdict==='BUY'&&r.sig.score>=ms).sort((a,b)=>b.sig.score-a.sig.score);
-  const sells=results.filter(r=>r.sig.verdict==='SELL'&&r.sig.score<=-ms).sort((a,b)=>a.sig.score-b.sig.score);
+  // clean (actionable) setups first, "late" ones (price already at/through the stop) pushed to the bottom
+  const buys=results.filter(r=>r.sig.verdict==='BUY'&&r.sig.score>=ms).sort((a,b)=>(liveStale(a)-liveStale(b))|| (b.sig.score-a.sig.score));
+  const sells=results.filter(r=>r.sig.verdict==='SELL'&&r.sig.score<=-ms).sort((a,b)=>(liveStale(a)-liveStale(b))|| (a.sig.score-b.sig.score));
   document.getElementById('buyCount').textContent=buys.length;document.getElementById('sellCount').textContent=sells.length;
   const hidden=results.filter(r=>r.sig.verdict!=='HOLD').length-(buys.length+sells.length);
-  document.getElementById('filterNote').textContent=ms>0?`Min score ${ms}: hiding ${hidden} weaker setup${hidden===1?'':'s'}`:'';
-  renderSummary(buys[0],sells[0]);renderCards('buyCards',buys,true);renderCards('sellCards',sells,false);
+  const lateB=buys.filter(liveStale).length, lateS=sells.filter(liveStale).length, late=lateB+lateS;
+  document.getElementById('filterNote').textContent=(ms>0?`Min score ${ms}: hiding ${hidden} weaker setup${hidden===1?'':'s'}. `:'')+(late>0?`⚠ ${late} setup${late===1?'':'s'} greyed — price already ran to the stop.`:'');
+  const clean=arr=>arr.find(r=>!liveStale(r))||null;   // hero only ever shows a CLEAN entry
+  renderSummary(clean(buys),clean(sells));renderCards('buyCards',buys,true);renderCards('sellCards',sells,false);
 }
 function renderSummary(bb,bs){const make=(r,isBuy)=>{if(!r)return `<div class="hero"><div class="lbl">${isBuy?'Best long':'Best short'}</div><div class="nm" style="color:var(--muted)">No qualifying setup</div></div>`;
   const ret=r.setup.ret[0],a=r.action,z=posSize(r.asset,r.setup);
@@ -643,7 +675,9 @@ function card(r,i,isBuy){const{asset,sig,setup,reasons,dec,action,scope,asof,isI
   const tn=['Target 1','Target 2','Target 3'];
   const tgts=setup.targets.map((t,k)=>`<div class="lv t${k+1}"><div class="k">${tn[k]}</div><div class="v">${f(t)}</div><div class="r">${setup.ret[k]>=0?'+':''}${setup.ret[k].toFixed(1)}%</div></div>`).join('');
   const hz=tfHorizon(timeframe), hzLabel=hz==='short'?'⏱ Short-term':'📆 Long-term';
-  return `<div class="tc ${open} ${isBuy?'':'sellcard'}">
+  const stale=liveStale(r), room=liveRoomR(r);
+  const ribbon = stale ? `<div class="ribbon">⚠ LATE — live price ${room<=0?'is already at/through the stop':'has only ~'+room.toFixed(1)+'R left to the stop'}. This ${isBuy?'BUY':'SELL'} level has gone stale — don’t chase. Wait for a fresh setup${asset.cls==='Crypto'?', or hit 🔎 below for an averaged plan':''}.</div>` : '';
+  return `<div class="tc ${open} ${isBuy?'':'sellcard'} ${stale?'stale':''}">${ribbon}
     <div class="hd" onclick="this.parentNode.classList.toggle('open')">
       <div class="l"><div class="name">${asset.name}</div><div class="sub">${asset.tk?asset.tk+' · ':''}${asset.sym} · ${asset.cls}</div>
         <div class="ttype">${setup.type} · score ${sig.score>0?'+':''}${sig.score}</div><span class="hz ${hz}">${hzLabel}</span><div class="asof">📡 ${asof||'—'} · ${priceTag}</div></div>
@@ -661,6 +695,7 @@ function card(r,i,isBuy){const{asset,sig,setup,reasons,dec,action,scope,asof,isI
         <div class="k">Risk : Reward</div><div class="v">${setup.rrr.toFixed(1)} : 1</div>
         <div class="k">Risk % to SL</div><div class="v">${setup.riskPct.toFixed(1)}%</div>
         <div class="k">Holding</div><div class="v">${setup.hold}</div>
+        <div class="k">Est. fill</div><div class="v">${action.cls==='now'?'now — price is in the zone':'≤ '+FILL_BARS+' bars ('+fillWindowText(timeframe)+') or it expires'}</div>
       </div>
       ${ladder(setup)}
       <div class="levels"><div class="lv stop"><div class="k">Stop Loss</div><div class="v">${f(setup.stop)}</div><div class="r" style="color:var(--sell)">−${setup.riskPct.toFixed(1)}%</div></div>${tgts}</div>
