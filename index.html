@@ -223,15 +223,21 @@ function cryptoPrice(v){if(v==null)return '—';
   if(cryptoCcy==='USDT'&&usdtInr>0){const u=v/usdtInr;return '$'+u.toLocaleString('en-US',{minimumFractionDigits:u<5?4:2,maximumFractionDigits:u<5?4:2});}
   return '₹'+Number(v).toLocaleString('en-IN',{minimumFractionDigits:v<5?4:2,maximumFractionDigits:v<5?4:2});}
 const fmtR=r=>v=>r.asset.cls==='Crypto'?cryptoPrice(v):fmtVal(v,r.dec,r.isIndex);   // per-result formatter
+// Currency-aware input conversion: the user types in the currency they SEE (₹ or $ USDT); we always STORE ₹.
+function inrFromDisp(cls,v){return (cls==='Crypto'&&cryptoCcy==='USDT'&&usdtInr>0)?v*usdtInr:v;}   // typed number -> ₹
+function dispFromInr(cls,v){return (cls==='Crypto'&&cryptoCcy==='USDT'&&usdtInr>0)?v/usdtInr:v;}   // ₹ -> number shown in the box
 async function mapLimitClient(items,limit,fn){const ret=[];let i=0;async function w(){while(i<items.length){const j=i++;ret[j]=await fn(items[j]);}}await Promise.all(Array.from({length:Math.min(limit,items.length)},w));return ret;}
 async function fetchCoinDCXCrypto(tf){
   const t=await fetchT("https://api.coindcx.com/exchange/ticker",{},7000).then(r=>r.json());   // 1 call, times out fast if blocked
   if(!Array.isArray(t))throw new Error("cdx ticker");
   // USDT→INR from CoinDCX's own markets (BTCINR/BTCUSDT ratio, else USDTINR)
+  // CoinDCX USDT markets (liquid) + CoinDCX's own USDT→INR — this is how the CoinDCX app prices coins
+  const usdtBy={}; t.forEach(x=>{if(x.market&&x.market.endsWith('USDT'))usdtBy[x.market.slice(0,-4)]=+x.last_price;});
   const bt=t.find(x=>x.market==='BTCINR'),bu=t.find(x=>x.market==='BTCUSDT'),ui=t.find(x=>x.market==='USDTINR');
   if(bt&&bu&&+bu.last_price>0)usdtInr=+bt.last_price/+bu.last_price; else if(ui&&+ui.last_price>0)usdtInr=+ui.last_price;
+  const liveInr=base=>{const u=usdtBy[base];return (u>0&&usdtInr>0)?u*usdtInr:0;};
   const rows=t.filter(x=>x.market&&x.market.endsWith("INR"))
-    .map(x=>{const base=x.market.slice(0,-3);return {market:x.market,base,last:+x.last_price,vol:(+x.volume||0)*(+x.last_price||0)};})
+    .map(x=>{const base=x.market.slice(0,-3);const inrLast=+x.last_price;return {market:x.market,base,last:liveInr(base)||inrLast,vol:(+x.volume||0)*(inrLast||0)};})
     .filter(r=>r.last>0&&!STABLE_C.has(r.base)&&!/(UP|DOWN|BULL|BEAR)$/.test(r.base)&&!/^\d/.test(r.base))
     .sort((a,b)=>b.vol-a.vol).slice(0,CRYPTO_N);
   const interval=CDX_INT_C[tf]||"1h";
@@ -240,7 +246,8 @@ async function fetchCoinDCXCrypto(tf){
       if(!Array.isArray(j)||j.length<41)return null;
       const rev=j.slice().reverse();const close=[],high=[],low=[],times=[];
       for(const k of rev){const c=+k.close;if(!isFinite(c))continue;close.push(c);high.push(+k.high);low.push(+k.low);times.push(+k.time);}
-      if(close.length<41)return null; if(close.length)close[close.length-1]=r.last;
+      if(close.length<41)return null;
+      const f=r.last/close[close.length-1]; if(f>0.2&&f<5){for(let i=0;i<close.length;i++){close[i]*=f;high[i]*=f;low[i]*=f;}} else {close[close.length-1]=r.last;}  // rescale INR candles to the live (USDT-based) price
       return {sym:r.market,tk:r.base,name:r.base,close,high,low,times,price:r.last};
     }catch(e){return null;}
   });
@@ -286,28 +293,30 @@ const TF_MIN={'15m':15,'30m':30,'1h':60,'4h':240,'6h':360,'12h':720,'daily':1440
 const FILL_BARS=6;                                   // a limit that doesn't fill within ~6 bars is treated as missed
 function tfMin(tf){return TF_MIN[tf]||30;}
 function fillWindowText(tf){const m=tfMin(tf)*FILL_BARS;return m<90?'~'+m+' min':m<1440?'~'+(m/60).toFixed(m%60?1:0)+' h':'~'+(m/1440).toFixed(m%1440?1:0)+' days';}
-function editTrade(id,val){const a=loadTrades();const t=a.find(x=>x.id===id);if(!t)return;const v=parseFloat(String(val).replace(/[^0-9.]/g,''));if(!(v>0))return;t.entry=v;t.planEntry=v;t.filled=true;t.filledAt=t.filledAt||Date.now();t.expired=false;t.peak=v;saveTrades(a);renderTrades();}
+function editTrade(id,val){const a=loadTrades();const t=a.find(x=>x.id===id);if(!t)return;const raw=parseFloat(String(val).replace(/[^0-9.]/g,''));if(!(raw>0))return;const v=inrFromDisp(t.cls,raw);t.entry=v;t.planEntry=v;t.filled=true;t.filledAt=t.filledAt||Date.now();t.expired=false;t.peak=v;saveTrades(a);renderTrades();}
 function placeTrade(sym){
   const r=lastResults.find(x=>x.asset.sym===sym);if(!r){toast('Trade not found — rescan and retry');return;}
   requestNotify();
   const dir=r.setup.dir,p0=r.sig.price,lo=r.setup.entryLo,hi=r.setup.entryHi,mid=r.setup.entry;
-  const fmt=v=>r.asset.cls==='Crypto'?cryptoPrice(v):fmtVal(v,r.dec,r.isIndex);
+  const cls=r.asset.cls;
+  const fmt=v=>cls==='Crypto'?cryptoPrice(v):fmtVal(v,r.dec,r.isIndex);
+  const ccyLabel=(cls==='Crypto'&&cryptoCcy==='USDT'&&usdtInr>0)?'USDT ($)':'₹';
   // Price already in / through the entry zone? Then you're likely entering at market now.
   const atMarketable = dir>0 ? (p0<=hi) : (p0>=lo);
-  // Optionally capture your REAL fill price. IMPORTANT: cancelling or a blocked dialog must NEVER drop the trade.
+  // Optionally capture your REAL fill price, IN THE CURRENCY YOU SEE. Cancelling / blocked dialog must NEVER drop the trade.
   let ans=null; try{ ans=prompt(
     'Track "'+r.asset.name+'"  ('+(dir>0?'LONG':'SHORT')+')\n\n'+
-    'Type the price you were actually filled at (optional).\n'+
+    'Type the price you were filled at, in '+ccyLabel+' (optional).\n'+
     (atMarketable
       ? 'Blank / Cancel = use the live price '+fmt(p0)+'.'
       : 'Not in yet? Blank / Cancel = WAIT for the '+(dir>0?'dip':'bounce')+' to '+fmt(mid)+' — tracking starts the moment it fills.'),
-    atMarketable ? String(+(+p0).toFixed(r.dec||2)) : ''
+    atMarketable ? String(+(+dispFromInr(cls,p0)).toFixed(r.dec||2)) : ''
   ); }catch(e){ ans=null; }
-  const typed = (ans && ans.trim()!=='') ? parseFloat(ans.replace(/[^0-9.]/g,'')) : NaN;
+  const typedRaw = (ans && ans.trim()!=='') ? parseFloat(ans.replace(/[^0-9.]/g,'')) : NaN;
   let entry, filled;
-  if(isFinite(typed)&&typed>0){ entry=typed; filled=true; }          // your real fill — most accurate
-  else if(atMarketable){ entry=p0; filled=true; }                    // default: tradable now → live price
-  else { entry=mid; filled=false; }                                  // default: waiting → pending at the zone midpoint
+  if(isFinite(typedRaw)&&typedRaw>0){ entry=inrFromDisp(cls,typedRaw); filled=true; }   // your real fill (typed in shown ccy) → stored ₹
+  else if(atMarketable){ entry=p0; filled=true; }                    // default: tradable now → live price (₹)
+  else { entry=mid; filled=false; }                                  // default: waiting → pending at the zone midpoint (₹)
   const t={id:Date.now()+'_'+sym,sym,tk:r.asset.tk||'',name:r.asset.name,cls:r.asset.cls,dir,
     entry, planEntry:entry, entryLo:lo, entryHi:hi, stop:r.setup.stop,initStop:r.setup.stop,targets:r.setup.targets.slice(),dec:r.dec,isIndex:r.isIndex,tf:timeframe,
     filled, placedAt:Date.now(), filledAt:filled?Date.now():null, expired:false,
@@ -474,7 +483,7 @@ function renderTrades(){
         ${t.targets.map((tg,k)=>`<div class="mk" style="left:${pos(tg)}%;background:var(--buy)"></div><div class="lab" style="left:${pos(tg)}%;color:var(--buy)">T${k+1}</div>`).join('')}
         <div class="mk now" style="left:${pos(p)}%"></div></div>
       <div class="tstatus">💡 ${adviceOf(t)}</div>
-      <div class="tstatus">now ${tpx(t,p)} · in <input class="editin" value="${(+t.entry).toFixed(t.dec||2)}" onchange="editTrade('${t.id}',this.value)" title="Your fill price — edit to correct"> · stop ${tpx(t,t.stop)}${showTrail?` · <b style="color:var(--accent2)">suggested trail → ${tpx(t,trail)}</b>`:''}</div></div>`;}).join('');
+      <div class="tstatus">now ${tpx(t,p)} · in <input class="editin" value="${(+dispFromInr(t.cls,t.entry)).toFixed(t.dec||2)}" onchange="editTrade('${t.id}',this.value)" title="Your fill price in the currency shown (${t.cls==='Crypto'&&cryptoCcy==='USDT'&&usdtInr>0?'USDT':'₹'}) — edit to correct"> · stop ${tpx(t,t.stop)}${showTrail?` · <b style="color:var(--accent2)">suggested trail → ${tpx(t,trail)}</b>`:''}</div></div>`;}).join('');
   el.innerHTML=`<div class="tradespanel"><h3>📋 My tracked trades (${a.length})</h3>${rows}<p class="small" style="margin-top:6px"><b>R</b> = profit measured against your original risk (+2R means you've made twice what you risked). Alerts fire while the app is open in any tab (even backgrounded) — allow notifications when prompted. Crypto tracked on the live ₹ feed (CoinDCX when your browser can reach it, else the global ₹ feed); stocks from your Upstox feed. Tracks levels &amp; gives guidance only — it does not place or close real orders.</p></div>`;
 }
 setInterval(monitorPoll,15000);
@@ -571,7 +580,11 @@ async function pollQuotes(){
   // Local browser-CoinDCX fast path (exact ₹, ticks every few seconds when running on your India machine)
   if(activeTab==='Crypto' && cryptoSource==='coindcx'){
     try{const t=await fetchT("https://api.coindcx.com/exchange/ticker",{},6000).then(r=>r.json());
-      if(Array.isArray(t)){const by={};t.forEach(x=>by[x.market]=+x.last_price);const bt=t.find(x=>x.market==='BTCINR'),bu=t.find(x=>x.market==='BTCUSDT');if(bt&&bu&&+bu.last_price>0)usdtInr=+bt.last_price/+bu.last_price;
+      if(Array.isArray(t)){
+        const usdtBy={};t.forEach(x=>{if(x.market&&x.market.endsWith('USDT'))usdtBy[x.market.slice(0,-4)]=+x.last_price;});
+        const bt=t.find(x=>x.market==='BTCINR'),bu=t.find(x=>x.market==='BTCUSDT'),ui=t.find(x=>x.market==='USDTINR');
+        if(bt&&bu&&+bu.last_price>0)usdtInr=+bt.last_price/+bu.last_price; else if(ui&&+ui.last_price>0)usdtInr=+ui.last_price;
+        const by={};t.forEach(x=>{if(x.market&&x.market.endsWith('INR')){const base=x.market.slice(0,-3);const u=usdtBy[base];by[x.market]=(u>0&&usdtInr>0)?u*usdtInr:+x.last_price;}});
         applyQuotes(by);}
     }catch(e){}
     return;

@@ -318,6 +318,10 @@ async function cdxGetTicker(){const t=await getJSON("https://api.coindcx.com/exc
   const snap={};t.forEach(x=>{if(x.market)snap[x.market]=+x.last_price;});cdxTicker=snap;cdxTickerAt=Date.now();return t;}
 // Ensure the live CoinDCX ticker is recent before we pin prices (prevents stale prices on fast-moving coins)
 async function ensureCdxFresh(maxMs=12000){if(Date.now()-cdxTickerAt>maxMs){try{await cdxGetTicker();}catch(e){}}}
+// CoinDCX's own USDT→INR rate (what its app uses to price coins)
+function cdxUsdtInr(){const u=cdxTicker["USDTINR"];if(u>0)return u;const bi=cdxTicker["BTCINR"],bu=cdxTicker["BTCUSDT"];return (bi>0&&bu>0)?bi/bu:0;}
+// The live ₹ price the CoinDCX APP shows: liquid USDT market × CoinDCX USDT/INR. Falls back to the INR last-trade.
+function cdxLiveInr(base){const u=cdxTicker[base+"USDT"],r=cdxUsdtInr();if(u>0&&r>0)return u*r;const i=cdxTicker[base+"INR"];return i>0?i:0;}
 // Binance fallback
 const BN_HOSTS=["https://data-api.binance.vision","https://api.binance.com","https://api-gcp.binance.com"];
 const BN_INT={"15m":"15m","30m":"30m","1h":"1h","4h":"4h","6h":"6h","12h":"12h","daily":"1d","intraday":"30m"};
@@ -402,7 +406,12 @@ async function loadCoinDCX(asset,tf){
   const rows=j.slice().reverse();  // CoinDCX returns newest-first → ascending
   const close=[],high=[],low=[],times=[];
   for(const k of rows){const c=+k.close;if(!isFinite(c))continue;close.push(c);high.push(+k.high);low.push(+k.low);times.push(+k.time);}
-  if(cdxTicker[asset.sym]>0&&close.length)close[close.length-1]=cdxTicker[asset.sym];  // pin to live ticker
+  if(!close.length)throw new Error("no candles");
+  // Price like the CoinDCX APP does: liquid USDT market × CoinDCX USDT/INR (thin INR pairs have stale last-trades).
+  // Rescale the whole candle series to that live price so entry/stop/target levels stay on the right scale.
+  const live=cdxLiveInr(asset.tk)||(cdxTicker[asset.sym]>0?cdxTicker[asset.sym]:0);
+  const rawLast=close[close.length-1];
+  if(live>0&&rawLast>0){const f=live/rawLast; if(f>0.2&&f<5){for(let i=0;i<close.length;i++){close[i]*=f;high[i]*=f;low[i]*=f;}} else {close[close.length-1]=live;}}
   return {close,high,low,times,price:close[close.length-1],mtime:Date.now()};
 }
 async function loadBinance(asset,tf){
@@ -638,7 +647,7 @@ async function liveQuotes(tab){
   if(cryptoIds.length && !DEMO){
     if(cgPriceCache && Date.now()-cgPriceAt<8000){Object.assign(out,cgPriceCache);}
     else if(cryptoMode==="coindcx"){
-      try{await cdxGetTicker();const c={};cryptoIds.forEach(x=>{if(cdxTicker[x.sym]>0)c[x.sym]=cdxTicker[x.sym];});cgPriceCache=c;cgPriceAt=Date.now();Object.assign(out,c);}
+      try{await cdxGetTicker();const c={};cryptoIds.forEach(x=>{const p=cdxLiveInr(x.tk)||(cdxTicker[x.sym]>0?cdxTicker[x.sym]:0);if(p>0)c[x.sym]=p;});cgPriceCache=c;cgPriceAt=Date.now();Object.assign(out,c);}
       catch(e){if(cgPriceCache)Object.assign(out,cgPriceCache);}
     }else{
       try{const arr=await binanceGet("/api/v3/ticker/price");const r=await usdInr();
@@ -776,4 +785,5 @@ if(require.main===module){
 }
 module.exports={IND,computeSignal,buildSetup,buildReasons,signalSince,actionNow,parseCandles,authURL,scan,universeFor,fmtTime,
   loadBinance,loadCoinDCX,loadCrypto,ensureCryptoUniverse,usdInr,resampleSeries,tfCfg,getCRYPTO:()=>CRYPTO,getMode:()=>cryptoMode,
-  backtestSeries,scoreSeriesArr,backtest};
+  backtestSeries,scoreSeriesArr,backtest,processAsset,blendResearch,assetBtScore,cdxLiveInr,cdxUsdtInr,
+  __setCdxTicker:(t)=>{cdxTicker=t;}};
