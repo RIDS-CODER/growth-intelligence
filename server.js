@@ -316,6 +316,8 @@ const CDX_INT={"15m":"15m","30m":"30m","1h":"1h","4h":"4h","6h":"6h","12h":"12h"
 let cdxTicker={},cdxTickerAt=0;
 async function cdxGetTicker(){const t=await getJSON("https://api.coindcx.com/exchange/ticker",{});if(!Array.isArray(t))throw new Error("cdx ticker");
   const snap={};t.forEach(x=>{if(x.market)snap[x.market]=+x.last_price;});cdxTicker=snap;cdxTickerAt=Date.now();return t;}
+// Ensure the live CoinDCX ticker is recent before we pin prices (prevents stale prices on fast-moving coins)
+async function ensureCdxFresh(maxMs=12000){if(Date.now()-cdxTickerAt>maxMs){try{await cdxGetTicker();}catch(e){}}}
 // Binance fallback
 const BN_HOSTS=["https://data-api.binance.vision","https://api.binance.com","https://api-gcp.binance.com"];
 const BN_INT={"15m":"15m","30m":"30m","1h":"1h","4h":"4h","6h":"6h","12h":"12h","daily":"1d","intraday":"30m"};
@@ -595,7 +597,7 @@ async function scan(tab,tf){
   const ttl = tab==='Crypto' ? TTL_CRYPTO : (tf==='intraday'?TTL_INTRA:TTL_DAILY);
   const ck="scan:"+tab+":"+tf;const hit=cGet(ck,ttl);if(hit)return{...hit,cached:true};
   // crypto universe (Binance) + commodities resolved FIRST so the universe reflects them
-  if(tab==="Crypto"||tab==="All"){try{await ensureCryptoUniverse();}catch(e){}}
+  if(tab==="Crypto"||tab==="All"){try{await ensureCryptoUniverse();}catch(e){}if(cryptoMode==="coindcx")await ensureCdxFresh();}
   if(tab==="Commodities"||tab==="All"){try{await ensureCommodities();}catch(e){}}
   const uni=universeFor(tab);
   const li=loggedIn();
@@ -704,6 +706,7 @@ function blendResearch(per){
 }
 async function researchCoin(rawSym,horizon){
   try{await ensureCryptoUniverse();}catch(e){}
+  if(cryptoMode==="coindcx")await ensureCdxFresh();
   const base=(rawSym||"").toUpperCase().replace(/USDT$|INR$|_INR$|-INR$/,"").replace(/[^A-Z0-9]/g,"");
   if(!base)return {error:"Enter a coin symbol (e.g. SOL, DOGE, BTC)."};
   const uni=(typeof getCRYPTO==='function'?getCRYPTO():CRYPTO)||CRYPTO;
