@@ -226,6 +226,24 @@ const fmtR=r=>v=>r.asset.cls==='Crypto'?cryptoPrice(v):fmtVal(v,r.dec,r.isIndex)
 // Currency-aware input conversion: the user types in the currency they SEE (₹ or $ USDT); we always STORE ₹.
 function inrFromDisp(cls,v){return (cls==='Crypto'&&cryptoCcy==='USDT'&&usdtInr>0)?v*usdtInr:v;}   // typed number -> ₹
 function dispFromInr(cls,v){return (cls==='Crypto'&&cryptoCcy==='USDT'&&usdtInr>0)?v/usdtInr:v;}   // ₹ -> number shown in the box
+// Render the action instruction in the CURRENCY THE USER IS VIEWING (fixes ₹ text on a $ card). Stocks keep the server ₹ text.
+function actionText(a,r){
+  if(!a)return '';
+  if(!r||r.asset.cls!=='Crypto'||!a.kind) return a.txt||'';
+  const P=v=>cryptoPrice(v), g=(a.gap!=null?a.gap:0).toFixed(1), lo=P(a.lo), hi=P(a.hi);
+  switch(a.kind){
+    case 'buynow':    return `🟢 BUY NOW — price is at the support/dip zone (${lo}–${hi})`;
+    case 'buybreak':  return `🟢 BUY the breakout — ${lo}–${hi}`;
+    case 'waitdip':   return `⏳ WAIT for the dip — set a buy limit at ${lo}–${hi} (support, ~${g}% below now). Don't chase.`;
+    case 'belowsup':  return `⚠ Below support — price already broke the dip zone; let it stabilize, it may keep falling to the stop`;
+    case 'sellnow':   return `🔴 SELL / SHORT NOW — price is at the resistance zone (${lo}–${hi})`;
+    case 'sellbreak': return `🔴 SELL the breakdown — ${hi}–${lo}`;
+    case 'waitbounce':return `⏳ WAIT for the bounce — sell/short into ${lo}–${hi} (resistance, ~${g}% above now)`;
+    case 'aboveres':  return `⚠ Above resistance — extended; wait for a pullback into the zone`;
+    case 'hold':      return `⏸ NO TRADE — signals mixed, stay flat`;
+    default:          return a.txt||'';
+  }
+}
 async function mapLimitClient(items,limit,fn){const ret=[];let i=0;async function w(){while(i<items.length){const j=i++;ret[j]=await fn(items[j]);}}await Promise.all(Array.from({length:Math.min(limit,items.length)},w));return ret;}
 async function fetchCoinDCXCrypto(tf){
   const t=await fetchT("https://api.coindcx.com/exchange/ticker",{},7000).then(r=>r.json());   // 1 call, times out fast if blocked
@@ -698,7 +716,7 @@ function card(r,i,isBuy){const{asset,sig,setup,reasons,dec,action,scope,asof,isI
       <div class="r"><span class="verdict ${sig.verdict}">${sig.verdict}</span><div class="toplineRet" style="color:${isBuy?'var(--buy)':'var(--sell)'};margin-top:6px">${setup.ret[0]>=0?'+':''}${setup.ret[0].toFixed(1)}%→T1</div>${btBadge(bt)}</div>
     </div>
     <div class="bd">
-      <div class="action ${action.cls}">${action.txt}<span class="since">${action.since||''}</span></div>
+      <div class="action ${action.cls}">${actionText(action,r)}<span class="since">${action.since||''}</span></div>
       ${scope?`<div class="scope ${scope.good?'good':'warn'}">${scope.txt}</div>`:''}
       ${sparkline(series,isBuy)}
       <div class="kv" style="margin-top:6px">

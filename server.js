@@ -58,10 +58,23 @@ function computeSignal(close,high,low,thr){
   if(st.k[n]!=null){let k=st.k[n],sc=k<20?(20-k)/20:k>80?-(k-80)/20:(50-k)/50*0.3;if(st.d[n]!=null)sc+=(st.k[n]-st.d[n])/100;add("Stochastic","Oscillator",Math.max(-1,Math.min(1,sc)),0.7,k.toFixed(0));}
   const roc=IND.roc(close,12);
   if(roc[n]!=null)add("ROC (12)","Rate of change",Math.max(-1,Math.min(1,roc[n]/10)),0.9,roc[n].toFixed(1)+"%");
+  // Trend regime: are we above the long-term line? (buy dips in uptrends, not downtrends)
+  const s200n=s200[n];
+  if(s200n!=null)add("Trend regime","Above/below the 200-line",price>s200n?1:-1,1.1,price>s200n?"above 200":"below 200");
+  // Momentum turn: is the bounce actually starting? (MACD histogram rising AND stochastic %K back above %D)
+  const turnUp = m.hist[n]!=null&&m.hist[n-1]!=null&&st.k[n]!=null&&st.d[n]!=null && m.hist[n]>m.hist[n-1] && st.k[n]>=st.d[n];
+  const turnDn = m.hist[n]!=null&&m.hist[n-1]!=null&&st.k[n]!=null&&st.d[n]!=null && m.hist[n]<m.hist[n-1] && st.k[n]<=st.d[n];
+  if(m.hist[n]!=null&&m.hist[n-1]!=null&&st.k[n]!=null&&st.d[n]!=null)add("Momentum turn","Bounce/rejection confirmation",turnUp?1:turnDn?-1:0,1.0,turnUp?"turning up":turnDn?"turning down":"flat");
   const prior=close.slice(0,n),hi20=IND.highest(prior,20),lo20=IND.lowest(prior,20);
   let wsum=0,ssum=0;out.forEach(o=>{wsum+=o.weight;ssum+=o.score*o.weight;});
-  const score=wsum?Math.round(ssum/wsum*100):0,verdict=score>=thr?'BUY':score<=-thr?'SELL':'HOLD';
-  return {score,verdict,components:out,price,rsiV:rsi[n],s50:s50[n],s200:s200[n],atr:IND.atr(close,high,low)[n],hi20,lo20,brkUp:price>=hi20,brkDn:price<=lo20,
+  const score=wsum?Math.round(ssum/wsum*100):0;
+  const brkUp=price>=hi20, brkDn=price<=lo20;
+  const regimeUp = s200n!=null ? price>s200n : (s50[n]!=null&&s200[n]!=null ? s50[n]>s200[n] : true);
+  let verdict=score>=thr?'BUY':score<=-thr?'SELL':'HOLD';
+  // TRADER GATES — buy the dip only in an uptrend; short the rally only in a downtrend. Breakouts are exempt (momentum entries).
+  if(verdict==='BUY'  && !brkUp && !regimeUp) verdict='HOLD';   // don't catch a falling knife
+  if(verdict==='SELL' && !brkDn &&  regimeUp) verdict='HOLD';   // don't short into strength
+  return {score,verdict,components:out,price,rsiV:rsi[n],s50:s50[n],s200:s200[n],atr:IND.atr(close,high,low)[n],hi20,lo20,regimeUp,turnUp,brkUp:price>=hi20,brkDn:price<=lo20,
     bbL:bb.lower[n],bbU:bb.upper[n],ema20:IND.ema(close,20)[n],lo10:IND.lowest(low,10),hi10:IND.highest(high,10)};
 }
 // nearest support below price (for buy-the-dip entries) / resistance above (for shorts)
@@ -110,26 +123,29 @@ function actionNow(sig,setup,since,fmt){
   const dir=setup.dir,p=sig.price,t=fmt(since.sinceTime),ago=since.barsAgo;
   const s=since.sinceTime?`Signal active since ${t} (${ago} bar${ago===1?'':'s'} ago)`:'';
   const d=v=>v<5?v.toFixed(4):v.toFixed(2);                       // price-appropriate decimals (crypto vs stocks)
-  const gap=Math.abs(setup.entryGapPct||0).toFixed(1);
-  if(sig.verdict==='HOLD')return{cls:'wait',txt:'⏸ NO TRADE — signals mixed, stay flat',since:s};
+  const gapN=Math.abs(setup.entryGapPct||0), gap=gapN.toFixed(1);
+  const lo=setup.entryLo, hi=setup.entryHi, brk=setup.type==='Breakout';
+  // Returns BOTH structured fields (so the client can render in ₹ or $) AND a ₹ text fallback (used for stocks).
+  const R=(cls,kind,txt)=>({cls,kind,lo,hi,gap:gapN,brk,since:s,txt});
+  if(sig.verdict==='HOLD')return R('wait','hold','⏸ NO TRADE — signals mixed, stay flat');
   if(dir>0){
-    if(p>=setup.entryLo&&p<=setup.entryHi)return{cls:'now',txt:`🟢 BUY NOW — price is at the support/dip zone (₹${d(setup.entryLo)}–${d(setup.entryHi)})`,since:s};
-    if(p>setup.entryHi)return{cls:'wait',txt:setup.type==='Breakout'
-      ? `🟢 BUY the breakout — ₹${d(setup.entryLo)}–${d(setup.entryHi)}`
-      : `⏳ WAIT for the dip — set a buy limit at ₹${d(setup.entryLo)}–${d(setup.entryHi)} (support, ~${gap}% below now). Don't chase.`,since:s};
-    return{cls:'wait',txt:`⚠ Below support — price already broke the dip zone; let it stabilize, it may keep falling to the stop`,since:s};
+    if(p>=lo&&p<=hi)return R('now','buynow',`🟢 BUY NOW — price is at the support/dip zone (₹${d(lo)}–${d(hi)})`);
+    if(p>hi)return R('wait',brk?'buybreak':'waitdip',brk
+      ? `🟢 BUY the breakout — ₹${d(lo)}–${d(hi)}`
+      : `⏳ WAIT for the dip — set a buy limit at ₹${d(lo)}–${d(hi)} (support, ~${gap}% below now). Don't chase.`);
+    return R('wait','belowsup',`⚠ Below support — price already broke the dip zone; let it stabilize, it may keep falling to the stop`);
   }
-  if(p<=setup.entryHi&&p>=setup.entryLo)return{cls:'exit',txt:`🔴 SELL / SHORT NOW — price is at the resistance zone (₹${d(setup.entryLo)}–${d(setup.entryHi)})`,since:s};
-  if(p<setup.entryLo)return{cls:'exit',txt:setup.type==='Breakout'
-    ? `🔴 SELL the breakdown — ₹${d(setup.entryHi)}–${d(setup.entryLo)}`
-    : `⏳ WAIT for the bounce — sell/short into ₹${d(setup.entryLo)}–${d(setup.entryHi)} (resistance, ~${gap}% above now)`,since:s};
-  return{cls:'exit',txt:`⚠ Above resistance — extended; wait for a pullback into the zone`,since:s};
+  if(p<=hi&&p>=lo)return R('exit','sellnow',`🔴 SELL / SHORT NOW — price is at the resistance zone (₹${d(lo)}–${d(hi)})`);
+  if(p<lo)return R('exit',brk?'sellbreak':'waitbounce',brk
+    ? `🔴 SELL the breakdown — ₹${d(hi)}–${d(lo)}`
+    : `⏳ WAIT for the bounce — sell/short into ₹${d(lo)}–${d(hi)} (resistance, ~${gap}% above now)`);
+  return R('exit','aboveres',`⚠ Above resistance — extended; wait for a pullback into the zone`);
 }
 function buildReasons(sig,setup,marketOpen,isCrypto){
   const dir=setup.dir,f=v=>v==null?'n/a':(+v).toFixed(2),forR=[],against=[],inval=[];
   sig.components.filter(c=>dir>0?c.tag==='BUY':c.tag==='SELL').forEach(c=>forR.push(`${c.name}: ${c.detail.toLowerCase()} (${c.raw??c.tag})`));
-  if(dir>0&&sig.brkUp)forR.push(`Broke above 20-bar high (₹${f(sig.hi20)})`);
-  if(dir<0&&sig.brkDn)forR.push(`Broke below 20-bar low (₹${f(sig.lo20)})`);
+  if(dir>0&&sig.brkUp)forR.push(`Broke above the 20-bar high (momentum breakout)`);
+  if(dir<0&&sig.brkDn)forR.push(`Broke below the 20-bar low (momentum breakdown)`);
   if(!forR.length)forR.push("Mixed signals — modest conviction.");
   sig.components.filter(c=>dir>0?c.tag==='SELL':c.tag==='BUY').forEach(c=>against.push(`${c.name} disagrees (${c.raw??c.tag})`));
   if(dir>0&&sig.rsiV>70)against.push(`RSI ${sig.rsiV.toFixed(0)} — overbought`);
@@ -137,7 +153,7 @@ function buildReasons(sig,setup,marketOpen,isCrypto){
   if(sig.atr/sig.price*100>4)against.push(`High volatility (ATR ${(sig.atr/sig.price*100).toFixed(1)}%)`);
   if(!isCrypto&&!marketOpen)against.push("Cash market closed — entry next session, gap risk.");
   if(!against.length)against.push("No major opposing indicator currently.");
-  inval.push(`Close ${dir>0?'below':'above'} Stop Loss ₹${f(setup.stop)}`);
+  inval.push(`Close ${dir>0?'below':'above'} the Stop Loss (shown above)`);
   inval.push(`EMA 12 crosses ${dir>0?'below':'above'} EMA 26`);
   inval.push(dir>0?`RSI falls under 45`:`RSI rises above 55`);
   return {forR,against,inval};
@@ -491,6 +507,8 @@ function scoreSeriesArr(close,high,low){
     if(bb.upper[i]!=null){const pos=(price-bb.mid[i])/((bb.upper[i]-bb.lower[i])/2||1);add(Math.max(-1,Math.min(1,-pos*0.7)),0.8);}
     if(st.k[i]!=null){let k=st.k[i];let sc=k<20?(20-k)/20:k>80?-(k-80)/20:(50-k)/50*0.3;if(st.d[i]!=null)sc+=(st.k[i]-st.d[i])/100;add(Math.max(-1,Math.min(1,sc)),0.7);}
     if(roc[i]!=null)add(Math.max(-1,Math.min(1,roc[i]/10)),0.9);
+    {const tr=s200[i]!=null?s200[i]:s50[i]; if(tr!=null)add(close[i]>tr?1:-1,1.1);}                // trend regime (200-line, 50-line until 200 exists)
+    if(i>0&&m.hist[i]!=null&&m.hist[i-1]!=null&&st.k[i]!=null&&st.d[i]!=null){const up=m.hist[i]>m.hist[i-1]&&st.k[i]>=st.d[i];const dn=m.hist[i]<m.hist[i-1]&&st.k[i]<=st.d[i];add(up?1:dn?-1:0,1.0);}  // momentum turn
     scores[i]=ws?Math.round(ss/ws*100):0;
   }
   return {scores,atr};
@@ -506,7 +524,7 @@ function backtestSeries(close,high,low,tf,cost){
   const {scores,atr}=scoreSeriesArr(close,high,low);
   const thr=tf==='daily'?20:12;
   const P=TYPE[tf==='daily'?'Swing':'Intraday'], stopMult=P.stopMult, T=P.t;   // T = [t1,t2,t3] R-multiples
-  const ema20=IND.ema(close,20), sma50=IND.sma(close,50), bb=IND.bollinger(close), n=close.length;
+  const ema20=IND.ema(close,20), sma50=IND.sma(close,50), s200b=IND.sma(close,200), bb=IND.bollinger(close), n=close.length;
   const lo10=new Array(n).fill(null), prevHi20=new Array(n).fill(null);
   for(let i=0;i<n;i++){
     if(i>=9){let m=Infinity;for(let j=i-9;j<=i;j++)m=Math.min(m,low[j]);lo10[i]=m;}
@@ -532,8 +550,10 @@ function backtestSeries(close,high,low,tf,cost){
     }
     if(pos===0 && !pending && scores[i]>=thr && atr[i]>0){
       const r=stopMult*atr[i], brk=prevHi20[i]!=null && close[i]>=prevHi20[i];
-      if(brk) enter(close[i],r,i);            // breakout → market
-      else{ const sup=nearestLevel(1,close[i],atr[i],[lo10[i],bb.lower[i],ema20[i],sma50[i]]); pending={limit:sup,R:r,sig:i,exp:i+FILLWIN}; }
+      const trendRef = s200b[i]!=null ? s200b[i] : sma50[i];   // fall back to the 50-line until 200 bars exist
+      const regimeUp = trendRef==null || close[i]>trendRef;
+      if(brk) enter(close[i],r,i);            // breakout → market (momentum, trend-agnostic)
+      else if(regimeUp){ const sup=nearestLevel(1,close[i],atr[i],[lo10[i],bb.lower[i],ema20[i],sma50[i]]); pending={limit:sup,R:r,sig:i,exp:i+FILLWIN}; }  // buy the dip ONLY in an uptrend
     }
   }
   if(pos===1){ gross+=rem*(close[n-1]/entry-1); rem=0; finish(); }
