@@ -396,7 +396,7 @@ function monitorTrades(prices){
       if(against&&!t.sigAgainst){t.sigAgainst=true;changed=true;notify('⚠️ '+t.name+' momentum turned',reversalAdvice(t));}
       else if(favor&&t.sigAgainst){t.sigAgainst=false;changed=true;notify('🟢 '+t.name+' signal recovered','Momentum is back in your favor — hold per your plan, your targets are still valid.');}}
   });
-  if(changed)saveTrades(a);renderTrades();
+  saveTrades(a);renderTrades();   // persist live price/peak/R every tick so a reload never shows stale values
 }
 async function monitorPoll(){
   const a=loadTrades();if(!a.length)return;const prices={},cbase={};
@@ -528,7 +528,7 @@ async function runScan(){
       render(d.results);
       const now=new Date();document.getElementById('lastUpd').textContent='Updated '+now.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true});
       document.getElementById('pstat').textContent=`✅ ${d.analyzed} coins · CoinDCX (your browser) · ${cryptoCcy}`;
-      scanning=false;document.getElementById('scanBtn').disabled=false;scheduleRefresh();return;
+      scanning=false;document.getElementById('scanBtn').disabled=false;scheduleRefresh();pollQuotes();return;
     }catch(e){
       cryptoSource='global';await ensureRate();     // keep the toggle working even on fallback
       document.getElementById('pstat').textContent='⚠️ CoinDCX unreachable from your browser — using global ₹ feed';
@@ -553,6 +553,7 @@ async function runScan(){
     } else {
       document.getElementById('pstat').textContent=`${d.analyzed}/${d.total} live${d.cached?' (cached)':''}${d.note?' · ⚠ '+d.note:''}`;
     }
+    pollQuotes();   // overlay live prices immediately so a (possibly cached) scan never leaves a stale "fixed" price on screen
   }catch(e){document.getElementById('pstat').textContent='Error';document.getElementById('buyCards').innerHTML='<div class="empty">Backend error: '+e.message+'</div>';}
   scanning=false;document.getElementById('scanBtn').disabled=false;scheduleRefresh();
 }
