@@ -652,7 +652,7 @@ async function scan(tab,tf){
   }
   const cryptoAssets=uni.filter(a=>a.src==='cg');
   const cryptoFailed = cryptoAssets.length>0 && !DEMO && !ok.some(r=>r.asset.src==='cg');
-  const out={tab,tf,analyzed:ok.length,total:uni.length,results:ok,ts:Date.now(),demo:DEMO,loggedIn:li,keyOf,cryptoMode,
+  const out={tab,tf,analyzed:ok.length,total:uni.length,results:ok,ts:Date.now(),demo:DEMO,loggedIn:li,keyOf,cryptoMode,usdtInr:(cryptoMode==='coindcx'?cdxUsdtInr():0),
     note: cryptoFailed?"Crypto unreachable — this server's region can't reach CoinDCX. For exact CoinDCX ₹, host in an India region (e.g. DigitalOcean Bangalore/BLR); otherwise the global ₹ feed is used.":undefined};
   if(ok.length>0 && !cryptoFailed) cSet(ck,out);   // never cache an empty/failed scan
   return out;
@@ -763,7 +763,7 @@ async function handler(req,res){
     if(p==="/api/scan"){ // no login gate — crypto/commodity-ETF work without Upstox; stocks just skip until logged in
       const data=await scan(u.searchParams.get("tab")||"Stocks",u.searchParams.get("tf")||"intraday");return sendJSON(res,data);}
     if(p==="/api/quotes"){
-      return sendJSON(res,{quotes:await liveQuotes(u.searchParams.get("tab")||"Stocks"),loggedIn:loggedIn(),ts:Date.now()});}
+      {const q=await liveQuotes(u.searchParams.get("tab")||"Stocks");return sendJSON(res,{quotes:q,usdtInr:(cryptoMode==='coindcx'?cdxUsdtInr():0),loggedIn:loggedIn(),ts:Date.now()});}}
     if(p==="/api/backtest"){
       const data=await backtest(u.searchParams.get("tab")||"Stocks",u.searchParams.get("tf")||"daily");return sendJSON(res,data);}
     if(p==="/api/crypto-signals" && req.method==="POST"){

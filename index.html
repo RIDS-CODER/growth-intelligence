@@ -558,6 +558,7 @@ async function runScan(){
     const d=await r.json();
     if(d.error==='login_required'){document.getElementById('pstat').textContent='Login required';drawLogin();render([]);scanning=false;document.getElementById('scanBtn').disabled=false;return;}
     if(d.error)throw new Error(d.error);
+    if(d.usdtInr>0)usdtInr=d.usdtInr;   // use the SERVER's exact CoinDCX USDT/INR so $ display matches CoinDCX
     document.getElementById('pf').style.width='100%';
     render(d.results);
     const now=new Date();
@@ -610,6 +611,7 @@ async function pollQuotes(){
   }
   // Everything else — including HOSTED crypto (India server reaches CoinDCX): live prices from the server every poll
   try{const d=await(await fetch('/api/quotes?tab='+encodeURIComponent(activeTab))).json();
+    if(d.usdtInr>0)usdtInr=d.usdtInr;   // keep display rate exactly in sync with the server's pricing rate
     if(d.quotes)applyQuotes(d.quotes);
   }catch(e){}
 }
