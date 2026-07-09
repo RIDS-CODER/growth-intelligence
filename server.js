@@ -277,7 +277,17 @@ async function ensureCommodities(){
   return COMMODITIES;
 }
 // Upstox API V3 timeframes. hours max 5 → 6h/12h are resampled from 1h.
+// Higher timeframes used to CONFIRM a signal (resampled from the same candles — no extra fetch). [label, ×factor]
+const CONFIRM={
+  "5m":[["15m",3],["30m",6]],
+  "15m":[["30m",2],["1h",4]],
+  "30m":[["1h",2],["4h",8]],
+  "1h":[["4h",4],["6h",6]],
+  "4h":[["12h",3],["1D",6]],
+  "daily":[]
+};
 const TF_MAP={
+  "5m" :{unit:"minutes",interval:5, days:12},
   "15m":{unit:"minutes",interval:15,days:30},
   "30m":{unit:"minutes",interval:30,days:50},
   "1h" :{unit:"hours",  interval:1, days:100},
@@ -328,7 +338,7 @@ async function upstoxLTP(keys){
 const CG_TOP=parseInt(process.env.CRYPTO_TOP)||parseInt(CFG.cryptoTop)||120;
 let cgOk=false, cryptoMode="binance";   // set to 'coindcx' when CoinDCX is reachable
 // CoinDCX public endpoints (no auth)
-const CDX_INT={"15m":"15m","30m":"30m","1h":"1h","4h":"4h","6h":"6h","12h":"12h","daily":"1d","intraday":"30m"};
+const CDX_INT={"5m":"5m","15m":"15m","30m":"30m","1h":"1h","4h":"4h","6h":"6h","12h":"12h","daily":"1d","intraday":"30m"};
 let cdxTicker={},cdxTickerAt=0;
 async function cdxGetTicker(){const t=await getJSON("https://api.coindcx.com/exchange/ticker",{});if(!Array.isArray(t))throw new Error("cdx ticker");
   const snap={};t.forEach(x=>{if(x.market)snap[x.market]=+x.last_price;});cdxTicker=snap;cdxTickerAt=Date.now();return t;}
@@ -340,7 +350,7 @@ function cdxUsdtInr(){const u=cdxTicker["USDTINR"];if(u>0)return u;const bi=cdxT
 function cdxLiveInr(base){const u=cdxTicker[base+"USDT"],r=cdxUsdtInr();if(u>0&&r>0)return u*r;const i=cdxTicker[base+"INR"];return i>0?i:0;}
 // Binance fallback
 const BN_HOSTS=["https://data-api.binance.vision","https://api.binance.com","https://api-gcp.binance.com"];
-const BN_INT={"15m":"15m","30m":"30m","1h":"1h","4h":"4h","6h":"6h","12h":"12h","daily":"1d","intraday":"30m"};
+const BN_INT={"5m":"5m","15m":"15m","30m":"30m","1h":"1h","4h":"4h","6h":"6h","12h":"12h","daily":"1d","intraday":"30m"};
 async function binanceGet(pathq){let last;for(const h of BN_HOSTS){try{return await getJSON(h+pathq,{});}catch(e){last=e;}}throw last||new Error("binance unreachable");}
 let fxRate=null,fxAt=0;
 async function usdInr(){
@@ -468,6 +478,26 @@ function scopeFlag(sig){
     return {good:false, txt:'↔ Counter to the bigger trend — likely a short-lived dip'};
   }
 }
+// Multi-timeframe confirmation: resample the SAME candles into 2 higher timeframes and see if they lean the
+// same way as this signal. Returns {agree,total,frames:[{tf,ok}]} — no extra network calls. BUY/SELL only.
+function multiTfConfirm(data,tf,verdict){
+  const side = verdict==='SELL'?-1:verdict==='BUY'?1:0;
+  if(!side) return null;
+  const conf = CONFIRM[tf]||[];
+  const frames=[{tf,ok:true}]; let agree=1, total=1;
+  for(const [label,f] of conf){
+    try{
+      const rs=resampleSeries({close:data.close,high:data.high,low:data.low,times:data.times||data.close.map(()=>0)},f);
+      if(!rs.close||rs.close.length<41){continue;}
+      const cl=rs.close.slice(0,-1),hi=rs.high.slice(0,-1),lo=rs.low.slice(0,-1);
+      if(cl.length<41)continue;
+      const hs=computeSignal(cl,hi,lo,tf==='daily'?20:12);
+      const ok = side>0 ? hs.score>0 : hs.score<0;      // same directional lean on the higher timeframe
+      frames.push({tf:label,ok,score:hs.score}); total++; if(ok)agree++;
+    }catch(e){}
+  }
+  return {agree,total,frames};
+}
 function processAsset(asset,data,tf){
   if(!data||!data.close||data.close.length<41)throw new Error("no data");
   const thr=tf==='daily'?20:12;             // looser threshold on all intraday frames = more opportunities
@@ -486,7 +516,8 @@ function processAsset(asset,data,tf){
   const isIndex=!!asset.isIndex||asset.sym.startsWith('^');
   const asofMs=data.mtime||(data.times?data.times[data.times.length-1]:Date.now());
   const bt = cl.length>=120 ? assetBtScore(backtestSeries(cl,hi,lo,tf,costFor(asset))) : null;   // net-of-cost historical grade (same data)
-  return {asset,sig,setup,since,action,reasons,scope,bt,dec,isIndex,tf,asof:fmtTime(asofMs),
+  const mtf = multiTfConfirm(data,tf,sig.verdict);   // higher-timeframe agreement (resampled, no extra fetch)
+  return {asset,sig,setup,since,action,reasons,scope,bt,mtf,dec,isIndex,tf,asof:fmtTime(asofMs),
     priceTag:asset.src==='cg'?(cryptoMode==='coindcx'?'live · CoinDCX ₹':'live · global ₹'):(marketOpen()?'LIVE (broker)':'prev close'),series:data.close.slice(-80)};
 }
 /* ============================================================
@@ -743,7 +774,7 @@ async function researchCoin(rawSym,horizon){
   if(!asset)asset = cryptoMode==="coindcx"
     ? {sym:base+"INR",pair:"I-"+base+"_INR",binance:base+"USDT",tk:base,name:base,cls:"Crypto",src:"cg"}
     : {sym:base+"USDT",binance:base+"USDT",tk:base,name:base,cls:"Crypto",src:"cg"};
-  const tfs = horizon==="long" ? ["4h","12h","daily"] : ["15m","30m","1h"];
+  const tfs = horizon==="long" ? ["4h","12h","daily"] : ["5m","15m","1h"];
   const per=[];
   for(const tf of tfs){try{const data=await loadCrypto(asset,tf);per.push(processAsset(asset,data,tf));}catch(e){}}
   if(!per.length)return {error:'No data for "'+base+'". Check the symbol — it may not trade on your exchange.'};

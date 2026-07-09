@@ -147,7 +147,7 @@
 
   <div class="controls">
     <div class="tabs" id="tabs"></div>
-    <div class="seg" id="tf"><div data-tf="15m">15m</div><div data-tf="30m" class="on">30m</div><div data-tf="1h">1h</div><div data-tf="4h">4h</div><div data-tf="6h">6h</div><div data-tf="12h">12h</div><div data-tf="daily">1D</div></div>
+    <div class="seg" id="tf"><div data-tf="5m">5m</div><div data-tf="15m">15m</div><div data-tf="30m" class="on">30m</div><div data-tf="1h">1h</div><div data-tf="4h">4h</div><div data-tf="6h">6h</div><div data-tf="12h">12h</div><div data-tf="daily">1D</div></div>
     <div class="seg" id="ccy" style="display:none"><div data-ccy="INR" class="on">₹ INR</div><div data-ccy="USDT">$ USDT</div></div>
     <button class="btn" id="scanBtn" onclick="runScan()">↻ Refresh now</button>
     <div class="progress"><div class="pf" id="pf"></div></div>
@@ -162,7 +162,7 @@
     <button class="btn export" onclick="exportCSV()">⬇ Export to Excel (CSV)</button>
   </div>
   <div class="controls" style="margin-top:10px">
-    <label class="rl">Min score <input id="minscore" type="range" min="0" max="60" step="1" value="0" oninput="onMinScore()"> <b id="minscoreVal" style="color:var(--txt);font-family:var(--mono);min-width:22px;display:inline-block">0</b></label>
+    <label class="rl">Min score <input id="minscore" type="range" min="0" max="45" step="1" value="0" oninput="onMinScore()"> <b id="minscoreVal" style="color:var(--txt);font-family:var(--mono);min-width:22px;display:inline-block">0</b></label>
     <button class="btn" id="strongBtn" onclick="setStrong()">💪 Strong only</button>
     <button class="btn" onclick="toggleScoreInfo()">ℹ️ What does the score mean?</button>
     <button class="btn" id="btBtn" onclick="runBacktest()" style="border-color:var(--hold);background:var(--hold-bg);color:var(--hold)">📊 Backtest this tab</button>
@@ -203,7 +203,7 @@ function setCryptoNote(mode){
   }
 }
 const CRYPTO_N=40;                                     // top coins fetched client-side (kept small so it's fast, not hanging)
-const CDX_INT_C={"15m":"15m","30m":"30m","1h":"1h","4h":"4h","6h":"6h","12h":"12h","daily":"1d"};
+const CDX_INT_C={"5m":"5m","15m":"15m","30m":"30m","1h":"1h","4h":"4h","6h":"6h","12h":"12h","daily":"1d"};
 const STABLE_C=new Set(["USDT","USDC","DAI","TUSD","BUSD","FDUSD","USDP","USDD","EUR","GBP","AEUR"]);
 // fetch with a hard timeout so a blocked/slow request can never hang the UI
 function fetchT(url,opts,ms){return Promise.race([fetch(url,opts||{}),new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),ms||6000))]);}
@@ -307,7 +307,7 @@ function notify(title,body){toast(title+' — '+body);try{if('Notification'in wi
 function toast(msg){const c=document.getElementById('toast');if(!c)return;const d=document.createElement('div');d.className='t';d.textContent=msg;c.appendChild(d);setTimeout(()=>d.remove(),9000);}
 function tpx(t,v){return t.cls==='Crypto'?cryptoPrice(v):fmtVal(v,t.dec,t.isIndex);}
 function tpnl(t){return t.price>0?(t.dir>0?(t.price/t.entry-1):(t.entry/t.price-1))*100:0;}
-const TF_MIN={'15m':15,'30m':30,'1h':60,'4h':240,'6h':360,'12h':720,'daily':1440,'intraday':30};
+const TF_MIN={'5m':5,'15m':15,'30m':30,'1h':60,'4h':240,'6h':360,'12h':720,'daily':1440,'intraday':30};
 const FILL_BARS=6;                                   // a limit that doesn't fill within ~6 bars is treated as missed
 function tfMin(tf){return TF_MIN[tf]||30;}
 function fillWindowText(tf){const m=tfMin(tf)*FILL_BARS;return m<90?'~'+m+' min':m<1440?'~'+(m/60).toFixed(m%60?1:0)+' h':'~'+(m/1440).toFixed(m%1440?1:0)+' days';}
@@ -429,7 +429,7 @@ async function monitorPoll(){
 function toggleTrades(){const el=document.getElementById('tradesPanel');el.style.display=el.style.display==='none'?'block':'none';if(el.style.display==='block')renderTrades();}
 /* ---- Research a coin: one blended plan across several timeframes (short or long horizon) ---- */
 let researchHorizon='short', researchBusy=false, researchLast='';
-function tfHorizon(tf){return ['15m','30m','1h','intraday'].includes(tf)?'short':'long';}
+function tfHorizon(tf){return ['5m','15m','30m','1h','intraday'].includes(tf)?'short':'long';}
 function openResearchFor(sym,horizon){
   researchHorizon=horizon||'short'; researchLast=sym;
   const el=document.getElementById('researchPanel'); el.style.display='block'; renderResearchShell();
@@ -443,7 +443,7 @@ function renderResearchShell(){
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:6px 0">
       <input id="rzSym" placeholder="Coin symbol — e.g. SOL, DOGE, BTC" value="${researchLast}" style="flex:1;min-width:150px;padding:9px 12px;border-radius:9px;border:1px solid var(--line);background:var(--panel2);color:var(--txt);font-family:var(--mono)" onkeydown="if(event.key==='Enter')runResearch()">
       <div style="display:flex;gap:5px">
-        <div class="rztab ${researchHorizon==='short'?'on':''}" data-h="short" onclick="setHorizon('short')">Short-term · 15m–1h</div>
+        <div class="rztab ${researchHorizon==='short'?'on':''}" data-h="short" onclick="setHorizon('short')">Short-term · 5m–1h</div>
         <div class="rztab ${researchHorizon==='long'?'on':''}" data-h="long" onclick="setHorizon('long')">Long-term · 4h–1D</div>
       </div>
       <button class="btn" onclick="runResearch()" style="border-color:#a78bfa;background:rgba(167,139,250,.14);color:#ddd6fe">Analyze →</button>
@@ -618,7 +618,7 @@ async function pollQuotes(){
 
 const getMinScore=()=>+document.getElementById('minscore').value||0;
 function onMinScore(){document.getElementById('minscoreVal').textContent=getMinScore();syncStrongBtn();if(lastResults.length)render(lastResults);}
-const STRONG=40;
+const STRONG=25;   // recalibrated to the real score distribution (a composite of 9 indicators rarely exceeds ~35 intraday)
 function setStrong(){const s=document.getElementById('minscore');s.value=getMinScore()>=STRONG?0:STRONG;onMinScore();}
 function syncStrongBtn(){const b=document.getElementById('strongBtn');if(!b)return;const on=getMinScore()>=STRONG;b.classList.toggle('go',on);b.textContent=on?'💪 Strong only · ON':'💪 Strong only';}
 function toggleScoreInfo(){const el=document.getElementById('scoreInfo');if(el.style.display==='none'){el.innerHTML=scoreInfoHTML();el.style.display='block';}else{el.style.display='none';}}
@@ -679,8 +679,9 @@ function render(results){
   lastResults=results;
   const ms=getMinScore();
   // clean (actionable) setups first, "late" ones (price already at/through the stop) pushed to the bottom
-  const buys=results.filter(r=>r.sig.verdict==='BUY'&&r.sig.score>=ms).sort((a,b)=>(liveStale(a)-liveStale(b))|| (b.sig.score-a.sig.score));
-  const sells=results.filter(r=>r.sig.verdict==='SELL'&&r.sig.score<=-ms).sort((a,b)=>(liveStale(a)-liveStale(b))|| (a.sig.score-b.sig.score));
+  const mAgree=r=>r.mtf?r.mtf.agree:0;   // higher timeframe agreement count
+  const buys=results.filter(r=>r.sig.verdict==='BUY'&&r.sig.score>=ms).sort((a,b)=>(liveStale(a)-liveStale(b))|| (mAgree(b)-mAgree(a)) || (b.sig.score-a.sig.score));
+  const sells=results.filter(r=>r.sig.verdict==='SELL'&&r.sig.score<=-ms).sort((a,b)=>(liveStale(a)-liveStale(b))|| (mAgree(b)-mAgree(a)) || (a.sig.score-b.sig.score));
   document.getElementById('buyCount').textContent=buys.length;document.getElementById('sellCount').textContent=sells.length;
   const hidden=results.filter(r=>r.sig.verdict!=='HOLD').length-(buys.length+sells.length);
   const lateB=buys.filter(liveStale).length, lateS=sells.filter(liveStale).length, late=lateB+lateS;
@@ -705,7 +706,15 @@ function btBadge(bt){
   const s=bt.score,c=s>=70?'var(--buy)':s>=55?'var(--accent2)':s>=40?'var(--hold)':'var(--sell)';
   return `<div class="btmini" style="border-color:${c};color:${c}" title="How this name backtested on this timeframe (${bt.trades} trades). Higher = better.">BT ${s}</div>`;
 }
-function card(r,i,isBuy){const{asset,sig,setup,reasons,dec,action,scope,asof,isIndex,priceTag,series,bt}=r,f=fmtR(r),open=i<3?'open':'';
+function mtfChip(m){if(!m||!m.total||m.total<2)return '';const a=m.agree,t=m.total,c=a>=t?'var(--buy)':a>=2?'var(--accent2)':'var(--hold)';return `<div class="btmini" style="border-color:${c};color:${c}" title="Higher-timeframe agreement (${a} of ${t})">MTF ${a}/${t}</div>`;}
+function mtfBadge(m){
+  if(!m||!m.total||m.total<2)return '';
+  const a=m.agree,t=m.total, cls=a>=t?'good':a>=2?'good':'warn';
+  const label=a>=t?`✅ Confirmed across all ${t} timeframes`:a>=2?`🟢 Confirmed on ${a} of ${t} timeframes`:`⚠ Only this timeframe (${a}/${t}) — higher timeframes don't agree`;
+  const list=m.frames.map(fr=>fr.tf+(fr.ok?' ✓':' ✕')).join('  ·  ');
+  return `<div class="scope ${cls}" title="Same signal checked on higher timeframes (resampled)">${label} <span class="sub" style="opacity:.8">— ${list}</span></div>`;
+}
+function card(r,i,isBuy){const{asset,sig,setup,reasons,dec,action,scope,asof,isIndex,priceTag,series,bt,mtf}=r,f=fmtR(r),open=i<3?'open':'';
   const tn=['Target 1','Target 2','Target 3'];
   const tgts=setup.targets.map((t,k)=>`<div class="lv t${k+1}"><div class="k">${tn[k]}</div><div class="v">${f(t)}</div><div class="r">${setup.ret[k]>=0?'+':''}${setup.ret[k].toFixed(1)}%</div></div>`).join('');
   const hz=tfHorizon(timeframe), hzLabel=hz==='short'?'⏱ Short-term':'📆 Long-term';
@@ -715,11 +724,12 @@ function card(r,i,isBuy){const{asset,sig,setup,reasons,dec,action,scope,asof,isI
     <div class="hd" onclick="this.parentNode.classList.toggle('open')">
       <div class="l"><div class="name">${asset.name}</div><div class="sub">${asset.tk?asset.tk+' · ':''}${asset.sym} · ${asset.cls}</div>
         <div class="ttype">${setup.type} · score ${sig.score>0?'+':''}${sig.score}</div><span class="hz ${hz}">${hzLabel}</span><div class="asof">📡 ${asof||'—'} · ${priceTag}</div></div>
-      <div class="r"><span class="verdict ${sig.verdict}">${sig.verdict}</span><div class="toplineRet" style="color:${isBuy?'var(--buy)':'var(--sell)'};margin-top:6px">${setup.ret[0]>=0?'+':''}${setup.ret[0].toFixed(1)}%→T1</div>${btBadge(bt)}</div>
+      <div class="r"><span class="verdict ${sig.verdict}">${sig.verdict}</span><div class="toplineRet" style="color:${isBuy?'var(--buy)':'var(--sell)'};margin-top:6px">${setup.ret[0]>=0?'+':''}${setup.ret[0].toFixed(1)}%→T1</div>${mtfChip(mtf)}${btBadge(bt)}</div>
     </div>
     <div class="bd">
       <div class="action ${action.cls}">${actionText(action,r)}<span class="since">${action.since||''}</span></div>
       ${scope?`<div class="scope ${scope.good?'good':'warn'}">${scope.txt}</div>`:''}
+      ${mtfBadge(mtf)}
       ${sparkline(series,isBuy)}
       <div class="kv" style="margin-top:6px">
         <div class="k">Current Price</div><div class="v" id="px_${id4(asset.sym)}">${f(sig.price)}</div>
