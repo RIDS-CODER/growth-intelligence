@@ -840,6 +840,8 @@ async function researchCoin(rawSym,horizon){
   if(!per.length)return {error:'No data for "'+base+'". Check the symbol — it may not trade on your exchange.'};
   return {sym:base,horizon,dec:per[0].dec,cryptoMode,consensus:blendResearch(per),ts:Date.now()};
 }
+// Paper-trading engine (simulation) — reuses this server's scan + live quotes. Never places real orders.
+const paper = require('./paper.js')({ scan, liveQuotes, dir:__dirname });
 function sendJSON(res,o,c=200){const b=JSON.stringify(o);res.writeHead(c,{"Content-Type":"application/json","Access-Control-Allow-Origin":"*"});res.end(b);}
 const MIME={".html":"text/html",".js":"text/javascript",".css":"text/css",".json":"application/json",".svg":"image/svg+xml"};
 async function handler(req,res){
@@ -863,6 +865,14 @@ async function handler(req,res){
     if(p==="/api/research"){   // one coin, several timeframes, averaged consensus (short or long horizon)
       const sym=u.searchParams.get("sym")||"", horizon=u.searchParams.get("horizon")==="long"?"long":"short";
       return sendJSON(res,await researchCoin(sym,horizon));}
+    if(p==="/api/paper/state") return sendJSON(res,paper.getState());
+    if(p==="/api/paper/control"){ const a=u.searchParams.get("action");
+      if(a==="start")return sendJSON(res,paper.start());
+      if(a==="stop")return sendJSON(res,paper.stop());
+      if(a==="reset")return sendJSON(res,paper.reset());
+      if(a==="tick")return sendJSON(res,await paper.tick());
+      return sendJSON(res,{error:"bad action"},400); }
+    if(p==="/api/paper/config" && req.method==="POST"){ const body=await readBody(req); let c={}; try{c=JSON.parse(body);}catch(e){} return sendJSON(res,paper.setConfig(c)); }
     if(p==="/api/signal"){   // current verdict for ONE Upstox instrument (used by the trade-reversal watcher)
       const sym=u.searchParams.get("sym"), tf=u.searchParams.get("tf")||"1h";
       if(sym&&sym.startsWith("MCX:")){try{await ensureCommodities();}catch(e){}}
@@ -893,6 +903,8 @@ if(require.main===module){
     console.log(`  Mode:  ${DEMO?"DEMO (synthetic, no login needed)":"LIVE (Upstox)"}`);
     console.log(`  Upstox app key: ${API_KEY?"set":"MISSING — edit config.json"}  |  Logged in today: ${loggedIn()}\n`);
   });
+  // Paper-bot control loop — one simulated iteration each minute (only acts when you've pressed Start).
+  setInterval(()=>{ paper.tick().catch(()=>{}); }, 60000);
 }
 module.exports={IND,computeSignal,buildSetup,buildReasons,signalSince,actionNow,parseCandles,authURL,scan,universeFor,fmtTime,
   loadBinance,loadCoinDCX,loadCrypto,ensureCryptoUniverse,usdInr,resampleSeries,tfCfg,getCRYPTO:()=>CRYPTO,getMode:()=>cryptoMode,
