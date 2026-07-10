@@ -172,6 +172,7 @@
   </div>
   <div id="scoreInfo" style="display:none"></div>
   <div id="cryptoNote" style="display:none"></div>
+  <div id="btcNote" style="display:none"></div>
   <div id="researchPanel" style="display:none"></div>
   <div id="tradesPanel" style="display:none"></div>
   <div id="btPanel"></div>
@@ -189,6 +190,12 @@
 let activeTab="Stocks",timeframe="30m",lastResults=[],status={},refreshAt=0;
 let cryptoCcy="INR", usdtInr=0, cryptoSource="";       // ₹/USDT toggle + USDT→INR rate + active source label
 let lastCryptoMode="";                                  // 'coindcx' (browser) | 'server-coindcx' (India host) | 'global'
+function setBtcNote(btc){
+  const el=document.getElementById('btcNote'); if(!el)return;
+  if((activeTab!=='Crypto'&&activeTab!=='All')||!btc||btc.bull!==false){el.style.display='none';return;}
+  el.style.display='block';
+  el.innerHTML='<div class="infobox" style="border-color:rgba(234,57,67,.5)"><b>₿ Bitcoin is risk-off ('+(btc.verdict==='SELL'?'BTC is selling':'below its trend')+').</b> Alt <b>longs are paused</b> — when BTC falls, alts usually follow it down. Shorts and BTC itself still show. This lifts automatically once BTC reclaims its trend.</div>';
+}
 function setCryptoNote(mode){
   const cn=document.getElementById('cryptoNote'); if(!cn) return;
   if(activeTab!=='Crypto'){cn.style.display='none';return;}
@@ -262,11 +269,11 @@ async function fetchCoinDCXCrypto(tf){
   const assets=await mapLimitClient(rows,10,async r=>{
     try{const j=await fetchT(`https://public.coindcx.com/market_data/candles?pair=I-${r.base}_INR&interval=${interval}&limit=300`,{},7000).then(x=>x.json());
       if(!Array.isArray(j)||j.length<41)return null;
-      const rev=j.slice().reverse();const close=[],high=[],low=[],times=[];
-      for(const k of rev){const c=+k.close;if(!isFinite(c))continue;close.push(c);high.push(+k.high);low.push(+k.low);times.push(+k.time);}
+      const rev=j.slice().reverse();const close=[],high=[],low=[],times=[],vol=[];
+      for(const k of rev){const c=+k.close;if(!isFinite(c))continue;close.push(c);high.push(+k.high);low.push(+k.low);times.push(+k.time);vol.push(+k.volume||0);}
       if(close.length<41)return null;
-      const f=r.last/close[close.length-1]; if(f>0.2&&f<5){for(let i=0;i<close.length;i++){close[i]*=f;high[i]*=f;low[i]*=f;}} else {close[close.length-1]=r.last;}  // rescale INR candles to the live (USDT-based) price
-      return {sym:r.market,tk:r.base,name:r.base,close,high,low,times,price:r.last};
+      const f=r.last/close[close.length-1]; if(f>0.2&&f<5){for(let i=0;i<close.length;i++){close[i]*=f;high[i]*=f;low[i]*=f;}} else {close[close.length-1]=r.last;}  // rescale INR candles to the live (USDT-based) price (volume unchanged)
+      return {sym:r.market,tk:r.base,name:r.base,close,high,low,times,vol,price:r.last};
     }catch(e){return null;}
   });
   return assets.filter(Boolean);
@@ -546,6 +553,7 @@ async function runScan(){
       render(d.results);
       const now=new Date();document.getElementById('lastUpd').textContent='Updated '+now.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true});
       document.getElementById('pstat').textContent=`✅ ${d.analyzed} coins · CoinDCX (your browser) · ${cryptoCcy}`;
+      setBtcNote(d.btc);
       scanning=false;document.getElementById('scanBtn').disabled=false;scheduleRefresh();pollQuotes();return;
     }catch(e){
       cryptoSource='global';await ensureRate();     // keep the toggle working even on fallback
@@ -572,6 +580,7 @@ async function runScan(){
     } else {
       document.getElementById('pstat').textContent=`${d.analyzed}/${d.total} live${d.cached?' (cached)':''}${d.note?' · ⚠ '+d.note:''}`;
     }
+    setBtcNote(d.btc);
     pollQuotes();   // overlay live prices immediately so a (possibly cached) scan never leaves a stale "fixed" price on screen
   }catch(e){document.getElementById('pstat').textContent='Error';document.getElementById('buyCards').innerHTML='<div class="empty">Backend error: '+e.message+'</div>';}
   scanning=false;document.getElementById('scanBtn').disabled=false;scheduleRefresh();

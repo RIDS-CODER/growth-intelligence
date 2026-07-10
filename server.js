@@ -38,8 +38,26 @@ const IND={
   atr(close,high,low,p=14){const tr=[];for(let i=0;i<close.length;i++){if(i===0){tr.push(high[i]-low[i]);continue;}tr.push(Math.max(high[i]-low[i],Math.abs(high[i]-close[i-1]),Math.abs(low[i]-close[i-1])));}return this.ema(tr,p);},
   highest(a,p){const n=a.length;let h=-Infinity;for(let i=Math.max(0,n-p);i<n;i++)h=Math.max(h,a[i]);return h;},
   lowest(a,p){const n=a.length;let l=Infinity;for(let i=Math.max(0,n-p);i<n;i++)l=Math.min(l,a[i]);return l;},
+  // ADX (Wilder) — trend strength. High (>~22) = trending; low = choppy/range. Returns array aligned to close.
+  adx(close,high,low,p=14){const n=close.length,out=new Array(n).fill(null);
+    if(n<2*p+2)return out;
+    const tr=new Array(n).fill(0),pdm=new Array(n).fill(0),ndm=new Array(n).fill(0);
+    for(let i=1;i<n;i++){const up=high[i]-high[i-1],dn=low[i-1]-low[i];
+      tr[i]=Math.max(high[i]-low[i],Math.abs(high[i]-close[i-1]),Math.abs(low[i]-close[i-1]));
+      pdm[i]=(up>dn&&up>0)?up:0; ndm[i]=(dn>up&&dn>0)?dn:0;}
+    let atr=0,ap=0,an=0; const dx=new Array(n).fill(null);
+    for(let i=1;i<n;i++){
+      if(i<=p){atr+=tr[i];ap+=pdm[i];an+=ndm[i];continue;}
+      atr=atr-atr/p+tr[i]; ap=ap-ap/p+pdm[i]; an=an-an/p+ndm[i];
+      const pdi=atr?100*ap/atr:0, ndi=atr?100*an/atr:0, sum=pdi+ndi;
+      dx[i]=sum?100*Math.abs(pdi-ndi)/sum:0;}
+    let adxv=null,cnt=0,acc=0;
+    for(let i=1;i<n;i++){if(dx[i]==null)continue;
+      if(adxv===null){acc+=dx[i];cnt++; if(cnt===p){adxv=acc/p; out[i]=adxv;}}
+      else {adxv=(adxv*(p-1)+dx[i])/p; out[i]=adxv;}}
+    return out;},
 };
-function computeSignal(close,high,low,thr){
+function computeSignal(close,high,low,thr,vol){
   thr=thr||20;
   const n=close.length-1,price=close[n],out=[];
   const add=(name,detail,score,weight,raw)=>out.push({name,detail,score,weight,raw,tag:score>0.15?'BUY':score<-0.15?'SELL':'HOLD'});
@@ -70,11 +88,24 @@ function computeSignal(close,high,low,thr){
   const score=wsum?Math.round(ssum/wsum*100):0;
   const brkUp=price>=hi20, brkDn=price<=lo20;
   const regimeUp = s200n!=null ? price>s200n : (s50[n]!=null&&s200[n]!=null ? s50[n]>s200[n] : true);
+  const adxV = IND.adx(close,high,low,14)[n];              // trend strength
+  const ADX_MIN = 20;                                      // below = choppy/range → skip pullback trades
+  const confirmed = close[n]>close[n-1];                   // latest CLOSED bar ticked up = bounce confirmation (down for shorts)
+  // Volume: is participation there? (only meaningful when volume data is available)
+  const volMA = vol ? IND.sma(vol,20) : null;
+  const volRatio = (volMA && volMA[n]>0 && vol && vol[n]!=null) ? vol[n]/volMA[n] : null;
+  const volWeak = volRatio!=null && volRatio < 1.2;       // breakout needs ≥1.2× average volume; thin = fakeout
   let verdict=score>=thr?'BUY':score<=-thr?'SELL':'HOLD';
-  // TRADER GATES — buy the dip only in an uptrend; short the rally only in a downtrend. Breakouts are exempt (momentum entries).
-  if(verdict==='BUY'  && !brkUp && !regimeUp) verdict='HOLD';   // don't catch a falling knife
-  if(verdict==='SELL' && !brkDn &&  regimeUp) verdict='HOLD';   // don't short into strength
-  return {score,verdict,components:out,price,rsiV:rsi[n],s50:s50[n],s200:s200[n],atr:IND.atr(close,high,low)[n],hi20,lo20,regimeUp,turnUp,brkUp:price>=hi20,brkDn:price<=lo20,
+  // TRADER GATES — buy the dip only in an uptrend, in a real trend, once the bounce confirms. Breakouts exempt (momentum).
+  if(verdict==='BUY'  && !brkUp && !regimeUp) verdict='HOLD';                              // don't catch a falling knife
+  if(verdict==='SELL' && !brkDn &&  regimeUp) verdict='HOLD';                              // don't short into strength
+  if(verdict==='BUY'  && !brkUp && adxV!=null && adxV<ADX_MIN) verdict='HOLD';             // chop filter — no trade in a range
+  if(verdict==='SELL' && !brkDn && adxV!=null && adxV<ADX_MIN) verdict='HOLD';
+  if(verdict==='BUY'  && !brkUp && !confirmed && !turnUp) verdict='HOLD';                  // wait for a confirming up-close
+  if(verdict==='SELL' && !brkDn && confirmed && !turnDn) verdict='HOLD';
+  if(verdict==='BUY'  && brkUp && volWeak) verdict='HOLD';                                 // breakout on thin volume = fakeout
+  if(verdict==='SELL' && brkDn && volWeak) verdict='HOLD';
+  return {score,verdict,components:out,price,rsiV:rsi[n],s50:s50[n],s200:s200[n],atr:IND.atr(close,high,low)[n],hi20,lo20,regimeUp,turnUp,adx:adxV,volRatio,brkUp:price>=hi20,brkDn:price<=lo20,
     bbL:bb.lower[n],bbU:bb.upper[n],ema20:IND.ema(close,20)[n],lo10:IND.lowest(low,10),hi10:IND.highest(high,10)};
 }
 // nearest support below price (for buy-the-dip entries) / resistance above (for shorts)
@@ -301,11 +332,11 @@ const TF_MAP={
 function tfCfg(tf){return TF_MAP[tf]||TF_MAP["30m"];}
 function resampleSeries(d,f){
   if(!f||f<=1)return d;
-  const close=[],high=[],low=[],times=[];
-  for(let i=0;i<d.close.length;i+=f){const end=Math.min(i+f,d.close.length);let hi=-Infinity,lo=Infinity;
-    for(let j=i;j<end;j++){hi=Math.max(hi,d.high[j]);lo=Math.min(lo,d.low[j]);}
-    close.push(d.close[end-1]);high.push(hi);low.push(lo);times.push(d.times[end-1]);}
-  return {close,high,low,times,price:close[close.length-1],mtime:d.mtime};
+  const close=[],high=[],low=[],times=[],vol=[]; const hv=d.vol&&d.vol.length===d.close.length;
+  for(let i=0;i<d.close.length;i+=f){const end=Math.min(i+f,d.close.length);let hi=-Infinity,lo=Infinity,vv=0;
+    for(let j=i;j<end;j++){hi=Math.max(hi,d.high[j]);lo=Math.min(lo,d.low[j]);if(hv)vv+=(+d.vol[j]||0);}
+    close.push(d.close[end-1]);high.push(hi);low.push(lo);times.push(d.times[end-1]);if(hv)vol.push(vv);}
+  return {close,high,low,times,vol:hv?vol:undefined,price:close[close.length-1],mtime:d.mtime};
 }
 async function upstoxCandles(key,tf){
   const cfg=tfCfg(tf), to=ymd(new Date()), from=ymd(new Date(Date.now()-cfg.days*864e5));
@@ -318,9 +349,9 @@ function parseCandles(j){
   const c=j&&j.data&&j.data.candles||[];
   // Upstox returns most-recent-first: [ts,o,h,l,c,vol,oi]
   const rows=c.slice().reverse();
-  const close=[],high=[],low=[],times=[];
-  for(const r of rows){const cl=+r[4];if(!isFinite(cl))continue;close.push(cl);high.push(+r[2]);low.push(+r[3]);times.push(Date.parse(r[0]));}
-  return {close,high,low,times,price:close[close.length-1]};
+  const close=[],high=[],low=[],times=[],vol=[];
+  for(const r of rows){const cl=+r[4];if(!isFinite(cl))continue;close.push(cl);high.push(+r[2]);low.push(+r[3]);times.push(Date.parse(r[0]));vol.push(+r[5]||0);}
+  return {close,high,low,times,vol,price:close[close.length-1]};
 }
 async function upstoxLTP(keys){
   // batched live last-traded price; keys = array of instrument_key
@@ -430,24 +461,24 @@ async function loadCoinDCX(asset,tf){
   const j=await getJSON(`https://public.coindcx.com/market_data/candles?pair=${encodeURIComponent(asset.pair)}&interval=${interval}&limit=400`,{});
   if(!Array.isArray(j)||!j.length)throw new Error("no candles");
   const rows=j.slice().reverse();  // CoinDCX returns newest-first → ascending
-  const close=[],high=[],low=[],times=[];
-  for(const k of rows){const c=+k.close;if(!isFinite(c))continue;close.push(c);high.push(+k.high);low.push(+k.low);times.push(+k.time);}
+  const close=[],high=[],low=[],times=[],vol=[];
+  for(const k of rows){const c=+k.close;if(!isFinite(c))continue;close.push(c);high.push(+k.high);low.push(+k.low);times.push(+k.time);vol.push(+k.volume||0);}
   if(!close.length)throw new Error("no candles");
   // Price like the CoinDCX APP does: liquid USDT market × CoinDCX USDT/INR (thin INR pairs have stale last-trades).
   // Rescale the whole candle series to that live price so entry/stop/target levels stay on the right scale.
   const live=cdxLiveInr(asset.tk)||(cdxTicker[asset.sym]>0?cdxTicker[asset.sym]:0);
   const rawLast=close[close.length-1];
   if(live>0&&rawLast>0){const f=live/rawLast; if(f>0.2&&f<5){for(let i=0;i<close.length;i++){close[i]*=f;high[i]*=f;low[i]*=f;}} else {close[close.length-1]=live;}}
-  return {close,high,low,times,price:close[close.length-1],mtime:Date.now()};
+  return {close,high,low,times,vol,price:close[close.length-1],mtime:Date.now()};
 }
 async function loadBinance(asset,tf){
   const interval=BN_INT[tf]||"1h";
   const j=await binanceGet(`/api/v3/klines?symbol=${asset.binance}&interval=${interval}&limit=400`);
   if(!Array.isArray(j)||!j.length)throw new Error("no klines");
   const r=await usdInr();
-  const close=[],high=[],low=[],times=[];
-  for(const k of j){const c=+k[4];if(!isFinite(c))continue;close.push(c*r);high.push(+k[2]*r);low.push(+k[3]*r);times.push(+k[6]);}
-  return {close,high,low,times,price:close[close.length-1],mtime:Date.now()};
+  const close=[],high=[],low=[],times=[],vol=[];
+  for(const k of j){const c=+k[4];if(!isFinite(c))continue;close.push(c*r);high.push(+k[2]*r);low.push(+k[3]*r);times.push(+k[6]);vol.push(+k[5]||0);}
+  return {close,high,low,times,vol,price:close[close.length-1],mtime:Date.now()};
 }
 
 /* ============================================================
@@ -459,7 +490,7 @@ function istDate(){return new Date(new Date().toLocaleString("en-US",{timeZone:"
 function ymd(d){return d.toISOString().slice(0,10);}
 function marketOpen(){const ist=new Date(new Date().toLocaleString("en-US",{timeZone:"Asia/Kolkata"}));const dy=ist.getDay(),m=ist.getHours()*60+ist.getMinutes();return dy>=1&&dy<=5&&m>=555&&m<=930;}
 function fmtTime(ms){if(!ms)return"";const ist=new Date(new Date(ms).toLocaleString("en-US",{timeZone:"Asia/Kolkata"}));return ist.toLocaleString("en-IN",{day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit",hour12:true});}
-function synth(seed,n,drift){let x=500+seed%4000,o=[],s=seed||1;const r=()=>{s=(s*16807)%2147483647;return s/2147483647;};const d=drift==null?((seed%3)-1)*0.12:drift;const close=[];for(let i=0;i<n;i++){x*=(1+(r()-0.5+d)*0.03);x=Math.max(1,x);close.push(x);}const now=Date.now();return {close,high:close.map(v=>v*1.004),low:close.map(v=>v*0.996),times:close.map((_,i)=>now-(n-1-i)*18e5),price:close[close.length-1]};}
+function synth(seed,n,drift){let x=500+seed%4000,o=[],s=seed||1;const r=()=>{s=(s*16807)%2147483647;return s/2147483647;};const d=drift==null?((seed%3)-1)*0.12:drift;const close=[],vol=[];for(let i=0;i<n;i++){const mv=(r()-0.5+d)*0.03;x*=(1+mv);x=Math.max(1,x);close.push(x);vol.push(1000*(1+Math.abs(mv)*20+r()));}const now=Date.now();return {close,high:close.map(v=>v*1.004),low:close.map(v=>v*0.996),vol,times:close.map((_,i)=>now-(n-1-i)*18e5),price:close[close.length-1]};}
 
 // "does this trade have room beyond this bar?" — higher-timeframe confluence from the same series (no extra API call)
 function scopeFlag(sig){
@@ -477,6 +508,23 @@ function scopeFlag(sig){
     if(nearLo)return {good:false, txt:'⚠ Near recent low — limited downside left'};
     return {good:false, txt:'↔ Counter to the bigger trend — likely a short-lived dip'};
   }
+}
+// ---- BTC regime filter: don't long alts while Bitcoin is risk-off (alts are highly correlated to BTC) ----
+let BTC_STATE=null;   // {bull,verdict,regimeUp,tf,at}
+function btcAsset(){return cryptoMode==='coindcx'
+  ? {sym:'BTCINR',pair:'I-BTC_INR',binance:'BTCUSDT',tk:'BTC',name:'BTC',cls:'Crypto',src:'cg'}
+  : {sym:'BTCUSDT',binance:'BTCUSDT',tk:'BTC',name:'BTC',cls:'Crypto',src:'cg'};}
+function btcStateFromSeries(close,high,low,tf){
+  if(!close||close.length<42)return null;
+  const cl=close.slice(0,-1),hi=high.slice(0,-1),lo=low.slice(0,-1);
+  const s=computeSignal(cl,hi,lo,tf==='daily'?20:12);
+  return {bull:(s.regimeUp && s.verdict!=='SELL'), verdict:s.verdict, regimeUp:s.regimeUp, tf, at:Date.now()};
+}
+async function ensureBtcState(tf){
+  if(BTC_STATE && BTC_STATE.tf===tf && Date.now()-BTC_STATE.at<90000) return BTC_STATE;
+  try{ const d=await loadCrypto(btcAsset(),tf); BTC_STATE=btcStateFromSeries(d.close,d.high,d.low,tf)||BTC_STATE; }
+  catch(e){ BTC_STATE={bull:true,verdict:'HOLD',regimeUp:true,tf,at:Date.now(),err:true}; }   // fail OPEN — never block on a data hiccup
+  return BTC_STATE;
 }
 // Multi-timeframe confirmation: resample the SAME candles into 2 higher timeframes and see if they lean the
 // same way as this signal. Returns {agree,total,frames:[{tf,ok}]} — no extra network calls. BUY/SELL only.
@@ -505,7 +553,10 @@ function processAsset(asset,data,tf){
   // Decide the signal on CLOSED candles only (drop the still-forming last bar) so a 15m call
   // doesn't wobble every minute — it only changes when a new candle closes.
   const cl=data.close.slice(0,-1),hi=data.high.slice(0,-1),lo=data.low.slice(0,-1),tm=data.times?data.times.slice(0,-1):null;
-  const sig=computeSignal(cl,hi,lo,thr);
+  const vl=data.vol&&data.vol.length===data.close.length?data.vol.slice(0,-1):null;   // closed-bar volume (aligned to cl)
+  const sig=computeSignal(cl,hi,lo,thr,vl);
+  // BTC regime filter — pause alt LONGS while Bitcoin is risk-off (they tend to follow BTC down). Shorts & BTC itself unaffected.
+  if(asset.src==='cg' && asset.tk!=='BTC' && BTC_STATE && BTC_STATE.tf===tf && !BTC_STATE.bull && sig.verdict==='BUY'){ sig.verdict='HOLD'; sig.btcBlocked=true; }
   const setup=buildSetup(sig,tf==='daily'?'daily':'intraday');   // entry/stop/targets anchored to the closed bar (stable)
   sig.closedPrice=sig.price; sig.price=live;                     // now use LIVE price for the action + the card's Current Price
   const since=signalSince(cl,hi,lo,tm);
@@ -515,7 +566,7 @@ function processAsset(asset,data,tf){
   const dec=asset.src==='cg'&&data.price<5?4:2;
   const isIndex=!!asset.isIndex||asset.sym.startsWith('^');
   const asofMs=data.mtime||(data.times?data.times[data.times.length-1]:Date.now());
-  const bt = cl.length>=120 ? assetBtScore(backtestSeries(cl,hi,lo,tf,costFor(asset))) : null;   // net-of-cost historical grade (same data)
+  const bt = cl.length>=120 ? assetBtScore(backtestSeries(cl,hi,lo,tf,costFor(asset),{vol:vl})) : null;   // net-of-cost historical grade (same data + volume)
   const mtf = multiTfConfirm(data,tf,sig.verdict);   // higher-timeframe agreement (resampled, no extra fetch)
   return {asset,sig,setup,since,action,reasons,scope,bt,mtf,dec,isIndex,tf,asof:fmtTime(asofMs),
     priceTag:asset.src==='cg'?(cryptoMode==='coindcx'?'live · CoinDCX ₹':'live · global ₹'):(marketOpen()?'LIVE (broker)':'prev close'),series:data.close.slice(-80)};
@@ -550,12 +601,13 @@ const BT_COST_CR=(parseFloat(process.env.BT_COST_BPS_CRYPTO)||parseFloat(CFG.bac
 const costFor=asset=>asset.cls==='Crypto'?BT_COST_CR:BT_COST_EQ;
 // Realistic exit: scale out 1/3 at each of T1/T2/T3, ratchet the stop up (breakeven after T1, T1 after T2).
 // Net of trading costs. Long-only, lookahead-free.
-function backtestSeries(close,high,low,tf,cost){
+function backtestSeries(close,high,low,tf,cost,opts){
   cost = cost==null ? BT_COST_EQ : cost;
+  opts = opts||{}; const useAdx = opts.adx!==false, useConfirm = opts.confirm!==false, useVol = opts.volume!==false && !!opts.vol;   // default ON = matches live; A/B toggles
   const {scores,atr}=scoreSeriesArr(close,high,low);
   const thr=tf==='daily'?20:12;
   const P=TYPE[tf==='daily'?'Swing':'Intraday'], stopMult=P.stopMult, T=P.t;   // T = [t1,t2,t3] R-multiples
-  const ema20=IND.ema(close,20), sma50=IND.sma(close,50), s200b=IND.sma(close,200), bb=IND.bollinger(close), n=close.length;
+  const ema20=IND.ema(close,20), sma50=IND.sma(close,50), s200b=IND.sma(close,200), bb=IND.bollinger(close), adxArr=IND.adx(close,high,low,14), volMA=useVol?IND.sma(opts.vol,20):null, n=close.length;
   const lo10=new Array(n).fill(null), prevHi20=new Array(n).fill(null);
   for(let i=0;i<n;i++){
     if(i>=9){let m=Infinity;for(let j=i-9;j<=i;j++)m=Math.min(m,low[j]);lo10[i]=m;}
@@ -576,15 +628,18 @@ function backtestSeries(close,high,low,tf,cost){
       }
     }
     if(pos===0 && pending && i>pending.sig){
-      if(low[i]<=pending.limit){ enter(pending.limit,pending.R,i); pending=null; }
-      else if(i>=pending.exp) pending=null;   // the dip never came → no trade
+      // fill on the dip; with confirmation ON, require the bar to CLOSE back above the limit (bounce held, not a blow-through)
+      if(low[i]<=pending.limit && (!useConfirm || close[i]>pending.limit)){ enter(pending.limit,pending.R,i); pending=null; }
+      else if(i>=pending.exp) pending=null;   // the dip never came / never confirmed → no trade
     }
     if(pos===0 && !pending && scores[i]>=thr && atr[i]>0){
       const r=stopMult*atr[i], brk=prevHi20[i]!=null && close[i]>=prevHi20[i];
       const trendRef = s200b[i]!=null ? s200b[i] : sma50[i];   // fall back to the 50-line until 200 bars exist
       const regimeUp = trendRef==null || close[i]>trendRef;
-      if(brk) enter(close[i],r,i);            // breakout → market (momentum, trend-agnostic)
-      else if(regimeUp){ const sup=nearestLevel(1,close[i],atr[i],[lo10[i],bb.lower[i],ema20[i],sma50[i]]); pending={limit:sup,R:r,sig:i,exp:i+FILLWIN}; }  // buy the dip ONLY in an uptrend
+      const trending = !useAdx || adxArr[i]==null || adxArr[i]>=20;   // chop filter
+      const volOkBrk = !useVol || !volMA || volMA[i]<=0 || (opts.vol[i]/volMA[i])>=1.2;   // breakout needs real volume
+      if(brk){ if(volOkBrk) enter(close[i],r,i); }   // breakout → market ONLY on above-average volume (else skip the fakeout)
+      else if(regimeUp && trending){ const sup=nearestLevel(1,close[i],atr[i],[lo10[i],bb.lower[i],ema20[i],sma50[i]]); pending={limit:sup,R:r,sig:i,exp:i+FILLWIN}; }  // buy the dip ONLY in an uptrend & real trend
     }
   }
   if(pos===1){ gross+=rem*(close[n-1]/entry-1); rem=0; finish(); }
@@ -657,7 +712,7 @@ async function scan(tab,tf){
   const ttl = tab==='Crypto' ? TTL_CRYPTO : (tf==='intraday'?TTL_INTRA:TTL_DAILY);
   const ck="scan:"+tab+":"+tf;const hit=cGet(ck,ttl);if(hit)return{...hit,cached:true};
   // crypto universe (Binance) + commodities resolved FIRST so the universe reflects them
-  if(tab==="Crypto"||tab==="All"){try{await ensureCryptoUniverse();}catch(e){}if(cryptoMode==="coindcx")await ensureCdxFresh();}
+  if(tab==="Crypto"||tab==="All"){try{await ensureCryptoUniverse();}catch(e){}if(cryptoMode==="coindcx")await ensureCdxFresh();if(!DEMO)try{await ensureBtcState(tf);}catch(e){}}
   if(tab==="Commodities"||tab==="All"){try{await ensureCommodities();}catch(e){}}
   const uni=universeFor(tab);
   const li=loggedIn();
@@ -684,6 +739,7 @@ async function scan(tab,tf){
   const cryptoAssets=uni.filter(a=>a.src==='cg');
   const cryptoFailed = cryptoAssets.length>0 && !DEMO && !ok.some(r=>r.asset.src==='cg');
   const out={tab,tf,analyzed:ok.length,total:uni.length,results:ok,ts:Date.now(),demo:DEMO,loggedIn:li,keyOf,cryptoMode,usdtInr:(cryptoMode==='coindcx'?cdxUsdtInr():0),
+    btc:((tab==='Crypto'||tab==='All')&&BTC_STATE)?{bull:BTC_STATE.bull,verdict:BTC_STATE.verdict}:null,
     note: cryptoFailed?"Crypto unreachable — this server's region can't reach CoinDCX. For exact CoinDCX ₹, host in an India region (e.g. DigitalOcean Bangalore/BLR); otherwise the global ₹ feed is used.":undefined};
   if(ok.length>0 && !cryptoFailed) cSet(ck,out);   // never cache an empty/failed scan
   return out;
@@ -720,17 +776,21 @@ function readBody(req){return new Promise((resolve,reject)=>{let d="";req.on("da
 // Compute signals from BROWSER-supplied CoinDCX candles (browser is in India → correct ₹ prices). tf + assets[{sym,tk,name,close[],high[],low[],times[],price}]
 function cryptoSignalsFrom(payload){
   const tf=payload.tf||"1h", results=[];
+  // BTC regime from the browser-supplied candles, so the alt-long filter applies on the client path too
+  const btc=(payload.assets||[]).find(a=>a.tk==='BTC'||a.sym==='BTCINR'||a.sym==='BTCUSDT');
+  if(btc&&btc.close&&btc.close.length>41){const st=btcStateFromSeries(btc.close,btc.high,btc.low,tf); if(st)BTC_STATE=st;}
   (payload.assets||[]).forEach(a=>{
     try{
       if(!a.close||a.close.length<41)return;
       const asset={sym:a.sym,tk:a.tk,name:a.name||a.tk,cls:"Crypto",src:"cg"};
-      const data={close:a.close,high:a.high,low:a.low,times:a.times,price:a.price};
+      const data={close:a.close,high:a.high,low:a.low,times:a.times,vol:a.vol,price:a.price};
       const r=processAsset(asset,data,tf);
       r.priceTag="live · CoinDCX ₹";     // browser-fetched from the Indian exchange
       results.push(r);
     }catch(e){}
   });
-  return {results,tf,total:(payload.assets||[]).length,analyzed:results.length,source:"coindcx-client"};
+  return {results,tf,total:(payload.assets||[]).length,analyzed:results.length,source:"coindcx-client",
+    btc:BTC_STATE?{bull:BTC_STATE.bull,verdict:BTC_STATE.verdict}:null};
 }
 /* ---------- Deep research: ONE coin across several timeframes → averaged consensus ----------
    Fixes the "each timeframe gives a different stop" risk by blending the frames that agree
@@ -837,4 +897,5 @@ if(require.main===module){
 module.exports={IND,computeSignal,buildSetup,buildReasons,signalSince,actionNow,parseCandles,authURL,scan,universeFor,fmtTime,
   loadBinance,loadCoinDCX,loadCrypto,ensureCryptoUniverse,usdInr,resampleSeries,tfCfg,getCRYPTO:()=>CRYPTO,getMode:()=>cryptoMode,
   backtestSeries,scoreSeriesArr,backtest,processAsset,blendResearch,assetBtScore,cdxLiveInr,cdxUsdtInr,
+  btcStateFromSeries,__setBtc:(s)=>{BTC_STATE=s;},
   __setCdxTicker:(t)=>{cdxTicker=t;}};
