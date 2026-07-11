@@ -841,7 +841,7 @@ async function researchCoin(rawSym,horizon){
   return {sym:base,horizon,dec:per[0].dec,cryptoMode,consensus:blendResearch(per),ts:Date.now()};
 }
 // Paper-trading engine (simulation) — reuses this server's scan + live quotes. Never places real orders.
-const paper = require('./paper.js')({ scan, liveQuotes, dir:__dirname });
+const paper = require('./paper.js')({ scan, liveQuotes, dir:__dirname, rate:()=>cdxUsdtInr() });
 function sendJSON(res,o,c=200){const b=JSON.stringify(o);res.writeHead(c,{"Content-Type":"application/json","Access-Control-Allow-Origin":"*"});res.end(b);}
 const MIME={".html":"text/html",".js":"text/javascript",".css":"text/css",".json":"application/json",".svg":"image/svg+xml"};
 async function handler(req,res){

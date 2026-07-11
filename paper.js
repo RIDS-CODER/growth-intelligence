@@ -11,7 +11,7 @@
      • Halts for the day at the daily loss limit.
    Fees/slippage default to 0 so you can judge raw signal accuracy.
    ============================================================ */
-module.exports = function createPaper({ scan, liveQuotes, dir }) {
+module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
   const fs = require('fs'), path = require('path');
   const FILE = path.join(dir, 'paper-state.json');
   const TF_MIN = {'5m':5,'15m':15,'30m':30,'1h':60,'4h':240,'6h':360,'12h':720,'daily':1440,'intraday':30};
@@ -159,7 +159,7 @@ module.exports = function createPaper({ scan, liveQuotes, dir }) {
   function snapshot(prices){
     const P=prices||lastPrices, eq=markEquity(P);
     const wins=S.closed.filter(t=>t.pnl>0).length, tot=S.closed.length;
-    return { running:S.running, halted:S.halted, goalHit:S.goalHit, tab:S.tab, tf:S.tf,
+    return { running:S.running, halted:S.halted, goalHit:S.goalHit, tab:S.tab, tf:S.tf, usdtInr:(typeof rate==='function'?(rate()||0):0),
       config:{capital:S.capital,riskPct:S.riskPct,dailyTargetPct:S.dailyTargetPct,maxLev:S.maxLev,feeBps:S.feeBps,slipBps:S.slipBps,dayLossLimitPct:S.dayLossLimitPct,allowShort:S.allowShort,allowPending:S.allowPending},
       cash:S.cash, equity:eq, startEquity:S.capital, retPct:(eq/S.capital-1)*100,
       dayStartEquity:S.dayStartEquity, dayRetPct:S.dayStartEquity?(eq/S.dayStartEquity-1)*100:0, targetEquity:S.dayStartEquity*(1+S.dailyTargetPct/100),
