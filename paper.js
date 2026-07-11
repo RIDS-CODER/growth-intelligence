@@ -21,6 +21,7 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
   const DEFAULTS = {
     running:false, halted:false, goalHit:false,
     capital:100000, riskPct:1, dailyTargetPct:10, maxLev:5, tab:'Crypto', tf:'15m',
+    timeframes:['15m','1h','4h'],                       // the bot hunts across these itself — you don't pick a TF
     feeBps:0, slipBps:0, dayLossLimitPct:5, cooldownMin:20, maxConcurrent:20,
     allowShort:true, allowPending:true,
     cash:100000, positions:[], pending:[], closed:[], cooldown:{},
@@ -44,10 +45,12 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
 
   // risk-based size, limited so posted margin never exceeds free equity
   function sizeQty(entry, stop, lev, eq){
-    let qty = (eq*(S.riskPct/100)) / Math.abs(entry-stop);
+    const dist=Math.abs(entry-stop);
+    if(!(dist>0)||!(eq>0)||!(lev>0)) return 0;                 // guard against NaN/degenerate inputs
+    let qty = (eq*(S.riskPct/100)) / dist;
     const marginRoom = eq - grossMargin();
     if(qty*entry/lev > marginRoom){ if(marginRoom<=0) return 0; qty = marginRoom*lev/entry; }
-    return qty>0 ? qty : 0;
+    return (isFinite(qty)&&qty>0) ? qty : 0;
   }
 
   function openPosition(a, entry, lev, prices){
@@ -104,7 +107,7 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
     if(!((dir>0&&stop<limit&&targets[0]>limit)||(dir<0&&stop>limit&&targets[0]<limit))) return;
     const eq=markEquity(lastPrices), qty=sizeQty(limit,stop,lev,eq); if(!(qty>0)) return;
     S.pending.push({ id:Date.now()+'_'+a.sym, sym:a.sym, name:a.name, tk:a.tk||'', cls:a.cls, dir, lev, limit, stop, targets:targets.slice(0,3), qty,
-      placedAt:Date.now(), expiresAt:Date.now()+FILL_BARS*tfMin(S.tf)*60000, tf:S.tf });
+      placedAt:Date.now(), expiresAt:Date.now()+FILL_BARS*tfMin(a.tf||'15m')*60000, tf:a.tf||'15m' });
   }
 
   // --- strategic selection: rank by conviction, take only quality setups ---
@@ -121,11 +124,15 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
   const conviction = r => Math.abs(r.sig.score) + (r.mtf?r.mtf.agree*6:0) + ((r.bt&&r.bt.score)?r.bt.score*0.3:0);
 
   function openFromScan(results, prices){
-    const cands = results.filter(eligible).filter(r=>!held(r.asset.sym)&&!onCooldown(r.asset.sym)).sort((a,b)=>conviction(b)-conviction(a));
+    // rank by conviction across ALL timeframes, then keep only the BEST instance per coin (highest-conviction TF wins)
+    const seen=new Set();
+    const cands = results.filter(eligible).sort((a,b)=>conviction(b)-conviction(a))
+      .filter(r=>{ const sym=r.asset.sym; if(seen.has(sym))return false; seen.add(sym); return !held(sym)&&!onCooldown(sym); });
     for(const r of cands){
       if(S.positions.length+S.pending.length >= S.maxConcurrent) break;
+      if(held(r.asset.sym)) continue;   // state changes as we place — never double-commit a coin
       const k=r.action.kind, d=kindDir(r.action.kind), lev=levFor(r);
-      const base={ sym:r.asset.sym, name:r.asset.name, tk:r.asset.tk||'', cls:r.asset.cls, dir:d, stop:r.setup.stop, targets:(r.setup.targets||[]).slice(0,3), tf:S.tf };
+      const base={ sym:r.asset.sym, name:r.asset.name, tk:r.asset.tk||'', cls:r.asset.cls, dir:d, stop:r.setup.stop, targets:(r.setup.targets||[]).slice(0,3), tf:(r._tf||(S.timeframes&&S.timeframes[0])||'15m') };
       if(base.targets.length<3) continue;
       const px0=(prices&&prices[r.asset.sym])||r.sig.price; if(!(px0>0)) continue;
       if(k==='buynow'||k==='buybreak')       openPosition(base, px0+slipOf(px0), lev, prices);
@@ -149,8 +156,10 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
       if(!S.goalHit && eq >= S.dayStartEquity*(1 + S.dailyTargetPct/100)){ flattenAll(prices,'target'); S.goalHit=true; }   // 🎯 hit the day's goal → lock it in
       if(eq <= S.dayStartEquity*(1 - S.dayLossLimitPct/100)) S.halted=true;                                                 // 🛑 daily loss limit
       if(!S.halted && !S.goalHit && (S.positions.length+S.pending.length) < S.maxConcurrent){
-        let d=null; try{ d=await scan(S.tab, S.tf); }catch(e){}
-        if(d && Array.isArray(d.results)) openFromScan(d.results, prices);
+        const tfs=(S.timeframes&&S.timeframes.length)?S.timeframes:['15m'];
+        let all=[];                                                   // hunt across ALL timeframes, then rank the best
+        for(const tf of tfs){ try{ const d=await scan(S.tab,tf); if(d&&Array.isArray(d.results)){ for(const r of d.results) r._tf=tf; all=all.concat(d.results); } }catch(e){} }
+        if(all.length) openFromScan(all, prices);
       }
     }catch(e){ S.lastError=String(e.message||e); }
     save(); return snapshot();
@@ -159,13 +168,13 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
   function snapshot(prices){
     const P=prices||lastPrices, eq=markEquity(P);
     const wins=S.closed.filter(t=>t.pnl>0).length, tot=S.closed.length;
-    return { running:S.running, halted:S.halted, goalHit:S.goalHit, tab:S.tab, tf:S.tf, usdtInr:(typeof rate==='function'?(rate()||0):0),
+    return { running:S.running, halted:S.halted, goalHit:S.goalHit, tab:S.tab, timeframes:S.timeframes, usdtInr:(typeof rate==='function'?(rate()||0):0),
       config:{capital:S.capital,riskPct:S.riskPct,dailyTargetPct:S.dailyTargetPct,maxLev:S.maxLev,feeBps:S.feeBps,slipBps:S.slipBps,dayLossLimitPct:S.dayLossLimitPct,allowShort:S.allowShort,allowPending:S.allowPending},
       cash:S.cash, equity:eq, startEquity:S.capital, retPct:(eq/S.capital-1)*100,
       dayStartEquity:S.dayStartEquity, dayRetPct:S.dayStartEquity?(eq/S.dayStartEquity-1)*100:0, targetEquity:S.dayStartEquity*(1+S.dailyTargetPct/100),
       marginUsed:grossMargin(), openCount:S.positions.length, pendingCount:S.pending.length,
-      positions:S.positions.map(p=>({sym:p.sym,name:p.name,tk:p.tk,side:p.dir>0?'LONG':'SHORT',lev:p.lev,entry:p.entry,stop:p.stop,targets:p.targets,remQty:p.remQty,qty:p.qty,taken:p.taken,lastPx:p.lastPx,uPnl:uPnl(p,(P&&P[p.sym])||p.lastPx)})),
-      pending:S.pending.map(o=>({sym:o.sym,name:o.name,side:o.dir>0?'LONG':'SHORT',lev:o.lev,limit:o.limit,stop:o.stop,expiresAt:o.expiresAt})),
+      positions:S.positions.map(p=>({sym:p.sym,name:p.name,tk:p.tk,side:p.dir>0?'LONG':'SHORT',lev:p.lev,tf:p.tf,entry:p.entry,stop:p.stop,targets:p.targets,remQty:p.remQty,qty:p.qty,taken:p.taken,lastPx:p.lastPx,uPnl:uPnl(p,(P&&P[p.sym])||p.lastPx)})),
+      pending:S.pending.map(o=>({sym:o.sym,name:o.name,side:o.dir>0?'LONG':'SHORT',lev:o.lev,qty:o.qty,limit:o.limit,stop:o.stop,tf:o.tf,expiresAt:o.expiresAt})),
       closed:S.closed.slice(0,100), stats:{trades:tot,wins,winRate:tot?wins/tot*100:0,realizedPnl:S.closed.reduce((a,t)=>a+t.pnl,0)},
       startedAt:S.startedAt, lastRun:S.lastRun, lastError:S.lastError };
   }
