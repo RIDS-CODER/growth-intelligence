@@ -453,7 +453,7 @@ async function paperControl(a){try{const s=await(await fetch('/api/paper/control
 function paperGo(){paperControl('start');}
 function paperHalt(){paperControl('stop');}
 function paperReset(){if(confirm('Reset the paper account and clear its history?'))paperControl('reset');}
-async function paperSaveConfig(){const g=id=>document.getElementById(id),c={capital:+g('ppCap').value,riskPct:+g('ppRisk').value,dailyTargetPct:+g('ppTarget').value,maxLev:+g('ppLev').value,allowShort:g('ppShort').checked,allowPending:g('ppPend').checked};try{const s=await(await fetch('/api/paper/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(c)})).json();renderPaper(s);}catch(e){}}
+async function paperSaveConfig(){const g=id=>document.getElementById(id),c={capital:+g('ppCap').value,riskPct:+g('ppRisk').value,dailyTargetPct:+g('ppTarget').value,maxLev:+g('ppLev').value,allowShort:g('ppShort').checked,allowPending:g('ppPend').checked,allowAggressive:(g('ppAggr')||{}).checked};try{const s=await(await fetch('/api/paper/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(c)})).json();renderPaper(s);}catch(e){}}
 function paperCSV(){const s=window.__paper;if(!s||!s.closed||!s.closed.length){toast('No closed trades to export yet');return;}
   const rows=[['coin','side','lev','exit','pnl','pnlPctOnMargin','heldMin','closedAt']].concat(s.closed.map(t=>[t.name||t.sym,t.side,t.lev||1,t.reason,(+t.pnl).toFixed(2),(+t.pnlPct).toFixed(2),t.holdMin,new Date(t.closedAt).toISOString()]));
   const csv=rows.map(r=>r.join(',')).join('\r\n');
@@ -472,6 +472,7 @@ function renderPaper(s){
   const pend=(s.pending||[]).map(o=>`<tr><td>${o.name||o.sym}</td><td>${sideTag(o.side)}</td><td>${o.tf||''}</td><td>${o.lev}×</td><td>${szCell(o.qty,o.limit,o.lev)}</td><td>limit ${pprice(o.limit)}</td><td>stop ${pprice(o.stop)}</td></tr>`).join('')||'<tr><td colspan="7" class="sub">No working orders</td></tr>';
   const cl=(s.closed||[]).map(t=>`<tr><td>${t.name||t.sym}</td><td>${sideTag(t.side)}</td><td>${t.reason}</td><td class="${t.pnl>=0?'up':'down'}">${t.pnl>=0?'+':''}${pmoney(t.pnl)}</td><td class="${t.pnl>=0?'up':'down'}">${t.pnlPct>=0?'+':''}${(+t.pnlPct).toFixed(1)}%</td><td>${t.holdMin}m</td></tr>`).join('')||'<tr><td colspan="6" class="sub">No closed trades yet</td></tr>';
   const dayRet=s.dayRetPct||0, tgt=s.config.dailyTargetPct||0;
+  const st=s.stats||{}, exp=st.expectancy||0, pf=st.profitFactor||0, aw=st.avgWin||0, al=st.avgLoss||0, rp=st.realizedPnl||0, nTr=st.trades||0;
   el.innerHTML=`<div class="tradespanel" style="border-color:rgba(52,211,153,.4)">
     <h3>🤖 Paper Bot <span class="sub">— simulation · crypto futures · no real money</span> ${s.running?'<span style="color:var(--buy)">● RUNNING</span>':'<span class="sub">■ stopped</span>'} ${s.goalHit?'<span style="color:var(--buy)">🎯 daily target hit — done for today</span>':''} ${s.halted?'<span style="color:var(--sell)">⛔ halted — daily loss limit</span>':''}</h3>
     <div style="display:flex;gap:6px;margin:6px 0;align-items:center"><span class="sub">Show in:</span>
@@ -483,6 +484,11 @@ function renderPaper(s){
       <div class="k">Today → target ${tgt}%</div><div class="v ${dayRet>=0?'up':'down'}">${dayRet>=0?'+':''}${dayRet.toFixed(2)}%</div>
       <div class="k">Margin used</div><div class="v">${pmoney(s.marginUsed||0)} / ${pmoney(s.config.capital)}</div>
       <div class="k">Win rate</div><div class="v">${(s.stats.winRate||0).toFixed(0)}% · ${s.stats.trades} trades</div></div>
+    <div class="kv" style="grid-template-columns:auto auto auto auto;gap:6px 18px;margin-top:3px;border-top:1px dashed var(--line);padding-top:6px">
+      <div class="k" title="The single number that says if it makes money: average ₹ per trade after wins AND losses are netted. Above 0 = a real edge. Needs ~20+ trades to trust.">Edge / trade${nTr<20?' <span class="sub">(need '+(20-nTr)+' more)</span>':''}</div><div class="v ${exp>=0?'up':'down'}">${exp>=0?'+':''}${pmoney(exp)}</div>
+      <div class="k" title="Gross wins ÷ gross losses. Above 1.0 means winners outweigh losers. 1.5+ is healthy.">Profit factor</div><div class="v ${pf>=1?'up':'down'}">${nTr?pf.toFixed(2):'—'}</div>
+      <div class="k" title="Average winning trade vs average losing trade.">Avg win / loss</div><div class="v"><span class="up">+${pmoney(aw)}</span> / <span class="down">−${pmoney(al)}</span></div>
+      <div class="k">Realized P&amp;L</div><div class="v ${rp>=0?'up':'down'}">${rp>=0?'+':''}${pmoney(rp)}</div></div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0">
       <label class="rl">Capital ₹<input id="ppCap" value="${s.config.capital}" style="width:88px"></label>
       <label class="rl" title="How much of the account to risk per trade — SIZING only. The stop is set from the chart (ATR + support), never from this number. Pros use 1–2%.">Risk %/trade<input id="ppRisk" value="${s.config.riskPct}" style="width:46px"></label>
@@ -491,6 +497,7 @@ function renderPaper(s){
       <span class="sub" title="The bot hunts the best setup across these timeframes itself — you don't pick one.">TFs: <b>${(s.timeframes||['15m','1h','4h']).join(' · ')}</b> (auto)</span>
       <label class="rl"><input type="checkbox" id="ppShort" ${s.config.allowShort?'checked':''}> Shorts</label>
       <label class="rl"><input type="checkbox" id="ppPend" ${s.config.allowPending?'checked':''}> Dip limits</label>
+      <label class="rl" title="ON: the strongest setups (multi-TF confirmed + score ≥25) enter at market instead of waiting for the exact dip — but ONLY if buying now still leaves ≥1:1 reward:risk. More fills, slightly worse entries, never chases. OFF: patient limit entries only (best prices).">🔥<input type="checkbox" id="ppAggr" ${s.config.allowAggressive?'checked':''}> Aggressive fills</label>
       <button class="btn" onclick="paperSaveConfig()">Save</button>
       ${s.running?'<button class="btn" onclick="paperHalt()">■ Stop</button>':'<button class="btn go" onclick="paperGo()">▶ Start</button>'}
       <button class="btn" onclick="paperReset()">Reset</button></div>

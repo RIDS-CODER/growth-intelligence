@@ -21,9 +21,9 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
   const DEFAULTS = {
     running:false, halted:false, goalHit:false,
     capital:100000, riskPct:1, dailyTargetPct:10, maxLev:5, tab:'Crypto', tf:'15m',
-    timeframes:['15m','1h','4h'],                       // the bot hunts across these itself — you don't pick a TF
+    timeframes:['15m','30m','1h'],                      // the bot hunts across these itself — you don't pick a TF (faster frames = quicker fills)
     feeBps:0, slipBps:0, dayLossLimitPct:5, cooldownMin:20, maxConcurrent:20,
-    allowShort:true, allowPending:true,
+    allowShort:true, allowPending:true, allowAggressive:false,   // aggressive = market-enter the strongest near-zone setups (still R:R-guarded)
     cash:100000, positions:[], pending:[], closed:[], cooldown:{},
     startedAt:null, lastRun:null, lastError:null, dayAnchor:null, dayStartEquity:100000
   };
@@ -31,7 +31,8 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
   let lastPrices = {};
 
   function load(){ let st; try{ st=Object.assign({}, DEFAULTS, JSON.parse(fs.readFileSync(FILE,'utf8'))); }catch(e){ st=JSON.parse(JSON.stringify(DEFAULTS)); }
-    st.feeBps=0; st.slipBps=0;   // frictionless while validating raw accuracy (remove to re-enable costs)
+    st.feeBps=0; st.slipBps=0;                                   // frictionless while validating raw accuracy (remove to re-enable costs)
+    st.timeframes=DEFAULTS.timeframes.slice();                   // migrate to the current auto timeframe set
     return st; }
   function save(){ try{ fs.writeFileSync(FILE, JSON.stringify(S)); }catch(e){} }
   const feeOf = notional => Math.abs(notional)*(S.feeBps/10000);
@@ -106,8 +107,9 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
     const {dir,limit,stop,targets}=a;
     if(!((dir>0&&stop<limit&&targets[0]>limit)||(dir<0&&stop>limit&&targets[0]<limit))) return;
     const eq=markEquity(lastPrices), qty=sizeQty(limit,stop,lev,eq); if(!(qty>0)) return;
+    const exp=Math.min(FILL_BARS*tfMin(a.tf||'15m')*60000, 6*3600*1000);   // ~6 bars, but never rest more than 6 hours
     S.pending.push({ id:Date.now()+'_'+a.sym, sym:a.sym, name:a.name, tk:a.tk||'', cls:a.cls, dir, lev, limit, stop, targets:targets.slice(0,3), qty,
-      placedAt:Date.now(), expiresAt:Date.now()+FILL_BARS*tfMin(a.tf||'15m')*60000, tf:a.tf||'15m' });
+      placedAt:Date.now(), expiresAt:Date.now()+exp, tf:a.tf||'15m' });
   }
 
   // --- strategic selection: rank by conviction, take only quality setups ---
@@ -135,10 +137,21 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
       const base={ sym:r.asset.sym, name:r.asset.name, tk:r.asset.tk||'', cls:r.asset.cls, dir:d, stop:r.setup.stop, targets:(r.setup.targets||[]).slice(0,3), tf:(r._tf||(S.timeframes&&S.timeframes[0])||'15m') };
       if(base.targets.length<3) continue;
       const px0=(prices&&prices[r.asset.sym])||r.sig.price; if(!(px0>0)) continue;
+      // aggressive = only the STRONGEST setups (MTF-confirmed AND score≥25) may skip the limit and enter at market,
+      // and ONLY if buying here still leaves ≥1:1 reward:risk to T1 — so it never chases an extended move into bad math.
+      const topTier = r.mtf && r.mtf.agree>=2 && Math.abs(r.sig.score)>=25;
       if(k==='buynow'||k==='buybreak')       openPosition(base, px0+slipOf(px0), lev, prices);
       else if(k==='sellnow'||k==='sellbreak') openPosition(base, px0-slipOf(px0), lev, prices);
-      else if(k==='waitdip')                  placePending({...base, limit:r.setup.entryHi}, lev);
-      else if(k==='waitbounce')               placePending({...base, limit:r.setup.entryLo}, lev);
+      else if(k==='waitdip'){
+        const me=px0+slipOf(px0), risk=me-base.stop, rr=risk>0?(base.targets[0]-me)/risk:0;
+        if(S.allowAggressive && topTier && rr>=1) openPosition(base, me, lev, prices);
+        else placePending({...base, limit:r.setup.entryHi}, lev);
+      }
+      else if(k==='waitbounce'){
+        const me=px0-slipOf(px0), risk=base.stop-me, rr=risk>0?(me-base.targets[0])/risk:0;
+        if(S.allowAggressive && topTier && rr>=1) openPosition(base, me, lev, prices);
+        else placePending({...base, limit:r.setup.entryLo}, lev);
+      }
     }
   }
 
@@ -168,14 +181,22 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
   function snapshot(prices){
     const P=prices||lastPrices, eq=markEquity(P);
     const wins=S.closed.filter(t=>t.pnl>0).length, tot=S.closed.length;
+    // --- edge / expectancy: the numbers that actually say whether it makes money ---
+    const pnls=S.closed.map(t=>t.pnl);
+    const winPnls=pnls.filter(v=>v>0), lossPnls=pnls.filter(v=>v<=0);
+    const grossWin=winPnls.reduce((a,b)=>a+b,0), grossLoss=-lossPnls.reduce((a,b)=>a+b,0); // grossLoss = positive magnitude
+    const avgWin=winPnls.length?grossWin/winPnls.length:0;
+    const avgLoss=lossPnls.length?grossLoss/lossPnls.length:0;                              // positive magnitude
+    const expectancy=tot?pnls.reduce((a,b)=>a+b,0)/tot:0;                                   // avg ₹ per trade — >0 means an edge
+    const profitFactor=grossLoss>0?grossWin/grossLoss:(grossWin>0?99:0);                    // >1 means winners outweigh losers
     return { running:S.running, halted:S.halted, goalHit:S.goalHit, tab:S.tab, timeframes:S.timeframes, usdtInr:(typeof rate==='function'?(rate()||0):0),
-      config:{capital:S.capital,riskPct:S.riskPct,dailyTargetPct:S.dailyTargetPct,maxLev:S.maxLev,feeBps:S.feeBps,slipBps:S.slipBps,dayLossLimitPct:S.dayLossLimitPct,allowShort:S.allowShort,allowPending:S.allowPending},
+      config:{capital:S.capital,riskPct:S.riskPct,dailyTargetPct:S.dailyTargetPct,maxLev:S.maxLev,feeBps:S.feeBps,slipBps:S.slipBps,dayLossLimitPct:S.dayLossLimitPct,allowShort:S.allowShort,allowPending:S.allowPending,allowAggressive:S.allowAggressive},
       cash:S.cash, equity:eq, startEquity:S.capital, retPct:(eq/S.capital-1)*100,
       dayStartEquity:S.dayStartEquity, dayRetPct:S.dayStartEquity?(eq/S.dayStartEquity-1)*100:0, targetEquity:S.dayStartEquity*(1+S.dailyTargetPct/100),
       marginUsed:grossMargin(), openCount:S.positions.length, pendingCount:S.pending.length,
       positions:S.positions.map(p=>({sym:p.sym,name:p.name,tk:p.tk,side:p.dir>0?'LONG':'SHORT',lev:p.lev,tf:p.tf,entry:p.entry,stop:p.stop,targets:p.targets,remQty:p.remQty,qty:p.qty,taken:p.taken,lastPx:p.lastPx,uPnl:uPnl(p,(P&&P[p.sym])||p.lastPx)})),
       pending:S.pending.map(o=>({sym:o.sym,name:o.name,side:o.dir>0?'LONG':'SHORT',lev:o.lev,qty:o.qty,limit:o.limit,stop:o.stop,tf:o.tf,expiresAt:o.expiresAt})),
-      closed:S.closed.slice(0,100), stats:{trades:tot,wins,winRate:tot?wins/tot*100:0,realizedPnl:S.closed.reduce((a,t)=>a+t.pnl,0)},
+      closed:S.closed.slice(0,100), stats:{trades:tot,wins,losses:tot-wins,winRate:tot?wins/tot*100:0,realizedPnl:S.closed.reduce((a,t)=>a+t.pnl,0),avgWin,avgLoss,expectancy,profitFactor},
       startedAt:S.startedAt, lastRun:S.lastRun, lastError:S.lastError };
   }
 
@@ -184,11 +205,12 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
     if(c.tab)S.tab=c.tab; if(c.tf)S.tf=c.tf;
     if(c.allowShort!=null)S.allowShort=!!c.allowShort;
     if(c.allowPending!=null)S.allowPending=!!c.allowPending;
+    if(c.allowAggressive!=null)S.allowAggressive=!!c.allowAggressive;
     save(); return snapshot();
   }
   function start(){ if(!S.startedAt){ S.startedAt=Date.now(); S.cash=S.capital; S.dayStartEquity=S.capital; } S.running=true; S.halted=false; S.goalHit=false; save(); return snapshot(); }
   function stop(){ S.running=false; save(); return snapshot(); }
-  function reset(){ const cfg={capital:S.capital,riskPct:S.riskPct,dailyTargetPct:S.dailyTargetPct,maxLev:S.maxLev,tab:S.tab,tf:S.tf,feeBps:S.feeBps,slipBps:S.slipBps,dayLossLimitPct:S.dayLossLimitPct,allowShort:S.allowShort,allowPending:S.allowPending,maxConcurrent:S.maxConcurrent,cooldownMin:S.cooldownMin};
+  function reset(){ const cfg={capital:S.capital,riskPct:S.riskPct,dailyTargetPct:S.dailyTargetPct,maxLev:S.maxLev,tab:S.tab,tf:S.tf,feeBps:S.feeBps,slipBps:S.slipBps,dayLossLimitPct:S.dayLossLimitPct,allowShort:S.allowShort,allowPending:S.allowPending,allowAggressive:S.allowAggressive,maxConcurrent:S.maxConcurrent,cooldownMin:S.cooldownMin};
     S=JSON.parse(JSON.stringify(DEFAULTS)); Object.assign(S,cfg); S.cash=S.capital; save(); return snapshot(); }
 
   return { tick, start, stop, reset, setConfig, getState:()=>snapshot(), __state:()=>S };
