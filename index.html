@@ -453,32 +453,44 @@ async function paperControl(a){try{const s=await(await fetch('/api/paper/control
 function paperGo(){paperControl('start');}
 function paperHalt(){paperControl('stop');}
 function paperReset(){if(confirm('Reset the paper account and clear its history?'))paperControl('reset');}
-async function paperSaveConfig(){const g=id=>document.getElementById(id),c={capital:+g('ppCap').value,riskPct:+g('ppRisk').value,maxPos:+g('ppMax').value,tf:g('ppTf').value};try{const s=await(await fetch('/api/paper/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(c)})).json();renderPaper(s);}catch(e){}}
-function paperCSV(){const s=window.__paper;if(!s||!s.closed)return;const rows=[['coin','exit','pnl','pnlPct','heldMin','closedAt']].concat(s.closed.map(t=>[t.name||t.sym,t.reason,(+t.pnl).toFixed(2),(+t.pnlPct).toFixed(2),t.holdMin,new Date(t.closedAt).toISOString()]));const csv=rows.map(r=>r.join(',')).join('\\n');const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download='paper-trades.csv';a.click();}
+async function paperSaveConfig(){const g=id=>document.getElementById(id),c={capital:+g('ppCap').value,riskPct:+g('ppRisk').value,dailyTargetPct:+g('ppTarget').value,maxLev:+g('ppLev').value,tf:g('ppTf').value,allowShort:g('ppShort').checked,allowPending:g('ppPend').checked};try{const s=await(await fetch('/api/paper/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(c)})).json();renderPaper(s);}catch(e){}}
+function paperCSV(){const s=window.__paper;if(!s||!s.closed||!s.closed.length){toast('No closed trades to export yet');return;}
+  const rows=[['coin','side','lev','exit','pnl','pnlPctOnMargin','heldMin','closedAt']].concat(s.closed.map(t=>[t.name||t.sym,t.side,t.lev||1,t.reason,(+t.pnl).toFixed(2),(+t.pnlPct).toFixed(2),t.holdMin,new Date(t.closedAt).toISOString()]));
+  const csv=rows.map(r=>r.join(',')).join('\r\n');
+  const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'}),url=URL.createObjectURL(blob);
+  const a=document.createElement('a');a.href=url;a.download='paper-trades.csv';a.style.display='none';document.body.appendChild(a);a.click();setTimeout(()=>{document.body.removeChild(a);URL.revokeObjectURL(url);},200);}
 function renderPaper(s){
   const el=document.getElementById('paperPanel');if(!el)return;window.__paper=s;const ret=s.retPct||0;
-  const pos=(s.positions||[]).map(p=>`<tr><td>${p.name||p.sym}</td><td>${money(p.entry,2)}</td><td>${money(p.stop,2)}</td><td>${p.taken}/3</td><td>${money(p.lastPx,2)}</td><td class="${p.uPnl>=0?'up':'down'}">${p.uPnl>=0?'+':''}${money(p.uPnl,0)}</td></tr>`).join('')||'<tr><td colspan="6" class="sub">No open positions</td></tr>';
-  const cl=(s.closed||[]).map(t=>`<tr><td>${t.name||t.sym}</td><td>${t.reason}</td><td class="${t.pnl>=0?'up':'down'}">${t.pnl>=0?'+':''}${money(t.pnl,0)}</td><td class="${t.pnl>=0?'up':'down'}">${t.pnlPct>=0?'+':''}${(+t.pnlPct).toFixed(1)}%</td><td>${t.holdMin}m</td></tr>`).join('')||'<tr><td colspan="5" class="sub">No closed trades yet</td></tr>';
+  const sideTag=sd=>`<span style="color:var(--${sd==='SHORT'?'sell':'buy'});font-weight:700">${sd}</span>`;
+  const pos=(s.positions||[]).map(p=>`<tr><td>${p.name||p.sym}</td><td>${sideTag(p.side)}</td><td>${p.lev}×</td><td>${money(p.entry,2)}</td><td>${money(p.stop,2)}</td><td>${p.taken}/3</td><td>${money(p.lastPx,2)}</td><td class="${p.uPnl>=0?'up':'down'}">${p.uPnl>=0?'+':''}${money(p.uPnl,0)}</td></tr>`).join('')||'<tr><td colspan="8" class="sub">No open positions</td></tr>';
+  const pend=(s.pending||[]).map(o=>`<tr><td>${o.name||o.sym}</td><td>${sideTag(o.side)}</td><td>${o.lev}×</td><td>limit ${money(o.limit,2)}</td><td>stop ${money(o.stop,2)}</td></tr>`).join('')||'<tr><td colspan="5" class="sub">No working orders</td></tr>';
+  const cl=(s.closed||[]).map(t=>`<tr><td>${t.name||t.sym}</td><td>${sideTag(t.side)}</td><td>${t.reason}</td><td class="${t.pnl>=0?'up':'down'}">${t.pnl>=0?'+':''}${money(t.pnl,0)}</td><td class="${t.pnl>=0?'up':'down'}">${t.pnlPct>=0?'+':''}${(+t.pnlPct).toFixed(1)}%</td><td>${t.holdMin}m</td></tr>`).join('')||'<tr><td colspan="6" class="sub">No closed trades yet</td></tr>';
+  const dayRet=s.dayRetPct||0, tgt=s.config.dailyTargetPct||0;
   el.innerHTML=`<div class="tradespanel" style="border-color:rgba(52,211,153,.4)">
-    <h3>🤖 Paper Bot <span class="sub">— simulation, no real money</span> ${s.running?'<span style="color:var(--buy)">● RUNNING</span>':'<span class="sub">■ stopped</span>'} ${s.halted?'<span style="color:var(--sell)">⛔ halted — daily loss limit</span>':''}</h3>
+    <h3>🤖 Paper Bot <span class="sub">— simulation · crypto futures · no real money</span> ${s.running?'<span style="color:var(--buy)">● RUNNING</span>':'<span class="sub">■ stopped</span>'} ${s.goalHit?'<span style="color:var(--buy)">🎯 daily target hit — done for today</span>':''} ${s.halted?'<span style="color:var(--sell)">⛔ halted — daily loss limit</span>':''}</h3>
     <div class="kv" style="grid-template-columns:auto auto auto auto;gap:6px 18px">
       <div class="k">Equity</div><div class="v ${ret>=0?'up':'down'}">${money(s.equity,0)} (${ret>=0?'+':''}${ret.toFixed(2)}%)</div>
-      <div class="k">Cash</div><div class="v">${money(s.cash,0)}</div>
-      <div class="k">Open</div><div class="v">${s.openCount}</div>
+      <div class="k">Today → target ${tgt}%</div><div class="v ${dayRet>=0?'up':'down'}">${dayRet>=0?'+':''}${dayRet.toFixed(2)}%</div>
+      <div class="k">Margin used</div><div class="v">${money(s.marginUsed||0,0)} / ${money(s.config.capital,0)}</div>
       <div class="k">Win rate</div><div class="v">${(s.stats.winRate||0).toFixed(0)}% · ${s.stats.trades} trades</div></div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0">
       <label class="rl">Capital ₹<input id="ppCap" value="${s.config.capital}" style="width:88px"></label>
       <label class="rl">Risk %<input id="ppRisk" value="${s.config.riskPct}" style="width:46px"></label>
-      <label class="rl">Max pos<input id="ppMax" value="${s.config.maxPos}" style="width:42px"></label>
-      <label class="rl">TF <select id="ppTf">${['5m','15m','30m','1h'].map(t=>`<option ${t===s.tf?'selected':''}>${t}</option>`).join('')}</select></label>
+      <label class="rl">Daily target %<input id="ppTarget" value="${s.config.dailyTargetPct}" style="width:46px"></label>
+      <label class="rl">Max lev<input id="ppLev" value="${s.config.maxLev}" style="width:42px"></label>
+      <label class="rl">TF <select id="ppTf">${['5m','15m','30m','1h','4h'].map(t=>`<option ${t===s.tf?'selected':''}>${t}</option>`).join('')}</select></label>
+      <label class="rl"><input type="checkbox" id="ppShort" ${s.config.allowShort?'checked':''}> Shorts</label>
+      <label class="rl"><input type="checkbox" id="ppPend" ${s.config.allowPending?'checked':''}> Dip limits</label>
       <button class="btn" onclick="paperSaveConfig()">Save</button>
       ${s.running?'<button class="btn" onclick="paperHalt()">■ Stop</button>':'<button class="btn go" onclick="paperGo()">▶ Start</button>'}
       <button class="btn" onclick="paperReset()">Reset</button></div>
-    <div class="sub" style="margin:4px 0">Open positions</div>
-    <table class="rztbl"><thead><tr><th>Coin</th><th>Entry</th><th>Stop</th><th>Scaled</th><th>Last</th><th>Unrealized</th></tr></thead><tbody>${pos}</tbody></table>
+    <div class="sub" style="margin:4px 0">Open positions (${s.openCount})</div>
+    <table class="rztbl"><thead><tr><th>Coin</th><th>Side</th><th>Lev</th><th>Entry</th><th>Stop</th><th>Scaled</th><th>Last</th><th>Unrealized</th></tr></thead><tbody>${pos}</tbody></table>
+    <div class="sub" style="margin:8px 0 4px">Working limit orders (${s.pendingCount||0}) — waiting for the dip/bounce</div>
+    <table class="rztbl"><thead><tr><th>Coin</th><th>Side</th><th>Lev</th><th>Fills at</th><th>Stop</th></tr></thead><tbody>${pend}</tbody></table>
     <div class="sub" style="margin:8px 0 4px">Closed trades <button class="btn" style="padding:2px 8px;font-size:11px" onclick="paperCSV()">⬇ CSV</button></div>
-    <table class="rztbl"><thead><tr><th>Coin</th><th>Exit</th><th>P&amp;L</th><th>%</th><th>Held</th></tr></thead><tbody>${cl}</tbody></table>
-    <p class="small" style="margin-top:6px;color:var(--muted)">Runs on the server every minute while <b>Running</b> — even with this tab closed. Simulates fills with slippage + fees, sizes by your Risk %, scales out ⅓ at each target (stop→breakeven after T1), and halts for the day at −${s.config.dayLossLimitPct}%. <b>No real orders are placed.</b> A redeploy can reset history — export CSV to keep your record.</p></div>`;
+    <table class="rztbl"><thead><tr><th>Coin</th><th>Side</th><th>Exit</th><th>P&amp;L</th><th>% (on margin)</th><th>Held</th></tr></thead><tbody>${cl}</tbody></table>
+    <p class="small" style="margin-top:6px;color:var(--muted)">Runs on the server every minute while <b>Running</b> — even with this tab closed. You set <b>Capital</b> + a <b>Daily target %</b>; it ranks recommendations by conviction (score + multi-TF + backtest grade), takes only the best, sizes by <b>Risk %</b>, applies per-trade leverage (capped by Max lev), scales out ⅓ at each target, and <b>flattens + stops for the day once it hits the target</b> (or halts at −${s.config.dayLossLimitPct}%). Fees/slippage are currently <b>${s.config.feeBps===0&&s.config.slipBps===0?'OFF (raw accuracy)':'on'}</b>. <b>No real orders are placed.</b> A redeploy can reset history — export CSV to keep your record.</p></div>`;
 }
 function setHorizon(h){researchHorizon=h;document.querySelectorAll('.rztab').forEach(x=>x.classList.toggle('on',x.dataset.h===h));if((document.getElementById('rzSym')||{}).value)runResearch();}
 function renderResearchShell(){
