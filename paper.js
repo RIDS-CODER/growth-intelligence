@@ -26,6 +26,13 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
     timeframes:['15m','30m','1h'],                      // the bot hunts across these itself — you don't pick a TF (faster frames = quicker fills)
     feeBps:0, slipBps:0, dayLossLimitPct:5, cooldownMin:20, maxConcurrent:20,
     allowShort:true, allowPending:true, allowAggressive:false,   // aggressive = market-enter the strongest near-zone setups (still R:R-guarded)
+    // --- discipline guards (what a smart trader does): never stop inside the noise, don't revenge-trade, don't fight the tape ---
+    minStopPct:0.7,           // skip any trade whose stop sits closer than this % of price (inside 1-tick noise → instant stop-out)
+    stopCooldownMin:90,       // after a LOSING stop-out, sit out this coin for this long (vs the shorter win cooldown)
+    maxStopOutsPerCoin:2,     // after this many stop-outs in a day, bench the coin for the rest of the day (no revenge trades)
+    lossStreakPause:3,        // after this many consecutive losing closes, stand down…
+    streakPauseMin:45,        // …for this long, to let the tape settle (stop fighting a one-way market)
+    stopOuts:{}, lossStreak:0, pauseUntil:0,
     cash:100000, positions:[], pending:[], closed:[], cooldown:{},
     startedAt:null, lastRun:null, lastError:null, dayAnchor:null, dayStartEquity:100000
   };
@@ -59,6 +66,9 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
   function openPosition(a, entry, lev, prices){
     const {dir,stop,targets}=a;
     if(!((dir>0&&stop<entry&&targets[0]>entry)||(dir<0&&stop>entry&&targets[0]<entry))) return false;
+    // NOISE-FLOOR guard: a stop sitting inside 1-tick noise gets hit within a minute regardless of the idea. A smart trader
+    // won't place a stop that tight — so skip it. (This is the main fix for the wave of trades that stopped out in ~1 min.)
+    if(Math.abs(entry-stop) < entry*(S.minStopPct||0)/100) return false;
     const eq=markEquity(prices||lastPrices), qty=sizeQty(entry,stop,lev,eq); if(!(qty>0)) return false;
     const entryFee=feeOf(qty*entry); S.cash-=entryFee;
     S.positions.push({ id:Date.now()+'_'+a.sym, sym:a.sym, name:a.name, tk:a.tk||'', cls:a.cls, dir, lev,
@@ -75,8 +85,20 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
   }
   function closePosition(p, reason){
     S.positions=S.positions.filter(x=>x.id!==p.id);
-    S.cooldown[p.sym]=Date.now()+(S.cooldownMin||0)*60000;
     const pnl=p.realized-p.feesPaid, cost=p.entry*p.qty;
+    const loss = pnl<0;
+    if(loss){
+      // DON'T revenge-trade: sit this coin out longer after a loss; bench it for the day after repeated stop-outs.
+      S.stopOuts[p.sym]=(S.stopOuts[p.sym]||0)+1;
+      const benched = S.stopOuts[p.sym] >= (S.maxStopOutsPerCoin||99);
+      S.cooldown[p.sym] = benched ? (Date.now()+24*3600*1000) : (Date.now()+(S.stopCooldownMin||S.cooldownMin||60)*60000);
+      // DON'T fight the tape: after a run of losses, stand down for a while.
+      S.lossStreak=(S.lossStreak||0)+1;
+      if(S.lossStreak >= (S.lossStreakPause||99)) S.pauseUntil = Date.now()+(S.streakPauseMin||45)*60000;
+    } else {
+      S.lossStreak=0;                                                        // a win breaks the streak
+      S.cooldown[p.sym]=Date.now()+(S.cooldownMin||0)*60000;
+    }
     S.closed.unshift({ sym:p.sym, name:p.name, tk:p.tk, side:p.dir>0?'LONG':'SHORT', lev:p.lev, tf:p.tf, entry:p.entry, regime:p.regime||'trend',
       openAt:p.openAt, closedAt:Date.now(), reason, pnl, pnlPct:cost?pnl/cost*100*(p.lev||1):0, holdMin:Math.round((Date.now()-p.openAt)/60000) });
     if(S.closed.length>500) S.closed.length=500;
@@ -167,7 +189,7 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
     S.lastRun=Date.now(); S.lastError=null;
     try{
       const today=istDay();   // IST calendar day — the target window is IST midnight → IST midnight
-      if(S.dayAnchor!==today){ S.dayAnchor=today; S.dayStartEquity=markEquity(lastPrices); S.halted=false; S.goalHit=false; }  // new day resets
+      if(S.dayAnchor!==today){ S.dayAnchor=today; S.dayStartEquity=markEquity(lastPrices); S.halted=false; S.goalHit=false; S.stopOuts={}; S.lossStreak=0; S.pauseUntil=0; }  // new day resets (incl. discipline counters)
       let prices={}; try{ prices=await liveQuotes(S.tab)||{}; }catch(e){}
       lastPrices=prices;
       manage(prices);
@@ -175,7 +197,8 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
       const eq=markEquity(prices);
       if(!S.goalHit && eq >= S.dayStartEquity*(1 + S.dailyTargetPct/100)){ flattenAll(prices,'target'); S.goalHit=true; }   // 🎯 hit the day's goal → lock it in
       if(eq <= S.dayStartEquity*(1 - S.dayLossLimitPct/100)) S.halted=true;                                                 // 🛑 daily loss limit
-      if(!S.halted && !S.goalHit && (S.positions.length+S.pending.length) < S.maxConcurrent){
+      const paused = Date.now() < (S.pauseUntil||0);                                                                        // ⏸ standing down after a loss streak
+      if(!S.halted && !S.goalHit && !paused && (S.positions.length+S.pending.length) < S.maxConcurrent){
         const tfs=(S.timeframes&&S.timeframes.length)?S.timeframes:['15m'];
         let all=[];                                                   // hunt across ALL timeframes, then rank the best
         for(const tf of tfs){ try{ const d=await scan(S.tab,tf); if(d&&Array.isArray(d.results)){ for(const r of d.results) r._tf=tf; all=all.concat(d.results); } }catch(e){} }
@@ -196,8 +219,10 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
     const avgLoss=lossPnls.length?grossLoss/lossPnls.length:0;                              // positive magnitude
     const expectancy=tot?pnls.reduce((a,b)=>a+b,0)/tot:0;                                   // avg ₹ per trade — >0 means an edge
     const profitFactor=grossLoss>0?grossWin/grossLoss:(grossWin>0?99:0);                    // >1 means winners outweigh losers
+    const benched=Object.keys(S.stopOuts||{}).filter(s=>(S.stopOuts[s]||0)>=(S.maxStopOutsPerCoin||99));
     return { running:S.running, halted:S.halted, goalHit:S.goalHit, tab:S.tab, timeframes:S.timeframes, usdtInr:(typeof rate==='function'?(rate()||0):0),
-      config:{capital:S.capital,riskPct:S.riskPct,dailyTargetPct:S.dailyTargetPct,maxLev:S.maxLev,feeBps:S.feeBps,slipBps:S.slipBps,dayLossLimitPct:S.dayLossLimitPct,allowShort:S.allowShort,allowPending:S.allowPending,allowAggressive:S.allowAggressive},
+      paused:(Date.now()<(S.pauseUntil||0)), pauseUntil:S.pauseUntil||0, lossStreak:S.lossStreak||0, benched,
+      config:{capital:S.capital,riskPct:S.riskPct,dailyTargetPct:S.dailyTargetPct,maxLev:S.maxLev,feeBps:S.feeBps,slipBps:S.slipBps,dayLossLimitPct:S.dayLossLimitPct,allowShort:S.allowShort,allowPending:S.allowPending,allowAggressive:S.allowAggressive,minStopPct:S.minStopPct,stopCooldownMin:S.stopCooldownMin,maxStopOutsPerCoin:S.maxStopOutsPerCoin,lossStreakPause:S.lossStreakPause,streakPauseMin:S.streakPauseMin},
       cash:S.cash, equity:eq, startEquity:S.capital, retPct:(eq/S.capital-1)*100,
       dayStartEquity:S.dayStartEquity, dayRetPct:S.dayStartEquity?(eq/S.dayStartEquity-1)*100:0, targetEquity:S.dayStartEquity*(1+S.dailyTargetPct/100),
       marginUsed:grossMargin(), openCount:S.positions.length, pendingCount:S.pending.length,
@@ -208,7 +233,7 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
   }
 
   function setConfig(c){
-    ['capital','riskPct','dailyTargetPct','maxLev','feeBps','slipBps','dayLossLimitPct','cooldownMin','maxConcurrent'].forEach(k=>{ if(c[k]!=null&&!isNaN(+c[k])) S[k]=+c[k]; });
+    ['capital','riskPct','dailyTargetPct','maxLev','feeBps','slipBps','dayLossLimitPct','cooldownMin','maxConcurrent','minStopPct','stopCooldownMin','maxStopOutsPerCoin','lossStreakPause','streakPauseMin'].forEach(k=>{ if(c[k]!=null&&!isNaN(+c[k])) S[k]=+c[k]; });
     if(c.tab)S.tab=c.tab; if(c.tf)S.tf=c.tf;
     if(c.allowShort!=null)S.allowShort=!!c.allowShort;
     if(c.allowPending!=null)S.allowPending=!!c.allowPending;
@@ -217,7 +242,7 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
   }
   function start(){ if(!S.startedAt){ S.startedAt=Date.now(); S.cash=S.capital; S.dayStartEquity=S.capital; } S.running=true; S.halted=false; S.goalHit=false; save(); return snapshot(); }
   function stop(){ S.running=false; save(); return snapshot(); }
-  function reset(){ const cfg={capital:S.capital,riskPct:S.riskPct,dailyTargetPct:S.dailyTargetPct,maxLev:S.maxLev,tab:S.tab,tf:S.tf,feeBps:S.feeBps,slipBps:S.slipBps,dayLossLimitPct:S.dayLossLimitPct,allowShort:S.allowShort,allowPending:S.allowPending,allowAggressive:S.allowAggressive,maxConcurrent:S.maxConcurrent,cooldownMin:S.cooldownMin};
+  function reset(){ const cfg={capital:S.capital,riskPct:S.riskPct,dailyTargetPct:S.dailyTargetPct,maxLev:S.maxLev,tab:S.tab,tf:S.tf,feeBps:S.feeBps,slipBps:S.slipBps,dayLossLimitPct:S.dayLossLimitPct,allowShort:S.allowShort,allowPending:S.allowPending,allowAggressive:S.allowAggressive,maxConcurrent:S.maxConcurrent,cooldownMin:S.cooldownMin,minStopPct:S.minStopPct,stopCooldownMin:S.stopCooldownMin,maxStopOutsPerCoin:S.maxStopOutsPerCoin,lossStreakPause:S.lossStreakPause,streakPauseMin:S.streakPauseMin};
     S=JSON.parse(JSON.stringify(DEFAULTS)); Object.assign(S,cfg); S.cash=S.capital; save(); return snapshot(); }
 
   return { tick, start, stop, reset, setConfig, getState:()=>snapshot(), __state:()=>S };
