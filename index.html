@@ -168,12 +168,14 @@
     <button class="btn" id="btBtn" onclick="runBacktest()" style="border-color:var(--hold);background:var(--hold-bg);color:var(--hold)">📊 Backtest this tab</button>
     <button class="btn" id="tradesBtn" onclick="toggleTrades()" style="border-color:var(--accent2);background:rgba(34,211,238,.12);color:#a5f3fc">📋 My Trades (0)</button>
     <button class="btn" id="researchBtn" onclick="toggleResearch()" style="border-color:#a78bfa;background:rgba(167,139,250,.14);color:#ddd6fe">🔎 Research a coin</button>
+    <button class="btn" id="quickBtn" onclick="toggleQuick()" style="border-color:#f59e0b;background:rgba(245,158,11,.15);color:#fde68a">⚡ Quick Trades</button>
     <button class="btn" id="paperBtn" onclick="togglePaper()" style="border-color:#34d399;background:rgba(52,211,153,.14);color:#a7f3d0">🤖 Paper Bot</button>
     <span class="pstat" id="filterNote"></span>
   </div>
   <div id="scoreInfo" style="display:none"></div>
   <div id="cryptoNote" style="display:none"></div>
   <div id="btcNote" style="display:none"></div>
+  <div id="quickPanel" style="display:none"></div>
   <div id="researchPanel" style="display:none"></div>
   <div id="paperPanel" style="display:none"></div>
   <div id="tradesPanel" style="display:none"></div>
@@ -837,6 +839,80 @@ function card(r,i,isBuy){const{asset,sig,setup,reasons,dec,action,scope,asof,isI
       <h4 class="against">⚠️ Reasons AGAINST</h4><ul>${reasons.against.map(x=>`<li class="against">${x}</li>`).join('')}</ul>
       <h4 class="inval">🛑 Invalidation</h4><ul>${reasons.inval.map(x=>`<li class="inval">${x}</li>`).join('')}</ul></div>
     </div></div>`;}
+
+/* ================= ⚡ QUICK TRADES — scalp/quick setups across timeframes, split Long/Short (+ reverse dip-shorts) ================= */
+const QUICK_TFS=['5m','15m','30m','1h'];
+let quickState={open:false, tf:'15m', side:'long', data:{}, loading:false};
+const qf=v=>v==null||!isFinite(v)?'—':(Math.abs(v)<5?(+v).toFixed(4):(+v).toFixed(2));
+function toggleQuick(){const el=document.getElementById('quickPanel');quickState.open=el.style.display==='none';el.style.display=quickState.open?'block':'none';if(quickState.open){renderQuickShell();loadQuick(quickState.tf);}}
+function setQuickTf(tf){quickState.tf=tf;renderQuickShell();if(quickState.data[tf])renderQuickList();else loadQuick(tf);}
+function setQuickSide(s){quickState.side=s;renderQuickShell();}
+function normQuick(x){const s=x.setup;return {sym:x.asset.sym,name:x.asset.name||x.asset.sym,tk:x.asset.tk||'',dir:s.dir,kind:x.action?x.action.kind:'',live:x.sig.price,entryLo:s.entryLo,entryHi:s.entryHi,target:s.targets[0],targetPct:Math.abs(s.ret[0]),stop:s.stop,stopPct:s.riskPct,rr:s.rrr,conf:x.confidence||{label:'—',pct:null},note:s.note,regime:s.regime,reverse:false};}
+function reverseDipShort(x){const s=x.setup,live=x.sig.price,atr=s.atr;
+  if(!(live>0)||!(atr>0))return null;
+  const target=s.entryHi;                       // support/dip zone — first touch on the way down
+  if(!(target<live))return null;                // the dip must be below current price
+  const stop=live+0.7*atr, targetPct=(live-target)/live*100, stopPct=(stop-live)/live*100, rr=(live-target)/(stop-live);
+  if(!(rr>=1)||targetPct<0.4)return null;        // only worth it with ≥1:1 and real room to the dip
+  const base=x.confidence||{pct:45}, pct=Math.max(3,Math.round((base.pct||45)*0.8));   // counter-trend → a notch lower
+  return {sym:x.asset.sym,name:x.asset.name||x.asset.sym,tk:x.asset.tk||'',dir:-1,kind:'revshort',live,entryLo:live,entryHi:live,target,targetPct,stop,stopPct,rr,
+    conf:{label:pct>=68?'High':pct>=45?'Medium':'Low',pct},regime:'reversedip',reverse:true,
+    note:'↔ Reverse of a dip-buy: short the drop into support '+qf(target)+' and cover there (where the long begins). Counter-trend — quick in-and-out, tight stop.'};}
+async function loadQuick(tf){
+  quickState.loading=true; renderQuickList();
+  try{
+    const d=await(await fetch('/api/scan?tab=Crypto&tf='+tf+'&_='+Date.now())).json();
+    const res=(d.results||[]);
+    const quick=res.filter(x=>x.setup&&(x.setup.regime==='range'||x.setup.regime==='correction'));   // scalp/quick only
+    const longs=quick.filter(x=>x.setup.dir>0).map(normQuick);
+    const shorts=quick.filter(x=>x.setup.dir<0).map(normQuick);
+    res.forEach(x=>{ if(x.action&&x.action.kind==='waitdip'&&x.setup){const rv=reverseDipShort(x);if(rv)shorts.push(rv);} });   // dip-buy → reverse quick short
+    quickState.data[tf]={longs,shorts,btc:d.btc,ts:Date.now()};
+  }catch(e){ quickState.data[tf]={longs:[],shorts:[],err:String(e.message||e)}; }
+  quickState.loading=false; renderQuickShell();
+}
+function renderQuickShell(){
+  const el=document.getElementById('quickPanel'); if(!el)return;
+  const d=quickState.data[quickState.tf]||{}, nL=(d.longs||[]).length, nS=(d.shorts||[]).length;
+  const tfTabs=QUICK_TFS.map(tf=>`<div class="rztab ${tf===quickState.tf?'on':''}" onclick="setQuickTf('${tf}')">${tf}</div>`).join('');
+  const sideTabs=`<div class="rztab ${quickState.side==='long'?'on':''}" onclick="setQuickSide('long')" style="${quickState.side==='long'?'border-color:var(--buy);color:var(--buy)':''}">🟢 Long${nL?' ('+nL+')':''}</div>
+                  <div class="rztab ${quickState.side==='short'?'on':''}" onclick="setQuickSide('short')" style="${quickState.side==='short'?'border-color:var(--sell);color:var(--sell)':''}">🔴 Short${nS?' ('+nS+')':''}</div>`;
+  el.innerHTML=`<div class="tradespanel" style="border-color:rgba(245,158,11,.45)">
+    <h3>⚡ Quick Trades <span class="sub">— scalp/quick setups only · crypto</span> <button class="btn" style="padding:2px 9px;font-size:11px" onclick="loadQuick(quickState.tf)">↻ refresh ${quickState.tf}</button></h3>
+    <div class="sub" style="margin:2px 0">Timeframe:</div>
+    <div style="display:flex;gap:5px;flex-wrap:wrap;margin:3px 0 7px">${tfTabs}</div>
+    <div style="display:flex;gap:5px;flex-wrap:wrap;margin:0 0 9px">${sideTabs}</div>
+    <div id="quickList"></div>
+    <p class="small" style="color:var(--muted);margin-top:9px">Only <b>quick/scalp</b> plays — small targets, tight stops: range scalps, BTC-weak <b>correction shorts</b>, and <b>reverse dip-shorts</b> (a pending dip-buy means price is expected to fall to support — so short that drop and cover at the dip). Each timeframe loads live when you open its tab. Reverse shorts are <b>counter-trend</b> — quick in-and-out only. Not financial advice.</p></div>`;
+  renderQuickList();
+}
+function renderQuickList(){
+  const el=document.getElementById('quickList'); if(!el)return;
+  const d=quickState.data[quickState.tf];
+  if(quickState.loading&&!d){el.innerHTML='<div class="sub" style="padding:14px">⏳ Scanning '+quickState.tf+' for quick setups…</div>';return;}
+  if(!d){el.innerHTML='<div class="sub" style="padding:14px">—</div>';return;}
+  if(d.err){el.innerHTML='<div class="sub" style="padding:14px;color:var(--sell)">Couldn’t load '+quickState.tf+': '+d.err+'</div>';return;}
+  const list=(quickState.side==='long'?d.longs:d.shorts)||[];
+  if(!list.length){el.innerHTML='<div class="empty">No quick '+quickState.side+' setups on '+quickState.tf+' right now — try another timeframe.</div>';return;}
+  const sorted=list.slice().sort((a,b)=>((b.conf.pct||0)-(a.conf.pct||0))||(b.rr-a.rr));
+  el.innerHTML='<div class="cards">'+sorted.map(quickCard).join('')+'</div>';
+}
+function quickCard(q){
+  const isBuy=q.dir>0, col=isBuy?'var(--buy)':'var(--sell)';
+  const confCol=q.conf.label==='High'?'var(--buy)':q.conf.label==='Medium'?'#fbbf24':'var(--muted)';
+  const verb=q.reverse?'SHORT INTO DIP':(isBuy?(q.kind==='buynow'||q.kind==='buybreak'?'BUY NOW':'BUY DIP'):(q.kind==='sellnow'||q.kind==='sellbreak'?'SHORT NOW':'SHORT BOUNCE'));
+  const tag=q.regime==='correction'?'<span style="color:#f87171">₿ fade</span>':q.reverse?'<span style="color:#f59e0b">↔ reverse</span>':'<span style="color:#fbbf24">⚡ scalp</span>';
+  const zone=q.reverse?('@ '+qf(q.live)):('<b>'+qf(q.entryLo)+'–'+qf(q.entryHi)+'</b>');
+  return `<div class="tc ${isBuy?'':'sellcard'}" style="cursor:default">
+    <div class="hd" style="cursor:default"><div class="l"><div class="name">${q.name}</div>
+      <div class="sub">${q.tk?q.tk+' · ':''}${q.sym} · ${tag} · ${quickState.tf}</div></div>
+      <div class="r"><span class="verdict ${isBuy?'BUY':'SELL'}">${isBuy?'LONG':'SHORT'}</span>
+        <div class="btmini" style="border-color:${confCol};color:${confCol};margin-top:6px" title="Setup confidence — quality gauge, not a win probability">◆ ${q.conf.label}${q.conf.pct!=null?' '+q.conf.pct+'%':''}</div></div></div>
+    <div class="bd">
+      <div style="font-size:13px;line-height:1.65;margin:3px 0"><b style="color:${col}">${verb}</b> ${zone} → quick target <b>${qf(q.target)}</b> <span style="color:${col};font-weight:700">(+${q.targetPct.toFixed(1)}%)</span> · stop <b>${qf(q.stop)}</b> <span style="color:var(--sell)">(−${q.stopPct.toFixed(1)}%)</span> · R:R <b>${(q.rr||0).toFixed(1)}:1</b></div>
+      ${q.note?`<div style="margin:4px 0;padding:6px 9px;border-radius:7px;background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.35);color:#fbbf24;font-size:11.5px;line-height:1.4">${q.note}</div>`:''}
+      <div class="sub" style="margin-top:4px">Live ${qf(q.live)}</div></div></div>`;
+}
 function ladder(s){const v=[s.stop,s.entry,...s.targets],lo=Math.min(...v),hi=Math.max(...v),sp=hi-lo||1,pos=x=>((x-lo)/sp)*100;
   const mk=(x,c,l,b)=>`<div class="mk" style="left:${pos(x)}%;background:${c}"></div><div class="lab ${b?'bot':''}" style="left:${pos(x)}%;color:${c}">${l}</div>`;
   return `<div class="ladder">${mk(s.stop,'var(--sell)','SL',0)}${mk(s.entry,'var(--accent2)','Entry',1)}${mk(s.targets[0],'var(--buy)','T1',0)}${mk(s.targets[1],'var(--buy)','T2',1)}${mk(s.targets[2],'var(--buy)','T3',0)}</div>`;}
