@@ -842,7 +842,7 @@ function card(r,i,isBuy){const{asset,sig,setup,reasons,dec,action,scope,asof,isI
 
 /* ================= ⚡ QUICK TRADES — scalp/quick setups across timeframes, split Long/Short (+ reverse dip-shorts) ================= */
 const QUICK_TFS=['5m','15m','30m','1h'];
-let quickState={open:false, tf:'15m', side:'long', data:{}, loading:false};
+let quickState={open:false, tf:'15m', side:'long', data:{}, loading:false, q:''};
 let quickTimer=null;
 const qf=v=>v==null||!isFinite(v)?'—':(Math.abs(v)<5?(+v).toFixed(4):(+v).toFixed(2));
 // mini candlesticks from a compact OHLC window (open ≈ previous close for continuous crypto)
@@ -881,16 +881,24 @@ async function loadQuick(tf){
     res.forEach(x=>{ if(x.action&&x.action.kind==='waitdip'&&x.setup){const rv=reverseDipShort(x);if(rv)shorts.push(rv);} });   // dip-buy → reverse quick short
     quickState.data[tf]={longs,shorts,btc:d.btc,ts:Date.now()};
   }catch(e){ quickState.data[tf]={longs:[],shorts:[],err:String(e.message||e)}; }
-  quickState.loading=false; renderQuickShell();
+  quickState.loading=false; renderQuickList();   // list-only refresh → never rebuilds/steals focus from the search box
+}
+function setQuickSearch(v){ quickState.q=v; renderQuickList(); }
+function updateQuickMeta(){
+  const d=quickState.data[quickState.tf]||{}, set=(id,t)=>{const e=document.getElementById(id);if(e)e.textContent=t;};
+  set('quickCntLong', (d.longs&&d.longs.length)?' ('+d.longs.length+')':'');
+  set('quickCntShort',(d.shorts&&d.shorts.length)?' ('+d.shorts.length+')':'');
+  set('quickUpd', d.ts?('· updated '+new Date(d.ts).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true})):'');
 }
 function renderQuickShell(){
   const el=document.getElementById('quickPanel'); if(!el)return;
   const d=quickState.data[quickState.tf]||{}, nL=(d.longs||[]).length, nS=(d.shorts||[]).length;
   const tfTabs=QUICK_TFS.map(tf=>`<div class="rztab ${tf===quickState.tf?'on':''}" onclick="setQuickTf('${tf}')">${tf}</div>`).join('');
-  const sideTabs=`<div class="rztab ${quickState.side==='long'?'on':''}" onclick="setQuickSide('long')" style="${quickState.side==='long'?'border-color:var(--buy);color:var(--buy)':''}">🟢 Long${nL?' ('+nL+')':''}</div>
-                  <div class="rztab ${quickState.side==='short'?'on':''}" onclick="setQuickSide('short')" style="${quickState.side==='short'?'border-color:var(--sell);color:var(--sell)':''}">🔴 Short${nS?' ('+nS+')':''}</div>`;
+  const sideTabs=`<div class="rztab ${quickState.side==='long'?'on':''}" onclick="setQuickSide('long')" style="${quickState.side==='long'?'border-color:var(--buy);color:var(--buy)':''}">🟢 Long<span id="quickCntLong">${nL?' ('+nL+')':''}</span></div>
+                  <div class="rztab ${quickState.side==='short'?'on':''}" onclick="setQuickSide('short')" style="${quickState.side==='short'?'border-color:var(--sell);color:var(--sell)':''}">🔴 Short<span id="quickCntShort">${nS?' ('+nS+')':''}</span></div>`;
   el.innerHTML=`<div class="tradespanel" style="border-color:rgba(245,158,11,.45)">
-    <h3>⚡ Quick Trades <span class="sub">— scalp/quick setups only · crypto</span> <button class="btn" style="padding:2px 9px;font-size:11px" onclick="loadQuick(quickState.tf)">↻ refresh ${quickState.tf}</button> ${d.ts?`<span class="sub">· updated ${new Date(d.ts).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true})}`:'<span class="sub">'} · auto ⟳ 45s</span></h3>
+    <h3>⚡ Quick Trades <span class="sub">— scalp/quick setups only · crypto</span> <button class="btn" style="padding:2px 9px;font-size:11px" onclick="loadQuick(quickState.tf)">↻ refresh ${quickState.tf}</button> <span class="sub" id="quickUpd">${d.ts?'· updated '+new Date(d.ts).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true}):''}</span> <span class="sub">· auto ⟳ 45s</span></h3>
+    <input id="quickSearch" value="${(quickState.q||'').replace(/"/g,'&quot;')}" oninput="setQuickSearch(this.value)" placeholder="🔎 Search a coin in these setups — e.g. SOL, DOGE, BTC" style="width:100%;max-width:340px;padding:8px 12px;margin:3px 0 9px;border-radius:9px;border:1px solid var(--line);background:var(--panel2);color:var(--txt);font-family:var(--mono)">
     <div class="sub" style="margin:2px 0">Timeframe:</div>
     <div style="display:flex;gap:5px;flex-wrap:wrap;margin:3px 0 7px">${tfTabs}</div>
     <div style="display:flex;gap:5px;flex-wrap:wrap;margin:0 0 9px">${sideTabs}</div>
@@ -901,11 +909,14 @@ function renderQuickShell(){
 function renderQuickList(){
   const el=document.getElementById('quickList'); if(!el)return;
   const d=quickState.data[quickState.tf];
+  updateQuickMeta();
   if(quickState.loading&&!d){el.innerHTML='<div class="sub" style="padding:14px">⏳ Scanning '+quickState.tf+' for quick setups…</div>';return;}
   if(!d){el.innerHTML='<div class="sub" style="padding:14px">—</div>';return;}
   if(d.err){el.innerHTML='<div class="sub" style="padding:14px;color:var(--sell)">Couldn’t load '+quickState.tf+': '+d.err+'</div>';return;}
-  const list=(quickState.side==='long'?d.longs:d.shorts)||[];
-  if(!list.length){el.innerHTML='<div class="empty">No quick '+quickState.side+' setups on '+quickState.tf+' right now — try another timeframe.</div>';return;}
+  let list=(quickState.side==='long'?d.longs:d.shorts)||[];
+  const q=(quickState.q||'').trim().toUpperCase();
+  if(q) list=list.filter(x=>((x.sym||'')+' '+(x.name||'')+' '+(x.tk||'')).toUpperCase().includes(q));   // coin search
+  if(!list.length){el.innerHTML='<div class="empty">'+(q?'No quick '+quickState.side+' setups match “'+quickState.q+'” on '+quickState.tf+' — clear the search or try another timeframe/side.':'No quick '+quickState.side+' setups on '+quickState.tf+' right now — try another timeframe.')+'</div>';return;}
   const sorted=list.slice().sort((a,b)=>((b.conf.pct||0)-(a.conf.pct||0))||(b.rr-a.rr));
   el.innerHTML='<div class="cards">'+sorted.map(quickCard).join('')+'</div>';
 }
@@ -915,7 +926,7 @@ function quickCard(q){
   const verb=q.reverse?'SHORT INTO DIP':(isBuy?(q.kind==='buynow'||q.kind==='buybreak'?'BUY NOW':'BUY DIP'):(q.kind==='sellnow'||q.kind==='sellbreak'?'SHORT NOW':'SHORT BOUNCE'));
   const tag=q.regime==='correction'?'<span style="color:#f87171">₿ fade</span>':q.reverse?'<span style="color:#f59e0b">↔ reverse</span>':'<span style="color:#fbbf24">⚡ scalp</span>';
   const zone=q.reverse?('@ '+qf(q.live)):('<b>'+qf(q.entryLo)+'–'+qf(q.entryHi)+'</b>');
-  return `<div class="tc ${isBuy?'':'sellcard'}" style="cursor:default">
+  return `<div class="tc open ${isBuy?'':'sellcard'}" style="cursor:default">
     <div class="hd" style="cursor:default"><div class="l"><div class="name">${q.name}</div>
       <div class="sub">${q.tk?q.tk+' · ':''}${q.sym} · ${tag} · ${quickState.tf}</div></div>
       <div class="r"><span class="verdict ${isBuy?'BUY':'SELL'}">${isBuy?'LONG':'SHORT'}</span>
