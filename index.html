@@ -455,7 +455,7 @@ async function paperControl(a){try{const s=await(await fetch('/api/paper/control
 function paperGo(){paperControl('start');}
 function paperHalt(){paperControl('stop');}
 function paperReset(){if(confirm('Reset the paper account and clear its history?'))paperControl('reset');}
-async function paperSaveConfig(){const g=id=>document.getElementById(id),c={capital:+g('ppCap').value,riskPct:+g('ppRisk').value,dailyTargetPct:+g('ppTarget').value,maxLev:+g('ppLev').value,allowShort:g('ppShort').checked,allowPending:g('ppPend').checked,allowAggressive:(g('ppAggr')||{}).checked};try{const s=await(await fetch('/api/paper/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(c)})).json();renderPaper(s);}catch(e){}}
+async function paperSaveConfig(){const g=id=>document.getElementById(id),c={capital:+g('ppCap').value,riskPct:+g('ppRisk').value,dailyTargetPct:+g('ppTarget').value,maxLev:+g('ppLev').value,allowShort:g('ppShort').checked,allowPending:g('ppPend').checked,allowAggressive:(g('ppAggr')||{}).checked,scalpOnly:(g('ppScalp')||{}).checked,minConfPct:+g('ppConf').value};try{const s=await(await fetch('/api/paper/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(c)})).json();renderPaper(s);}catch(e){}}
 function paperCSV(){const s=window.__paper;if(!s||!s.closed||!s.closed.length){toast('No closed trades to export yet');return;}
   const rows=[['coin','side','regime','lev','exit','pnl','pnlPctOnMargin','heldMin','closedAt']].concat(s.closed.map(t=>[t.name||t.sym,t.side,t.regime||'trend',t.lev||1,t.reason,(+t.pnl).toFixed(2),(+t.pnlPct).toFixed(2),t.holdMin,new Date(t.closedAt).toISOString()]));
   const csv=rows.map(r=>r.join(',')).join('\r\n');
@@ -502,6 +502,8 @@ function renderPaper(s){
       <label class="rl"><input type="checkbox" id="ppShort" ${s.config.allowShort?'checked':''}> Shorts</label>
       <label class="rl"><input type="checkbox" id="ppPend" ${s.config.allowPending?'checked':''}> Dip limits</label>
       <label class="rl" title="ON: the strongest setups (multi-TF confirmed + score ≥25) enter at market instead of waiting for the exact dip — but ONLY if buying now still leaves ≥1:1 reward:risk. More fills, slightly worse entries, never chases. OFF: patient limit entries only (best prices).">🔥<input type="checkbox" id="ppAggr" ${s.config.allowAggressive?'checked':''}> Aggressive fills</label>
+      <label class="rl" title="Only take quick/scalp setups (range + BTC-weak correction) — never trend or breakout trades.">⚡<input type="checkbox" id="ppScalp" ${s.config.scalpOnly?'checked':''}> Scalp only</label>
+      <label class="rl" title="Minimum setup confidence to trade. 68 = High. Higher = fewer, better trades. Lower it if the bot goes too quiet.">Min conf %<input id="ppConf" value="${s.config.minConfPct!=null?s.config.minConfPct:68}" style="width:44px"></label>
       <button class="btn" onclick="paperSaveConfig()">Save</button>
       ${s.running?'<button class="btn" onclick="paperHalt()">■ Stop</button>':'<button class="btn go" onclick="paperGo()">▶ Start</button>'}
       <button class="btn" onclick="paperReset()">Reset</button></div>
@@ -735,6 +737,7 @@ function renderBacktest(d){
       <div class="verdict">
         <div class="vtxt" style="color:${col}">${a.btVerdict}</div>
         <div class="vsum">Strategy averaged <b class="${a.avgTotalRet>=0?'up':'down'}">${a.avgTotalRet>=0?'+':''}${a.avgTotalRet.toFixed(1)}%</b> vs just holding <b class="${a.avgBuyHold>=0?'up':'down'}">${a.avgBuyHold>=0?'+':''}${a.avgBuyHold.toFixed(1)}%</b> · won <b>${a.winRate.toFixed(0)}%</b> of <b>${a.totalTrades}</b> trades.</div>
+        ${a.longTrades!=null?`<div class="vsum" style="margin-top:4px">🟢 Longs: <b>${a.longWinRate.toFixed(0)}%</b> win of <b>${a.longTrades}</b> &nbsp;·&nbsp; 🔴 Shorts: <b>${a.shortWinRate.toFixed(0)}%</b> win of <b>${a.shortTrades}</b> ${a.shortTrades<10?'<span style="color:var(--hold)">(few shorts — rough)</span>':(a.shortWinRate>=a.longWinRate?'<span style="color:var(--buy)">— shorts holding up</span>':'<span style="color:var(--sell)">— shorts weaker than longs</span>')}</div>`:''}
         <div class="vsum" style="color:var(--muted)">Higher = better. Beat buy-and-hold on ${beat}% of assets. ${a.lowSample?'⚠ Small sample — treat as rough.':''} Gross of fees/taxes.</div>
       </div>
     </div>
@@ -926,9 +929,9 @@ function quickCard(q){
   const verb=q.reverse?'SHORT INTO DIP':(isBuy?(q.kind==='buynow'||q.kind==='buybreak'?'BUY NOW':'BUY DIP'):(q.kind==='sellnow'||q.kind==='sellbreak'?'SHORT NOW':'SHORT BOUNCE'));
   const tag=q.regime==='correction'?'<span style="color:#f87171">₿ fade</span>':q.reverse?'<span style="color:#f59e0b">↔ reverse</span>':'<span style="color:#fbbf24">⚡ scalp</span>';
   const zone=q.reverse?('@ '+qf(q.live)):('<b>'+qf(q.entryLo)+'–'+qf(q.entryHi)+'</b>');
-  return `<div class="tc open ${isBuy?'':'sellcard'}" style="cursor:default">
-    <div class="hd" style="cursor:default"><div class="l"><div class="name">${q.name}</div>
-      <div class="sub">${q.tk?q.tk+' · ':''}${q.sym} · ${tag} · ${quickState.tf}</div></div>
+  return `<div class="tc ${isBuy?'':'sellcard'}">
+    <div class="hd" onclick="this.parentNode.classList.toggle('open')" style="cursor:pointer"><div class="l"><div class="name">${q.name}</div>
+      <div class="sub">${q.tk?q.tk+' · ':''}${q.sym} · ${tag} · ${quickState.tf} · <span style="color:var(--accent2)">▾ chart &amp; targets</span></div></div>
       <div class="r"><span class="verdict ${isBuy?'BUY':'SELL'}">${isBuy?'LONG':'SHORT'}</span>
         <div class="btmini" style="border-color:${confCol};color:${confCol};margin-top:6px" title="Setup confidence — quality gauge, not a win probability">◆ ${q.conf.label}${q.conf.pct!=null?' '+q.conf.pct+'%':''}</div></div></div>
     <div class="bd">

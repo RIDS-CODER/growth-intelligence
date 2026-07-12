@@ -637,61 +637,72 @@ const costFor=asset=>asset.cls==='Crypto'?BT_COST_CR:BT_COST_EQ;
 // Net of trading costs. Long-only, lookahead-free.
 function backtestSeries(close,high,low,tf,cost,opts){
   cost = cost==null ? BT_COST_EQ : cost;
-  opts = opts||{}; const useAdx = opts.adx!==false, useConfirm = opts.confirm!==false, useVol = opts.volume!==false && !!opts.vol;   // default ON = matches live; A/B toggles
+  opts = opts||{}; const useAdx = opts.adx!==false, useConfirm = opts.confirm!==false, useVol = opts.volume!==false && !!opts.vol, useShorts = opts.shorts!==false;   // default ON = matches live; A/B toggles
   const {scores,atr}=scoreSeriesArr(close,high,low);
   const thr=tf==='daily'?20:12;
   const P=TYPE[tf==='daily'?'Swing':'Intraday'], stopMult=P.stopMult, T=P.t;   // T = [t1,t2,t3] R-multiples
   const ema20=IND.ema(close,20), sma50=IND.sma(close,50), s200b=IND.sma(close,200), bb=IND.bollinger(close), adxArr=IND.adx(close,high,low,14), volMA=useVol?IND.sma(opts.vol,20):null, n=close.length;
-  const lo10=new Array(n).fill(null), prevHi20=new Array(n).fill(null);
+  const lo10=new Array(n).fill(null), hi10=new Array(n).fill(null), prevHi20=new Array(n).fill(null), prevLo20=new Array(n).fill(null);
   for(let i=0;i<n;i++){
-    if(i>=9){let m=Infinity;for(let j=i-9;j<=i;j++)m=Math.min(m,low[j]);lo10[i]=m;}
-    if(i>=20){let m=-Infinity;for(let j=i-20;j<i;j++)m=Math.max(m,high[j]);prevHi20[i]=m;}
+    if(i>=9){let mn=Infinity,mx=-Infinity;for(let j=i-9;j<=i;j++){mn=Math.min(mn,low[j]);mx=Math.max(mx,high[j]);}lo10[i]=mn;hi10[i]=mx;}
+    if(i>=20){let mx=-Infinity,mn=Infinity;for(let j=i-20;j<i;j++){mx=Math.max(mx,high[j]);mn=Math.min(mn,low[j]);}prevHi20[i]=mx;prevLo20[i]=mn;}
   }
-  let pos=0,entry=0,R=0,stop=0,t1=0,t2=0,t3=0,rem=0,taken=0,gross=0,entryIdx=-1,pending=null;
-  const rets=[]; let eq=1,peak=1,mdd=0; const FILLWIN=6;
-  const enter=(px,r,idx,Tset)=>{const TT=Tset||T;entry=px;R=r;stop=px-r;t1=px+TT[0]*r;t2=px+TT[1]*r;t3=px+TT[2]*r;rem=1;taken=0;gross=0;pos=1;entryIdx=idx;};
-  const finish=()=>{const net=gross-2*cost;rets.push(net);eq*=(1+net);peak=Math.max(peak,eq);mdd=Math.min(mdd,eq/peak-1);pos=0;gross=0;rem=0;taken=0;};
+  let pos=0,dir=1,entry=0,R=0,stop=0,t1=0,t2=0,t3=0,rem=0,taken=0,gross=0,entryIdx=-1,pending=null;
+  const rets=[],longR=[],shortR=[]; let eq=1,peak=1,mdd=0; const FILLWIN=6;
+  // direction-aware: dir=+1 long (stop below, targets above), dir=-1 short (stop above, targets below)
+  const enter=(px,r,idx,Tset,d)=>{const TT=Tset||T;dir=d||1;entry=px;R=r;stop=px-dir*r;t1=px+dir*TT[0]*r;t2=px+dir*TT[1]*r;t3=px+dir*TT[2]*r;rem=1;taken=0;gross=0;pos=dir;entryIdx=idx;};
+  const finish=()=>{const net=gross-2*cost;rets.push(net);(dir>0?longR:shortR).push(net);eq*=(1+net);peak=Math.max(peak,eq);mdd=Math.min(mdd,eq/peak-1);pos=0;gross=0;rem=0;taken=0;};
   for(let i=50;i<n;i++){
-    if(pos===1 && i>entryIdx){
-      if(low[i]<=stop && rem>0){ gross+=rem*(stop/entry-1); rem=0; finish(); }   // stop the remainder (conservative: checked first)
+    if(pos!==0 && i>entryIdx){
+      const rr = px => dir*(px/entry-1);                                    // realized fraction of a unit exited at px (works both ways)
+      const stopHit = dir>0 ? low[i]<=stop : high[i]>=stop;
+      if(stopHit && rem>0){ gross+=rem*rr(stop); rem=0; finish(); }          // stop the remainder (conservative: checked first)
       else{
-        if(rem>0 && taken<1 && high[i]>=t1){ gross+=(1/3)*(t1/entry-1); rem-=1/3; taken=1; stop=entry; }  // → breakeven
-        if(rem>0 && taken<2 && high[i]>=t2){ gross+=(1/3)*(t2/entry-1); rem-=1/3; taken=2; stop=t1; }     // → lock T1
-        if(rem>0 && taken<3 && high[i]>=t3){ gross+=rem*(t3/entry-1); rem=0; finish(); }                  // final third at T3
-        else if(pos===1 && rem>0 && scores[i]<=-thr){ gross+=rem*(close[i]/entry-1); rem=0; finish(); }   // signal died → exit rest
+        const hit = t => dir>0 ? high[i]>=t : low[i]<=t;
+        if(rem>0 && taken<1 && hit(t1)){ gross+=(1/3)*rr(t1); rem-=1/3; taken=1; stop=entry; }  // → breakeven
+        if(rem>0 && taken<2 && hit(t2)){ gross+=(1/3)*rr(t2); rem-=1/3; taken=2; stop=t1; }     // → lock T1
+        if(rem>0 && taken<3 && hit(t3)){ gross+=rem*rr(t3); rem=0; finish(); }                  // final third at T3
+        else if(pos!==0 && rem>0 && (dir>0?scores[i]<=-thr:scores[i]>=thr)){ gross+=rem*rr(close[i]); rem=0; finish(); }   // signal died → exit rest
       }
     }
     if(pos===0 && pending && i>pending.sig){
-      // fill on the dip; with confirmation ON, require the bar to CLOSE back above the limit (bounce held, not a blow-through)
-      if(low[i]<=pending.limit && (!useConfirm || close[i]>pending.limit)){ enter(pending.limit,pending.R,i,pending.T); pending=null; }
-      else if(i>=pending.exp) pending=null;   // the dip never came / never confirmed → no trade
+      const pd=pending.dir||1;
+      // LONG fills on a dip to support (close back ABOVE the limit = bounce held); SHORT fills on a rally to resistance (close back BELOW = rejection held)
+      const reached = pd>0 ? (low[i]<=pending.limit && (!useConfirm || close[i]>pending.limit))
+                           : (high[i]>=pending.limit && (!useConfirm || close[i]<pending.limit));
+      if(reached){ enter(pending.limit,pending.R,i,pending.T,pd); pending=null; }
+      else if(i>=pending.exp) pending=null;   // the level never came / never confirmed → no trade
     }
-    if(pos===0 && !pending && scores[i]>=thr && atr[i]>0){
-      const r=stopMult*atr[i], brk=prevHi20[i]!=null && close[i]>=prevHi20[i];
+    if(pos===0 && !pending && atr[i]>0){
       const trendRef = s200b[i]!=null ? s200b[i] : sma50[i];   // fall back to the 50-line until 200 bars exist
-      const regimeUp = trendRef==null || close[i]>trendRef;
-      const trending = !useAdx || adxArr[i]==null || adxArr[i]>=20;   // chop filter
-      const volOkBrk = !useVol || !volMA || volMA[i]<=0 || (opts.vol[i]/volMA[i])>=1.2;   // breakout needs real volume
-      if(brk){ if(volOkBrk) enter(close[i],r,i); }   // breakout → market ONLY on above-average volume (else skip the fakeout)
-      else if(regimeUp && trending){                 // buy the dip ONLY in an uptrend & real trend
-        const scalp = tf!=='daily' && (adxArr[i]==null || adxArr[i] < ADX_SCALP);   // choppy/range → scalp geometry (mirrors buildSetup)
-        const rr = (scalp?TYPE.Scalp.stopMult:stopMult)*atr[i], Tset = scalp?TYPE.Scalp.t:T;
-        const sup=nearestLevel(1,close[i],atr[i],[lo10[i],bb.lower[i],ema20[i],sma50[i]]);
-        pending={limit:sup,R:rr,sig:i,exp:i+FILLWIN,T:Tset};
+      const trending = !useAdx || adxArr[i]==null || adxArr[i]>=20;   // chop filter (both sides)
+      const scalp = tf!=='daily' && (adxArr[i]==null || adxArr[i] < ADX_SCALP);   // choppy/range → scalp geometry (mirrors buildSetup)
+      const rr = (scalp?TYPE.Scalp.stopMult:stopMult)*atr[i], Tset = scalp?TYPE.Scalp.t:T, r=stopMult*atr[i];
+      const volBase = !useVol || !volMA || volMA[i]<=0;   // no volume gate available → treat as OK
+      if(scores[i]>=thr){                                  // ---- LONG side: buy dip in an uptrend / breakout up ----
+        const regimeUp = trendRef==null || close[i]>trendRef, brk = prevHi20[i]!=null && close[i]>=prevHi20[i];
+        if(brk){ if(volBase || (opts.vol[i]/volMA[i])>=1.2) enter(close[i],r,i,null,1); }
+        else if(regimeUp && trending){ const sup=nearestLevel(1,close[i],atr[i],[lo10[i],bb.lower[i],ema20[i],sma50[i]]); pending={limit:sup,R:rr,sig:i,exp:i+FILLWIN,T:Tset,dir:1}; }
+      } else if(useShorts && scores[i]<=-thr){             // ---- SHORT side (mirror): short rally into resistance in a downtrend / breakdown ----
+        const regimeDn = trendRef==null || close[i]<trendRef, brk = prevLo20[i]!=null && close[i]<=prevLo20[i];
+        if(brk){ if(volBase || (opts.vol[i]/volMA[i])>=1.2) enter(close[i],r,i,null,-1); }
+        else if(regimeDn && trending){ const res=nearestLevel(-1,close[i],atr[i],[hi10[i],bb.upper[i],ema20[i],sma50[i]]); pending={limit:res,R:rr,sig:i,exp:i+FILLWIN,T:Tset,dir:-1}; }
       }
     }
   }
-  if(pos===1){ gross+=rem*(close[n-1]/entry-1); rem=0; finish(); }
+  if(pos!==0){ gross+=rem*dir*(close[n-1]/entry-1); rem=0; finish(); }
   const wins=rets.filter(r=>r>0),losses=rets.filter(r=>r<=0);
   const sumW=wins.reduce((a,b)=>a+b,0),sumL=losses.reduce((a,b)=>a+b,0);
   const bh=close[50]>0?close[n-1]/close[50]-1:0;
+  const sideStat=arr=>{const w=arr.filter(x=>x>0).length;return {trades:arr.length,wins:w,winRate:arr.length?w/arr.length*100:0,avgRet:arr.length?arr.reduce((a,b)=>a+b,0)/arr.length*100:0};};
   return {trades:rets.length,wins:wins.length,
     winRate:rets.length?wins.length/rets.length*100:0,
     avgRet:rets.length?(rets.reduce((a,b)=>a+b,0)/rets.length)*100:0,
     avgWin:wins.length?sumW/wins.length*100:0,
     avgLoss:losses.length?sumL/losses.length*100:0,
     profitFactor:sumL<0?sumW/Math.abs(sumL):(sumW>0?99:0),
-    totalRet:(eq-1)*100,maxDD:mdd*100,buyHold:bh*100};
+    totalRet:(eq-1)*100,maxDD:mdd*100,buyHold:bh*100,
+    longs:sideStat(longR), shorts:sideStat(shortR)};   // per-side breakdown so shorts get their own grade
 }
 // one-asset 0–100 backtest grade (same idea as the aggregate score)
 function assetBtScore(b){
@@ -723,9 +734,10 @@ async function backtest(tab,tf){
   const failed=per.filter(x=>x&&x.__err).length;      // couldn't fetch (login/data)
   const ok=withData.filter(x=>x.trades>0);            // produced at least one trade
   const noSignal=withData.length-ok.length;           // valid data but strategy never fired
-  let TT=0,TW=0,sumRet=0,sumBH=0,sumDD=0,pfW=0,pfL=0;
+  let TT=0,TW=0,sumRet=0,sumBH=0,sumDD=0,pfW=0,pfL=0, TLt=0,TLw=0,TSt=0,TSw=0;   // TLt/TLw long trades/wins, TSt/TSw short
   ok.forEach(a=>{TT+=a.trades;TW+=a.wins;sumRet+=a.totalRet;sumBH+=a.buyHold;sumDD+=a.maxDD;
-    const losses=a.trades-a.wins;pfW+=a.avgWin/100*a.wins;pfL+=Math.abs(a.avgLoss/100*losses);});
+    const losses=a.trades-a.wins;pfW+=a.avgWin/100*a.wins;pfL+=Math.abs(a.avgLoss/100*losses);
+    if(a.longs){TLt+=a.longs.trades;TLw+=a.longs.wins;} if(a.shorts){TSt+=a.shorts.trades;TSw+=a.shorts.wins;}});
   const winRate=TT?TW/TT*100:0, avgTotalRet=ok.length?sumRet/ok.length:0, avgBuyHold=ok.length?sumBH/ok.length:0,
         avgMaxDD=ok.length?sumDD/ok.length:0, profitFactor=pfL>0?pfW/pfL:(pfW>0?99:0), beatBuyHold=ok.filter(a=>a.totalRet>a.buyHold).length;
   // ---- one simple 0–100 Backtest Score (like the signal score) ----
@@ -742,7 +754,8 @@ async function backtest(tab,tf){
     : btScore>=40 ? "Mixed — only a marginal edge; paper-trade before risking money"
     : "Weak — it did NOT beat just holding; don't trade this as-is";
   const agg={assets:ok.length,attempted:uni.length,withData:withData.length,noSignal,failed,totalTrades:TT,
-    winRate,avgTotalRet,avgBuyHold,avgMaxDD,profitFactor,beatBuyHold,btScore,btVerdict,lowSample};
+    winRate,avgTotalRet,avgBuyHold,avgMaxDD,profitFactor,beatBuyHold,btScore,btVerdict,lowSample,
+    longTrades:TLt, longWinRate:TLt?TLw/TLt*100:0, shortTrades:TSt, shortWinRate:TSt?TSw/TSt*100:0};   // per-side split
   const out={tab,tf,agg,perAsset:ok.sort((a,b)=>b.totalRet-a.totalRet),ts:Date.now(),demo:DEMO,loggedIn:li};
   if(ok.length)cSet(ck,out);
   return out;
