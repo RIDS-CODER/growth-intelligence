@@ -785,6 +785,8 @@ function btBadge(bt){
   return `<div class="btmini" style="border-color:${c};color:${c}" title="How this name backtested on this timeframe (${bt.trades} trades). Higher = better.">BT ${s}</div>`;
 }
 function mtfChip(m){if(!m||!m.total||m.total<2)return '';const a=m.agree,t=m.total,c=a>=t?'var(--buy)':a>=2?'var(--accent2)':'var(--hold)';return `<div class="btmini" style="border-color:${c};color:${c}" title="Higher-timeframe agreement (${a} of ${t})">MTF ${a}/${t}</div>`;}
+function confBadge(c){if(!c||c.pct==null)return '';const col=c.label==='High'?'var(--buy)':c.label==='Medium'?'var(--hold)':'var(--muted)';return `<div class="btmini" style="border-color:${col};color:${col}" title="Setup confidence (${c.pct}%) — blends signal strength, higher-timeframe agreement and backtest grade. A relative quality gauge, NOT a probability of profit.">◆ ${c.label} ${c.pct}%</div>`;}
+const entryVerb=(k,isBuy)=>({buynow:'buy',buybreak:'buy the break',waitdip:'buy dip',belowsup:'buy',sellnow:'short',sellbreak:'short the break',waitbounce:'short bounce',aboveres:'short'}[k]||(isBuy?'buy':'short'));
 function mtfBadge(m){
   if(!m||!m.total||m.total<2)return '';
   const a=m.agree,t=m.total, cls=a>=t?'good':a>=2?'good':'warn';
@@ -792,8 +794,13 @@ function mtfBadge(m){
   const list=m.frames.map(fr=>fr.tf+(fr.ok?' ✓':' ✕')).join('  ·  ');
   return `<div class="scope ${cls}" title="Same signal checked on higher timeframes (resampled)">${label} <span class="sub" style="opacity:.8">— ${list}</span></div>`;
 }
-function card(r,i,isBuy){const{asset,sig,setup,reasons,dec,action,scope,asof,isIndex,priceTag,series,bt,mtf}=r,f=fmtR(r),open=i<3?'open':'';
+function card(r,i,isBuy){const{asset,sig,setup,reasons,dec,action,scope,asof,isIndex,priceTag,series,bt,mtf,confidence}=r,f=fmtR(r),open=i<3?'open':'';
   const tn=['Target 1','Target 2','Target 3'];
+  const conf=confidence||{pct:null,label:'—'}, confCol=conf.label==='High'?'var(--buy)':conf.label==='Medium'?'#fbbf24':'var(--muted)';
+  const quickStrip=`<div style="margin:7px 0;padding:9px 11px;border-radius:9px;background:${isBuy?'rgba(52,211,153,.09)':'rgba(248,113,113,.09)'};border:1px solid ${isBuy?'rgba(52,211,153,.34)':'rgba(248,113,113,.34)'};font-size:12.5px;line-height:1.55">
+    ⚡ <b>Quick ${isBuy?'long':'short'}</b> — ${entryVerb(action.kind,isBuy)} <b>${f(setup.entryLo)}–${f(setup.entryHi)}</b> → quick target <b>${f(setup.targets[0])}</b> <span style="color:${isBuy?'var(--buy)':'var(--sell)'};font-weight:700">(+${setup.ret[0].toFixed(1)}%)</span> · stop <b>${f(setup.stop)}</b> <span style="color:var(--sell)">(−${setup.riskPct.toFixed(1)}%)</span>
+    <br><span style="color:var(--muted)">runners → T2 ${f(setup.targets[1])} (+${setup.ret[1].toFixed(1)}%) · T3 ${f(setup.targets[2])} (+${setup.ret[2].toFixed(1)}%)</span>
+    &nbsp;·&nbsp; <span style="color:${confCol};font-weight:800" title="Blends signal strength, multi-timeframe agreement and backtest grade — a quality gauge, not a win probability.">Confidence ${conf.label}${conf.pct!=null?' '+conf.pct+'%':''}</span></div>`;
   const tgts=setup.targets.map((t,k)=>`<div class="lv t${k+1}"><div class="k">${tn[k]}</div><div class="v">${f(t)}</div><div class="r">${setup.ret[k]>=0?'+':''}${setup.ret[k].toFixed(1)}%</div></div>`).join('');
   const hz=tfHorizon(timeframe), hzLabel=hz==='short'?'⏱ Short-term':'📆 Long-term';
   const stale=liveStale(r), room=liveRoomR(r);
@@ -802,10 +809,11 @@ function card(r,i,isBuy){const{asset,sig,setup,reasons,dec,action,scope,asof,isI
     <div class="hd" onclick="this.parentNode.classList.toggle('open')">
       <div class="l"><div class="name">${asset.name}</div><div class="sub">${asset.tk?asset.tk+' · ':''}${asset.sym} · ${asset.cls}</div>
         <div class="ttype">${setup.type} · score ${sig.score>0?'+':''}${sig.score}</div><span class="hz ${hz}">${hzLabel}</span><div class="asof">📡 ${asof||'—'} · ${priceTag}</div></div>
-      <div class="r"><span class="verdict ${sig.verdict}">${sig.verdict}</span><div class="toplineRet" style="color:${isBuy?'var(--buy)':'var(--sell)'};margin-top:6px">${setup.ret[0]>=0?'+':''}${setup.ret[0].toFixed(1)}%→T1</div>${mtfChip(mtf)}${btBadge(bt)}</div>
+      <div class="r"><span class="verdict ${sig.verdict}">${sig.verdict}</span><div class="toplineRet" style="color:${isBuy?'var(--buy)':'var(--sell)'};margin-top:6px">${setup.ret[0]>=0?'+':''}${setup.ret[0].toFixed(1)}%→T1</div>${confBadge(conf)}${mtfChip(mtf)}${btBadge(bt)}</div>
     </div>
     <div class="bd">
       <div class="action ${action.cls}">${actionText(action,r)}<span class="since">${action.since||''}</span></div>
+      ${quickStrip}
       ${setup.note?`<div style="margin:6px 0;padding:7px 10px;border-radius:8px;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.42);color:#fbbf24;font-size:12px;font-weight:600;line-height:1.35">⚡ SMALL TARGETS — ${setup.note}</div>`:''}
       ${scope?`<div class="scope ${scope.good?'good':'warn'}">${scope.txt}</div>`:''}
       ${mtfBadge(mtf)}

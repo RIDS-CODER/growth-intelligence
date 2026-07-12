@@ -190,6 +190,19 @@ function actionNow(sig,setup,since,fmt){
     : `⏳ WAIT for the bounce — sell/short into ₹${d(lo)}–${d(hi)} (resistance, ~${gap}% above now)`);
   return R('exit','aboveres',`⚠ Above resistance — extended; wait for a pullback into the zone`);
 }
+// Setup CONFIDENCE — a 0–100 quality gauge (NOT a probability of profit). Blends how strong the signal is,
+// how many higher timeframes agree, and how the setup graded historically; small bonus for a BTC-down macro
+// (extra confirmation for a correction short) or a breakout on real volume.
+function confidenceOf(sig,mtf,bt,setup){
+  const conv  = Math.min(1, Math.abs(sig.score)/35);                 // signal strength (scores rarely exceed ~35)
+  const agree = (mtf && mtf.total) ? mtf.agree/mtf.total : 0;        // multi-timeframe agreement
+  const grade = (bt && bt.score!=null) ? bt.score/100 : 0.4;        // historical backtest grade (neutral 0.4 if none)
+  let pct = 100*(0.45*conv + 0.30*agree + 0.25*grade);
+  if(setup && setup.regime==='correction') pct += 6;                 // BTC-down macro = extra confirmation for the short
+  if((sig.brkUp||sig.brkDn) && sig.volRatio!=null && sig.volRatio>=1.2) pct += 4;   // breakout on above-average volume
+  pct = Math.max(3, Math.min(97, Math.round(pct)));
+  return { pct, label: pct>=68?'High' : pct>=45?'Medium' : 'Low' };
+}
 function buildReasons(sig,setup,marketOpen,isCrypto){
   const dir=setup.dir,f=v=>v==null?'n/a':(+v).toFixed(2),forR=[],against=[],inval=[];
   sig.components.filter(c=>dir>0?c.tag==='BUY':c.tag==='SELL').forEach(c=>forR.push(`${c.name}: ${c.detail.toLowerCase()} (${c.raw??c.tag})`));
@@ -587,7 +600,8 @@ function processAsset(asset,data,tf){
   const asofMs=data.mtime||(data.times?data.times[data.times.length-1]:Date.now());
   const bt = cl.length>=120 ? assetBtScore(backtestSeries(cl,hi,lo,tf,costFor(asset),{vol:vl})) : null;   // net-of-cost historical grade (same data + volume)
   const mtf = multiTfConfirm(data,tf,sig.verdict);   // higher-timeframe agreement (resampled, no extra fetch)
-  return {asset,sig,setup,since,action,reasons,scope,bt,mtf,dec,isIndex,tf,asof:fmtTime(asofMs),
+  const confidence = confidenceOf(sig,mtf,bt,setup);
+  return {asset,sig,setup,since,action,reasons,scope,bt,mtf,confidence,dec,isIndex,tf,asof:fmtTime(asofMs),
     priceTag:asset.src==='cg'?(cryptoMode==='coindcx'?'live · CoinDCX ₹':'live · global ₹'):(marketOpen()?'LIVE (broker)':'prev close'),series:data.close.slice(-80)};
 }
 /* ============================================================
@@ -930,7 +944,7 @@ if(require.main===module){
   // Paper-bot control loop — one simulated iteration each minute (only acts when you've pressed Start).
   setInterval(()=>{ paper.tick().catch(()=>{}); }, 60000);
 }
-module.exports={IND,computeSignal,buildSetup,buildReasons,signalSince,actionNow,parseCandles,authURL,scan,universeFor,fmtTime,
+module.exports={IND,computeSignal,buildSetup,buildReasons,confidenceOf,signalSince,actionNow,parseCandles,authURL,scan,universeFor,fmtTime,
   loadBinance,loadCoinDCX,loadCrypto,ensureCryptoUniverse,usdInr,resampleSeries,tfCfg,getCRYPTO:()=>CRYPTO,getMode:()=>cryptoMode,
   backtestSeries,scoreSeriesArr,backtest,processAsset,blendResearch,assetBtScore,cdxLiveInr,cdxUsdtInr,
   btcStateFromSeries,__setBtc:(s)=>{BTC_STATE=s;},
