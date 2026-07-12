@@ -57,7 +57,7 @@ const IND={
       else {adxv=(adxv*(p-1)+dx[i])/p; out[i]=adxv;}}
     return out;},
 };
-function computeSignal(close,high,low,thr,vol){
+function computeSignal(close,high,low,thr,vol,ctx){
   thr=thr||20;
   const n=close.length-1,price=close[n],out=[];
   const add=(name,detail,score,weight,raw)=>out.push({name,detail,score,weight,raw,tag:score>0.15?'BUY':score<-0.15?'SELL':'HOLD'});
@@ -95,7 +95,12 @@ function computeSignal(close,high,low,thr,vol){
   const volMA = vol ? IND.sma(vol,20) : null;
   const volRatio = (volMA && volMA[n]>0 && vol && vol[n]!=null) ? vol[n]/volMA[n] : null;
   const volWeak = volRatio!=null && volRatio < 1.2;       // breakout needs ≥1.2× average volume; thin = fakeout
-  let verdict=score>=thr?'BUY':score<=-thr?'SELL':'HOLD';
+  // When Bitcoin is risk-off, alts tend to follow it DOWN — the macro is a tailwind for shorts. So we lower the SELL bar
+  // (~0.7×) to surface more quick correction-shorts, while EVERY short quality gate below still applies (downtrend, real
+  // trend, confirmed down-close) so we still never short into strength or chop. Longs are untouched here (blocked elsewhere).
+  const btcRiskOff = !!(ctx && ctx.btcRiskOff);
+  const sellThr = btcRiskOff ? Math.max(8, Math.round(thr*0.7)) : thr;
+  let verdict=score>=thr?'BUY':score<=-sellThr?'SELL':'HOLD';
   // TRADER GATES — buy the dip only in an uptrend, in a real trend, once the bounce confirms. Breakouts exempt (momentum).
   if(verdict==='BUY'  && !brkUp && !regimeUp) verdict='HOLD';                              // don't catch a falling knife
   if(verdict==='SELL' && !brkDn &&  regimeUp) verdict='HOLD';                              // don't short into strength
@@ -105,7 +110,8 @@ function computeSignal(close,high,low,thr,vol){
   if(verdict==='SELL' && !brkDn && confirmed && !turnDn) verdict='HOLD';
   if(verdict==='BUY'  && brkUp && volWeak) verdict='HOLD';                                 // breakout on thin volume = fakeout
   if(verdict==='SELL' && brkDn && volWeak) verdict='HOLD';
-  return {score,verdict,components:out,price,rsiV:rsi[n],s50:s50[n],s200:s200[n],atr:IND.atr(close,high,low)[n],hi20,lo20,regimeUp,turnUp,adx:adxV,volRatio,brkUp:price>=hi20,brkDn:price<=lo20,
+  const btcWeakShort = btcRiskOff && verdict==='SELL';                                     // a quick short to fade a BTC-led correction
+  return {score,verdict,btcWeakShort,components:out,price,rsiV:rsi[n],s50:s50[n],s200:s200[n],atr:IND.atr(close,high,low)[n],hi20,lo20,regimeUp,turnUp,adx:adxV,volRatio,brkUp:price>=hi20,brkDn:price<=lo20,
     bbL:bb.lower[n],bbU:bb.upper[n],ema20:IND.ema(close,20)[n],lo10:IND.lowest(low,10),hi10:IND.highest(high,10)};
 }
 // nearest support below price (for buy-the-dip entries) / resistance above (for shorts)
@@ -122,15 +128,25 @@ function signalSince(close,high,low,times){
   for(let i=n;i>=1;i--){if(v(i)!==cur){since=i+1;break;}if(i===1)since=1;}
   return {cur,sinceTime:times?times[Math.min(since,times.length-1)]:null,barsAgo:n-since};
 }
-const TYPE={Intraday:{stopMult:1.0,t:[1.0,1.8,2.6],hold:"Same session"},Swing:{stopMult:1.5,t:[1.5,2.8,4.5],hold:"3–15 trading days"},Breakout:{stopMult:1.3,t:[2.0,3.5,6.0],hold:"1–6 weeks"}};
+const TYPE={Intraday:{stopMult:1.0,t:[1.0,1.8,2.6],hold:"Same session"},Scalp:{stopMult:0.7,t:[0.7,1.2,1.7],hold:"Minutes–a few hours (range)"},Swing:{stopMult:1.5,t:[1.5,2.8,4.5],hold:"3–15 trading days"},Breakout:{stopMult:1.3,t:[2.0,3.5,6.0],hold:"1–6 weeks"}};
+const ADX_SCALP=26;   // pullback with ADX below this = choppy/range → scalp small & tight, don't set trend-width targets
 function buildSetup(sig,tf){
   const dir=sig.verdict==='SELL'?-1:1;
-  let type;
-  if(tf==='intraday')type=((sig.verdict==='BUY'&&sig.brkUp)||(sig.verdict==='SELL'&&sig.brkDn))?'Breakout':'Intraday';
-  else type=(sig.verdict==='BUY'&&sig.brkUp)||(sig.verdict==='SELL'&&sig.brkDn)?'Breakout':'Swing';
-  const P=TYPE[type],atr=sig.atr,price=sig.price;
+  // entryType decides WHERE we enter: Breakout = on the break near current price; else = pullback into support/resistance.
+  let entryType;
+  if(tf==='intraday')entryType=((sig.verdict==='BUY'&&sig.brkUp)||(sig.verdict==='SELL'&&sig.brkDn))?'Breakout':'Intraday';
+  else entryType=(sig.verdict==='BUY'&&sig.brkUp)||(sig.verdict==='SELL'&&sig.brkDn)?'Breakout':'Swing';
+  // GEOMETRY (stop/targets) is decided separately, so it can be quick-SCALP even on a breakout entry:
+  //  • a BTC-led correction short → always scalp (bank the correction fast, don't ride it), even on a breakdown;
+  //  • an intraday pullback while trend strength is weak (ADX < 26) = the coin is oscillating, not trending → scalp.
+  // Strong trends (ADX ≥ 26) keep the wider targets so winners can run.
+  const isBreak = entryType==='Breakout';
+  const corrShort = !!sig.btcWeakShort && dir<0;
+  const scalp = corrShort || (entryType==='Intraday' && (sig.adx==null || sig.adx < ADX_SCALP));
+  const type = (scalp && !isBreak) ? 'Scalp' : entryType;   // label/entry-flag (breakout entries keep 'Breakout' for actionNow)
+  const P=TYPE[scalp?'Scalp':entryType],atr=sig.atr,price=sig.price;   // scalp geometry when scalp, else the entry type's
   let eLo,eHi,anchor;
-  if(type==='Breakout'){
+  if(isBreak){
     // momentum: enter on the break, near current price
     eLo=price;eHi=price+dir*0.45*atr;if(eLo>eHi){const t=eLo;eLo=eHi;eHi=t;}anchor=(eLo+eHi)/2;
   }else{
@@ -148,7 +164,9 @@ function buildSetup(sig,tf){
   const cap = volPct>4 ? 3 : volPct>2 ? 4 : 5;               // more volatile → lower ceiling
   const suggestedLev = Math.max(1, Math.min(cap, Math.floor(15/Math.max(riskPct,0.1))));
   return {type,hold:P.hold,dir,entryLo:eLo,entryHi:eHi,entry,stop,targets,ret,rrr:P.t[0],atr,
-    riskPct,entryGapPct:gap,support:dir>0?anchor:null,resistance:dir<0?anchor:null,suggestedLev};
+    riskPct,entryGapPct:gap,support:dir>0?anchor:null,resistance:dir<0?anchor:null,suggestedLev,
+    regime: corrShort?'correction':(scalp?'range':(isBreak?'breakout':'trend')),
+    note: corrShort?'₿ Bitcoin is weak — QUICK SHORT to fade the correction: small targets, tight stop, bank fast. Don’t hold for a trend.':(scalp?'Small targets — coin is ranging/choppy (weak trend), so scalp the swing and bank quick with a tight stop. Don’t hold for a big move.':null)};
 }
 function actionNow(sig,setup,since,fmt){
   const dir=setup.dir,p=sig.price,t=fmt(since.sinceTime),ago=since.barsAgo;
@@ -554,9 +572,10 @@ function processAsset(asset,data,tf){
   // doesn't wobble every minute — it only changes when a new candle closes.
   const cl=data.close.slice(0,-1),hi=data.high.slice(0,-1),lo=data.low.slice(0,-1),tm=data.times?data.times.slice(0,-1):null;
   const vl=data.vol&&data.vol.length===data.close.length?data.vol.slice(0,-1):null;   // closed-bar volume (aligned to cl)
-  const sig=computeSignal(cl,hi,lo,thr,vl);
-  // BTC regime filter — pause alt LONGS while Bitcoin is risk-off (they tend to follow BTC down). Shorts & BTC itself unaffected.
-  if(asset.src==='cg' && asset.tk!=='BTC' && BTC_STATE && BTC_STATE.tf===tf && !BTC_STATE.bull && sig.verdict==='BUY'){ sig.verdict='HOLD'; sig.btcBlocked=true; }
+  // Is Bitcoin risk-off? Then pause alt LONGS (they follow BTC down) AND lean into quick shorts to fade the correction.
+  const btcRiskOff = asset.src==='cg' && asset.tk!=='BTC' && BTC_STATE && BTC_STATE.tf===tf && !BTC_STATE.bull;
+  const sig=computeSignal(cl,hi,lo,thr,vl,{btcRiskOff});
+  if(btcRiskOff && sig.verdict==='BUY'){ sig.verdict='HOLD'; sig.btcBlocked=true; }   // no alt-longs while BTC is weak
   const setup=buildSetup(sig,tf==='daily'?'daily':'intraday');   // entry/stop/targets anchored to the closed bar (stable)
   sig.closedPrice=sig.price; sig.price=live;                     // now use LIVE price for the action + the card's Current Price
   const since=signalSince(cl,hi,lo,tm);
@@ -615,7 +634,7 @@ function backtestSeries(close,high,low,tf,cost,opts){
   }
   let pos=0,entry=0,R=0,stop=0,t1=0,t2=0,t3=0,rem=0,taken=0,gross=0,entryIdx=-1,pending=null;
   const rets=[]; let eq=1,peak=1,mdd=0; const FILLWIN=6;
-  const enter=(px,r,idx)=>{entry=px;R=r;stop=px-r;t1=px+T[0]*r;t2=px+T[1]*r;t3=px+T[2]*r;rem=1;taken=0;gross=0;pos=1;entryIdx=idx;};
+  const enter=(px,r,idx,Tset)=>{const TT=Tset||T;entry=px;R=r;stop=px-r;t1=px+TT[0]*r;t2=px+TT[1]*r;t3=px+TT[2]*r;rem=1;taken=0;gross=0;pos=1;entryIdx=idx;};
   const finish=()=>{const net=gross-2*cost;rets.push(net);eq*=(1+net);peak=Math.max(peak,eq);mdd=Math.min(mdd,eq/peak-1);pos=0;gross=0;rem=0;taken=0;};
   for(let i=50;i<n;i++){
     if(pos===1 && i>entryIdx){
@@ -629,7 +648,7 @@ function backtestSeries(close,high,low,tf,cost,opts){
     }
     if(pos===0 && pending && i>pending.sig){
       // fill on the dip; with confirmation ON, require the bar to CLOSE back above the limit (bounce held, not a blow-through)
-      if(low[i]<=pending.limit && (!useConfirm || close[i]>pending.limit)){ enter(pending.limit,pending.R,i); pending=null; }
+      if(low[i]<=pending.limit && (!useConfirm || close[i]>pending.limit)){ enter(pending.limit,pending.R,i,pending.T); pending=null; }
       else if(i>=pending.exp) pending=null;   // the dip never came / never confirmed → no trade
     }
     if(pos===0 && !pending && scores[i]>=thr && atr[i]>0){
@@ -639,7 +658,12 @@ function backtestSeries(close,high,low,tf,cost,opts){
       const trending = !useAdx || adxArr[i]==null || adxArr[i]>=20;   // chop filter
       const volOkBrk = !useVol || !volMA || volMA[i]<=0 || (opts.vol[i]/volMA[i])>=1.2;   // breakout needs real volume
       if(brk){ if(volOkBrk) enter(close[i],r,i); }   // breakout → market ONLY on above-average volume (else skip the fakeout)
-      else if(regimeUp && trending){ const sup=nearestLevel(1,close[i],atr[i],[lo10[i],bb.lower[i],ema20[i],sma50[i]]); pending={limit:sup,R:r,sig:i,exp:i+FILLWIN}; }  // buy the dip ONLY in an uptrend & real trend
+      else if(regimeUp && trending){                 // buy the dip ONLY in an uptrend & real trend
+        const scalp = tf!=='daily' && (adxArr[i]==null || adxArr[i] < ADX_SCALP);   // choppy/range → scalp geometry (mirrors buildSetup)
+        const rr = (scalp?TYPE.Scalp.stopMult:stopMult)*atr[i], Tset = scalp?TYPE.Scalp.t:T;
+        const sup=nearestLevel(1,close[i],atr[i],[lo10[i],bb.lower[i],ema20[i],sma50[i]]);
+        pending={limit:sup,R:rr,sig:i,exp:i+FILLWIN,T:Tset};
+      }
     }
   }
   if(pos===1){ gross+=rem*(close[n-1]/entry-1); rem=0; finish(); }

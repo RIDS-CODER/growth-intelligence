@@ -17,6 +17,8 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
   const TF_MIN = {'5m':5,'15m':15,'30m':30,'1h':60,'4h':240,'6h':360,'12h':720,'daily':1440,'intraday':30};
   const FILL_BARS = 6;
   const tfMin = tf => TF_MIN[tf] || 30;
+  // IST calendar date (UTC+5:30, no DST): shift the epoch forward 5.5h then read the UTC date → "today" rolls at IST midnight, not UTC's.
+  const istDay = () => new Date(Date.now()+5.5*3600*1000).toISOString().slice(0,10);
 
   const DEFAULTS = {
     running:false, halted:false, goalHit:false,
@@ -61,7 +63,7 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
     const entryFee=feeOf(qty*entry); S.cash-=entryFee;
     S.positions.push({ id:Date.now()+'_'+a.sym, sym:a.sym, name:a.name, tk:a.tk||'', cls:a.cls, dir, lev,
       entry, stop, initStop:stop, targets:targets.slice(0,3), qty, remQty:qty, taken:0,
-      openAt:Date.now(), lastPx:entry, feesPaid:entryFee, realized:0, tf:a.tf||S.tf });
+      openAt:Date.now(), lastPx:entry, feesPaid:entryFee, realized:0, tf:a.tf||S.tf, regime:a.regime||'trend' });
     return true;
   }
   function reduce(p, qty, px, reason){
@@ -75,7 +77,7 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
     S.positions=S.positions.filter(x=>x.id!==p.id);
     S.cooldown[p.sym]=Date.now()+(S.cooldownMin||0)*60000;
     const pnl=p.realized-p.feesPaid, cost=p.entry*p.qty;
-    S.closed.unshift({ sym:p.sym, name:p.name, tk:p.tk, side:p.dir>0?'LONG':'SHORT', lev:p.lev, tf:p.tf, entry:p.entry,
+    S.closed.unshift({ sym:p.sym, name:p.name, tk:p.tk, side:p.dir>0?'LONG':'SHORT', lev:p.lev, tf:p.tf, entry:p.entry, regime:p.regime||'trend',
       openAt:p.openAt, closedAt:Date.now(), reason, pnl, pnlPct:cost?pnl/cost*100*(p.lev||1):0, holdMin:Math.round((Date.now()-p.openAt)/60000) });
     if(S.closed.length>500) S.closed.length=500;
   }
@@ -88,7 +90,9 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
     for(const p of S.positions.slice()){
       const px=prices&&prices[p.sym]; if(!(px>0)) continue; p.lastPx=px;
       const stopHit = p.dir>0 ? px<=p.stop : px>=p.stop;
-      if(stopHit){ reduce(p,p.remQty,p.stop,'stop'); continue; }
+      // Label the stop by what it really was: initial stop = a loss; after T1 the stop sits at breakeven; after T2 it's
+      // trailed into profit. So a "stop" that fires post-target is a protected/winning exit, not a loss — say so.
+      if(stopHit){ const r = p.taken<=0 ? 'stop' : (p.taken>=2 ? 'trail' : 'be'); reduce(p,p.remQty,p.stop,r); continue; }
       const hit = k => p.dir>0 ? px>=p.targets[k] : px<=p.targets[k];
       if(p.taken<1 && hit(0)){ reduce(p,p.qty/3,p.targets[0],'T1'); if(p.remQty>1e-9){p.taken=1;p.stop=p.entry;} }
       if(p.taken<2 && hit(1)){ reduce(p,p.qty/3,p.targets[1],'T2'); if(p.remQty>1e-9){p.taken=2;p.stop=p.targets[0];} }
@@ -109,7 +113,7 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
     const eq=markEquity(lastPrices), qty=sizeQty(limit,stop,lev,eq); if(!(qty>0)) return;
     const exp=Math.min(FILL_BARS*tfMin(a.tf||'15m')*60000, 6*3600*1000);   // ~6 bars, but never rest more than 6 hours
     S.pending.push({ id:Date.now()+'_'+a.sym, sym:a.sym, name:a.name, tk:a.tk||'', cls:a.cls, dir, lev, limit, stop, targets:targets.slice(0,3), qty,
-      placedAt:Date.now(), expiresAt:Date.now()+exp, tf:a.tf||'15m' });
+      placedAt:Date.now(), expiresAt:Date.now()+exp, tf:a.tf||'15m', regime:a.regime||'trend' });
   }
 
   // --- strategic selection: rank by conviction, take only quality setups ---
@@ -121,6 +125,9 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
     if((r.action.kind==='waitdip'||r.action.kind==='waitbounce') && !S.allowPending) return false;
     const mtfOk = r.mtf && r.mtf.agree>=2;                 // confirmed on a higher timeframe
     const strong = Math.abs(r.sig.score)>=20;             // or strong standalone conviction
+    // BTC-weak quick short: a falling Bitcoin IS the confirmation for alt shorts, so take these at a lower per-coin bar.
+    const corrShort = r.setup && r.setup.regime==='correction' && Math.abs(r.sig.score)>=12;
+    if(corrShort) return true;
     return mtfOk || strong;
   }
   const conviction = r => Math.abs(r.sig.score) + (r.mtf?r.mtf.agree*6:0) + ((r.bt&&r.bt.score)?r.bt.score*0.3:0);
@@ -134,7 +141,7 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
       if(S.positions.length+S.pending.length >= S.maxConcurrent) break;
       if(held(r.asset.sym)) continue;   // state changes as we place — never double-commit a coin
       const k=r.action.kind, d=kindDir(r.action.kind), lev=levFor(r);
-      const base={ sym:r.asset.sym, name:r.asset.name, tk:r.asset.tk||'', cls:r.asset.cls, dir:d, stop:r.setup.stop, targets:(r.setup.targets||[]).slice(0,3), tf:(r._tf||(S.timeframes&&S.timeframes[0])||'15m') };
+      const base={ sym:r.asset.sym, name:r.asset.name, tk:r.asset.tk||'', cls:r.asset.cls, dir:d, stop:r.setup.stop, targets:(r.setup.targets||[]).slice(0,3), tf:(r._tf||(S.timeframes&&S.timeframes[0])||'15m'), regime:(r.setup.regime||'trend') };
       if(base.targets.length<3) continue;
       const px0=(prices&&prices[r.asset.sym])||r.sig.price; if(!(px0>0)) continue;
       // aggressive = only the STRONGEST setups (MTF-confirmed AND score≥25) may skip the limit and enter at market,
@@ -159,7 +166,7 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
     if(!S.running) return snapshot();
     S.lastRun=Date.now(); S.lastError=null;
     try{
-      const today=new Date().toDateString();
+      const today=istDay();   // IST calendar day — the target window is IST midnight → IST midnight
       if(S.dayAnchor!==today){ S.dayAnchor=today; S.dayStartEquity=markEquity(lastPrices); S.halted=false; S.goalHit=false; }  // new day resets
       let prices={}; try{ prices=await liveQuotes(S.tab)||{}; }catch(e){}
       lastPrices=prices;
@@ -194,7 +201,7 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
       cash:S.cash, equity:eq, startEquity:S.capital, retPct:(eq/S.capital-1)*100,
       dayStartEquity:S.dayStartEquity, dayRetPct:S.dayStartEquity?(eq/S.dayStartEquity-1)*100:0, targetEquity:S.dayStartEquity*(1+S.dailyTargetPct/100),
       marginUsed:grossMargin(), openCount:S.positions.length, pendingCount:S.pending.length,
-      positions:S.positions.map(p=>({sym:p.sym,name:p.name,tk:p.tk,side:p.dir>0?'LONG':'SHORT',lev:p.lev,tf:p.tf,entry:p.entry,stop:p.stop,targets:p.targets,remQty:p.remQty,qty:p.qty,taken:p.taken,lastPx:p.lastPx,uPnl:uPnl(p,(P&&P[p.sym])||p.lastPx)})),
+      positions:S.positions.map(p=>({sym:p.sym,name:p.name,tk:p.tk,side:p.dir>0?'LONG':'SHORT',lev:p.lev,tf:p.tf,regime:p.regime||'trend',entry:p.entry,stop:p.stop,targets:p.targets,remQty:p.remQty,qty:p.qty,taken:p.taken,lastPx:p.lastPx,uPnl:uPnl(p,(P&&P[p.sym])||p.lastPx)})),
       pending:S.pending.map(o=>({sym:o.sym,name:o.name,side:o.dir>0?'LONG':'SHORT',lev:o.lev,qty:o.qty,limit:o.limit,stop:o.stop,tf:o.tf,expiresAt:o.expiresAt})),
       closed:S.closed.slice(0,100), stats:{trades:tot,wins,losses:tot-wins,winRate:tot?wins/tot*100:0,realizedPnl:S.closed.reduce((a,t)=>a+t.pnl,0),avgWin,avgLoss,expectancy,profitFactor},
       startedAt:S.startedAt, lastRun:S.lastRun, lastError:S.lastError };
