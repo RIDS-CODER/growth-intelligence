@@ -111,8 +111,9 @@ function computeSignal(close,high,low,thr,vol,ctx){
   if(verdict==='BUY'  && brkUp && volWeak) verdict='HOLD';                                 // breakout on thin volume = fakeout
   if(verdict==='SELL' && brkDn && volWeak) verdict='HOLD';
   const btcWeakShort = btcRiskOff && verdict==='SELL';                                     // a quick short to fade a BTC-led correction
+  const _sw=swingLevels(high,low,2,6);   // recent swing highs/lows for chart-level targets
   return {score,verdict,btcWeakShort,components:out,price,rsiV:rsi[n],s50:s50[n],s200:s200[n],atr:IND.atr(close,high,low)[n],hi20,lo20,regimeUp,turnUp,adx:adxV,volRatio,brkUp:price>=hi20,brkDn:price<=lo20,
-    bbL:bb.lower[n],bbU:bb.upper[n],ema20:IND.ema(close,20)[n],lo10:IND.lowest(low,10),hi10:IND.highest(high,10)};
+    bbL:bb.lower[n],bbU:bb.upper[n],ema20:IND.ema(close,20)[n],lo10:IND.lowest(low,10),hi10:IND.highest(high,10),swHi:_sw.hs,swLo:_sw.ls};
 }
 // nearest support below price (for buy-the-dip entries) / resistance above (for shorts)
 function nearestLevel(dir,price,atr,cands){
@@ -120,6 +121,36 @@ function nearestLevel(dir,price,atr,cands){
     return Math.min(Math.max(s,price-3*atr), price-0.12*atr);}          // strictly below, not absurdly far
   const c=cands.filter(v=>v!=null&&v>price);let r=c.length?Math.min(...c):price+0.8*atr;
   return Math.max(Math.min(r,price+3*atr), price+0.12*atr);
+}
+// recent SWING highs/lows (k-bar fractal pivots), newest first — these are the real levels price reacts to
+function swingLevels(high,low,k,keep){
+  k=k||2; keep=keep||6; const n=high.length, hs=[], ls=[];
+  for(let i=n-1-k;i>=k && (hs.length<keep||ls.length<keep);i--){
+    let isH=true,isL=true;
+    for(let j=1;j<=k;j++){ if(!(high[i]>high[i-j]&&high[i]>high[i+j])) isH=false; if(!(low[i]<low[i-j]&&low[i]<low[i+j])) isL=false; }
+    if(isH&&hs.length<keep) hs.push(high[i]);
+    if(isL&&ls.length<keep) ls.push(low[i]);
+  }
+  return {hs,ls};
+}
+// TARGETS at real chart levels: nearest structural levels in the trade direction (swings, range edges, bands, mean),
+// within a reachable window, deduped and strictly progressing. Falls back to ATR steps only where structure is missing.
+function structTargets(dir,entry,atr,sig,fbMults,R){
+  const minD=0.4*atr, maxD=4.5*atr;                                   // near enough to matter, not absurdly far
+  let cands=(dir>0
+      ? [sig.ema20,sig.bbU,sig.hi10,sig.hi20,sig.s50].concat(sig.swHi||[])
+      : [sig.ema20,sig.bbL,sig.lo10,sig.lo20,sig.s50].concat(sig.swLo||[]))
+    .filter(v=>v!=null&&isFinite(v)&&(dir>0? (v-entry>=minD && v-entry<=maxD) : (entry-v>=minD && entry-v<=maxD)));
+  cands.sort((a,b)=> dir>0 ? a-b : b-a);                              // nearest first
+  const picked=[];
+  for(const v of cands){ if(picked.every(p=>Math.abs(p-v)>=0.3*atr)) picked.push(v); if(picked.length>=3) break; }
+  const step=Math.max(0.6*R,0.4*atr), out=[];
+  for(let i=0;i<3;i++){
+    let t = picked[i]!=null ? picked[i] : ((out.length?out[out.length-1]:entry) + dir*step);
+    if(i>0 && (dir>0 ? t<=out[i-1] : t>=out[i-1])) t = out[i-1] + dir*step;   // enforce strict progression
+    out.push(t);
+  }
+  return out;
 }
 function signalSince(close,high,low,times){
   const e12=IND.ema(close,12),e26=IND.ema(close,26),rsi=IND.rsi(close,14),mh=IND.macd(close).hist;
@@ -156,14 +187,15 @@ function buildSetup(sig,tf){
     eLo=anchor-0.25*atr;eHi=anchor+0.25*atr;
   }
   const entry=anchor, R=P.stopMult*atr, stop=anchor-dir*R;   // stop sits BELOW support → accounts for a deeper fall
-  const targets=P.t.map(m=>entry+dir*m*R), ret=targets.map(t=>dir*(t-entry)/entry*100);
+  // targets snap to the real chart levels price will actually react to (swings/range/bands), not arbitrary ATR points
+  const targets=structTargets(dir,entry,atr,sig,P.t,R), ret=targets.map(t=>dir*(t-entry)/entry*100);
   const gap=dir*(entry-price)/price*100;                     // how far the ideal entry is from current price (−ve = below)
   const riskPct=Math.abs(dir*(stop-entry)/entry*100);
   // Suggested leverage CEILING: leverage so a stop-out costs ~15% of the margin blocked, capped by volatility.
   const volPct=atr/price*100;
   const cap = volPct>4 ? 3 : volPct>2 ? 4 : 5;               // more volatile → lower ceiling
   const suggestedLev = Math.max(1, Math.min(cap, Math.floor(15/Math.max(riskPct,0.1))));
-  return {type,hold:P.hold,dir,entryLo:eLo,entryHi:eHi,entry,stop,targets,ret,rrr:P.t[0],atr,
+  return {type,hold:P.hold,dir,entryLo:eLo,entryHi:eHi,entry,stop,targets,ret,rrr:(Math.abs(targets[0]-entry)/(Math.abs(entry-stop)||1)),atr,
     riskPct,entryGapPct:gap,support:dir>0?anchor:null,resistance:dir<0?anchor:null,suggestedLev,
     regime: corrShort?'correction':(scalp?'range':(isBreak?'breakout':'trend')),
     note: corrShort?'₿ Bitcoin is weak — QUICK SHORT to fade the correction: small targets, tight stop, bank fast. Don’t hold for a trend.':(scalp?'Small targets — coin is ranging/choppy (weak trend), so scalp the swing and bank quick with a tight stop. Don’t hold for a big move.':null)};
@@ -894,6 +926,60 @@ async function researchCoin(rawSym,horizon){
 }
 // Paper-trading engine (simulation) — reuses this server's scan + live quotes. Never places real orders.
 const paper = require('./paper.js')({ scan, liveQuotes, dir:__dirname, rate:()=>cdxUsdtInr() });
+
+/* ===== Telegram alerts — ping on a High-confidence quick scalp. Token lives ONLY on the server
+   (env var or config.json); it is NEVER sent to the browser or committed to GitHub. Inert until set. ===== */
+const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN || CFG.telegramBotToken || '';
+const TG_CHAT  = process.env.TELEGRAM_CHAT_ID  || CFG.telegramChatId  || '';
+const alertState = { on:true, minConf:70, tfs:['5m','15m'], cooldownMin:45, maxPerScan:5, lastRun:0, sent:0, lastErr:null, recent:{} };
+async function sendTelegram(text){
+  if(!TG_TOKEN||!TG_CHAT) return {ok:false,reason:'not configured'};
+  try{
+    const r=await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`,{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({chat_id:TG_CHAT,text,parse_mode:'HTML',disable_web_page_preview:true})});
+    const j=await r.json().catch(()=>({}));
+    const ok=r.ok && j.ok!==false; if(!ok) alertState.lastErr=(j&&j.description)||('HTTP '+r.status);
+    return {ok, status:r.status, desc:j&&j.description};
+  }catch(e){ alertState.lastErr=String(e.message||e); return {ok:false,reason:String(e.message||e)}; }
+}
+// a result qualifies for an alert only if it's a scalp/correction setup, High-confidence, and actionable now
+function alertEligible(r,minConf){
+  if(!r||!r.setup||!r.confidence||r.confidence.pct==null) return false;
+  const scalp = r.setup.regime==='range' || r.setup.regime==='correction';
+  const actionable = r.action && ['buynow','sellnow','buybreak','sellbreak','waitdip','waitbounce'].includes(r.action.kind);
+  return scalp && r.confidence.pct>=minConf && actionable;
+}
+function fmtAlert(r){
+  const s=r.setup, isL=s.dir>0, dec=r.dec||((r.sig.price||0)<5?4:2), f=v=>'₹'+(+v).toFixed(dec);
+  const tag = s.regime==='correction'?'₿ correction short':'⚡ range scalp';
+  return `⚡ <b>Quick scalp — ${r.confidence.label} ${r.confidence.pct}%</b>\n`+
+    `${isL?'🟢 LONG':'🔴 SHORT'} <b>${r.asset.tk||r.asset.sym}</b> · ${r._tf} · ${tag}\n`+
+    `Entry ${f(s.entryLo)}–${f(s.entryHi)}\n`+
+    `🎯 Target ${f(s.targets[0])} (+${Math.abs(s.ret[0]).toFixed(1)}%)   🛑 Stop ${f(s.stop)} (−${s.riskPct.toFixed(1)}%)\n`+
+    `R:R ${s.rrr.toFixed(1)}:1 · live ${f(r.sig.price)}\n`+
+    `<i>Simulation / not financial advice — verify on your platform before trading.</i>`;
+}
+async function alertScan(){
+  if(!alertState.on || !TG_TOKEN || !TG_CHAT) return;
+  alertState.lastRun=Date.now();
+  const now=Date.now(), cd=alertState.cooldownMin*60000;
+  for(const k in alertState.recent){ if(now-alertState.recent[k]>cd) delete alertState.recent[k]; }   // expire dedup entries
+  const cands=[];
+  for(const tf of alertState.tfs){
+    let d; try{ d=await scan('Crypto',tf); }catch(e){ continue; }
+    (d.results||[]).forEach(r=>{ if(alertEligible(r,alertState.minConf)){ r._tf=tf; cands.push(r); } });
+  }
+  cands.sort((a,b)=>b.confidence.pct-a.confidence.pct);
+  let sent=0;
+  for(const r of cands){
+    if(sent>=alertState.maxPerScan) break;
+    const key=r.asset.sym+'|'+r._tf+'|'+(r.setup.dir>0?'L':'S');
+    if(alertState.recent[key]) continue;               // already alerted this setup recently
+    alertState.recent[key]=now;
+    const res=await sendTelegram(fmtAlert(r));
+    if(res.ok){ alertState.sent++; sent++; }
+  }
+}
 function sendJSON(res,o,c=200){const b=JSON.stringify(o);res.writeHead(c,{"Content-Type":"application/json","Access-Control-Allow-Origin":"*"});res.end(b);}
 const MIME={".html":"text/html",".js":"text/javascript",".css":"text/css",".json":"application/json",".svg":"image/svg+xml"};
 async function handler(req,res){
@@ -938,6 +1024,9 @@ async function handler(req,res){
       const cl=data.close.slice(0,-1),hi=data.high.slice(0,-1),lo=data.low.slice(0,-1);
       const sig=computeSignal(cl,hi,lo,tf==='daily'?20:12);
       return sendJSON(res,{sym,verdict:sig.verdict,score:sig.score});}
+    if(p==="/api/alert/status") return sendJSON(res,{configured:!!(TG_TOKEN&&TG_CHAT),on:alertState.on,minConf:alertState.minConf,tfs:alertState.tfs,lastRun:alertState.lastRun,sent:alertState.sent,lastErr:alertState.lastErr});
+    if(p==="/api/alert/test"){ const rr=await sendTelegram('✅ <b>Test alert</b> — Growth Intelligence Telegram is connected. You will get a ping here when a High-confidence quick scalp appears.'); return sendJSON(res,{configured:!!(TG_TOKEN&&TG_CHAT),...rr}); }
+    if(p==="/api/alert/config" && req.method==="POST"){ const body=await readBody(req); let c={}; try{c=JSON.parse(body);}catch(e){} if(c.on!=null)alertState.on=!!c.on; if(c.minConf!=null&&!isNaN(+c.minConf))alertState.minConf=Math.max(50,Math.min(95,+c.minConf)); return sendJSON(res,{on:alertState.on,minConf:alertState.minConf}); }
     // static — tolerate index.html living in /public OR the repo root
     let rel=path.normalize(p==="/"?"/index.html":p).replace(/^(\.\.[/\\])+/,"").replace(/^[/\\]+/,"");
     const candidates=[path.join(__dirname,"public",rel),path.join(__dirname,rel)];
@@ -957,8 +1046,11 @@ if(require.main===module){
   });
   // Paper-bot control loop — one simulated iteration each minute (only acts when you've pressed Start).
   setInterval(()=>{ paper.tick().catch(()=>{}); }, 60000);
+  // Telegram alert loop — scan for High-confidence quick scalps every 3 min (inert until a bot token is configured).
+  if(TG_TOKEN&&TG_CHAT){ console.log('  Telegram alerts: ON'); setInterval(()=>{ alertScan().catch(()=>{}); }, 180000); setTimeout(()=>alertScan().catch(()=>{}),15000); }
+  else console.log('  Telegram alerts: off (set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID to enable)');
 }
-module.exports={IND,computeSignal,buildSetup,buildReasons,confidenceOf,signalSince,actionNow,parseCandles,authURL,scan,universeFor,fmtTime,
+module.exports={IND,computeSignal,buildSetup,buildReasons,confidenceOf,alertEligible,fmtAlert,sendTelegram,signalSince,actionNow,parseCandles,authURL,scan,universeFor,fmtTime,
   loadBinance,loadCoinDCX,loadCrypto,ensureCryptoUniverse,usdInr,resampleSeries,tfCfg,getCRYPTO:()=>CRYPTO,getMode:()=>cryptoMode,
   backtestSeries,scoreSeriesArr,backtest,processAsset,blendResearch,assetBtScore,cdxLiveInr,cdxUsdtInr,
   btcStateFromSeries,__setBtc:(s)=>{BTC_STATE=s;},

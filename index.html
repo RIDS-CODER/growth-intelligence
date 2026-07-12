@@ -906,9 +906,17 @@ function renderQuickShell(){
     <div style="display:flex;gap:5px;flex-wrap:wrap;margin:3px 0 7px">${tfTabs}</div>
     <div style="display:flex;gap:5px;flex-wrap:wrap;margin:0 0 9px">${sideTabs}</div>
     <div id="quickList"></div>
+    <div id="quickAlerts" class="small" style="margin-top:10px;padding:8px 11px;border-radius:8px;border:1px dashed rgba(52,211,153,.4);background:rgba(52,211,153,.05)">📲 Telegram alerts: <span class="sub">checking…</span></div>
     <p class="small" style="color:var(--muted);margin-top:9px">Only <b>quick/scalp</b> plays — small targets, tight stops: range scalps, BTC-weak <b>correction shorts</b>, and <b>reverse dip-shorts</b> (a pending dip-buy means price is expected to fall to support — so short that drop and cover at the dip). Each timeframe loads live when you open its tab. Reverse shorts are <b>counter-trend</b> — quick in-and-out only. Not financial advice.</p></div>`;
-  renderQuickList();
+  renderQuickList(); loadAlertStatus();
 }
+async function loadAlertStatus(){ try{ renderAlertBar(await(await fetch('/api/alert/status')).json()); }catch(e){} }
+function renderAlertBar(s){ const el=document.getElementById('quickAlerts'); if(!el)return;
+  if(!s||!s.configured){ el.innerHTML='📲 <b>Telegram alerts — not set up.</b> Get pinged the moment a High-confidence quick scalp appears: create a Telegram bot and add <code>TELEGRAM_BOT_TOKEN</code> + <code>TELEGRAM_CHAT_ID</code> to your DigitalOcean env vars. Ask me for the 2-minute setup steps.'; return; }
+  el.innerHTML=`📲 <b>Telegram alerts: ${s.on?'<span style="color:var(--buy)">ON</span>':'<span style="color:var(--hold)">paused</span>'}.</b> High-confidence scalps ≥ <b>${s.minConf}%</b> on <b>${(s.tfs||[]).join(' / ')}</b> · sent <b>${s.sent||0}</b>${s.lastErr?' · <span style="color:var(--sell)">⚠ '+s.lastErr+'</span>':''} &nbsp; <button class="btn" style="padding:1px 9px;font-size:11px" onclick="alertTest()">Send test</button> <button class="btn" style="padding:1px 9px;font-size:11px" onclick="alertToggle(${s.on?0:1})">${s.on?'Pause':'Resume'}</button>`;
+}
+async function alertTest(){ toast('Sending test…'); try{const r=await(await fetch('/api/alert/test')).json(); toast(r.ok?'✅ Sent — check Telegram':'⚠ '+(r.desc||r.reason||'not configured'));}catch(e){toast('failed');} }
+async function alertToggle(on){ try{await fetch('/api/alert/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({on:!!on})}); loadAlertStatus();}catch(e){} }
 function renderQuickList(){
   const el=document.getElementById('quickList'); if(!el)return;
   const d=quickState.data[quickState.tf];
