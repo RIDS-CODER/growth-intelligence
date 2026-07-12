@@ -602,7 +602,8 @@ function processAsset(asset,data,tf){
   const mtf = multiTfConfirm(data,tf,sig.verdict);   // higher-timeframe agreement (resampled, no extra fetch)
   const confidence = confidenceOf(sig,mtf,bt,setup);
   return {asset,sig,setup,since,action,reasons,scope,bt,mtf,confidence,dec,isIndex,tf,asof:fmtTime(asofMs),
-    priceTag:asset.src==='cg'?(cryptoMode==='coindcx'?'live · CoinDCX ₹':'live · global ₹'):(marketOpen()?'LIVE (broker)':'prev close'),series:data.close.slice(-80)};
+    priceTag:asset.src==='cg'?(cryptoMode==='coindcx'?'live · CoinDCX ₹':'live · global ₹'):(marketOpen()?'LIVE (broker)':'prev close'),series:data.close.slice(-80),
+    bars:{h:data.high.slice(-24),l:data.low.slice(-24),c:data.close.slice(-24)}};   // compact OHLC window for the Quick-tab mini candlesticks
 }
 /* ============================================================
    BACKTEST — lookahead-free, long-only, ATR stop / T1 target
