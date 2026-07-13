@@ -931,12 +931,31 @@ const paper = require('./paper.js')({ scan, liveQuotes, dir:__dirname, rate:()=>
    (env var or config.json); it is NEVER sent to the browser or committed to GitHub. Inert until set. ===== */
 const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN || CFG.telegramBotToken || '';
 const TG_CHAT  = process.env.TELEGRAM_CHAT_ID  || CFG.telegramChatId  || '';
+let detectedChat = '';   // if you don't set a chat ID, we find it from whoever last messaged the bot
 const alertState = { on:true, minConf:70, tfs:['5m','15m'], cooldownMin:45, maxPerScan:5, lastRun:0, sent:0, lastErr:null, recent:{} };
+// Resolve the chat: prefer an explicit env/config chat ID; otherwise auto-detect it from getUpdates
+// (the chat of whoever most recently messaged the bot). This removes the fiddly "find your chat ID" step.
+async function resolveChat(force){
+  if(TG_CHAT) return TG_CHAT;
+  if(detectedChat && !force) return detectedChat;
+  if(!TG_TOKEN) return '';
+  try{
+    const r=await fetch(`https://api.telegram.org/bot${TG_TOKEN}/getUpdates`);
+    const j=await r.json();
+    if(j && j.ok && Array.isArray(j.result)){
+      for(let i=j.result.length-1;i>=0;i--){ const u=j.result[i]||{}; const m=u.message||u.edited_message||u.channel_post||u.my_chat_member;
+        if(m && m.chat && m.chat.id!=null){ detectedChat=String(m.chat.id); break; } }
+    } else if(j && j.ok===false){ alertState.lastErr=j.description||'getUpdates failed'; }
+  }catch(e){ alertState.lastErr=String(e.message||e); }
+  return detectedChat;
+}
 async function sendTelegram(text){
-  if(!TG_TOKEN||!TG_CHAT) return {ok:false,reason:'not configured'};
+  if(!TG_TOKEN) return {ok:false,reason:'No bot token set (TELEGRAM_BOT_TOKEN).'};
+  const chat=await resolveChat();
+  if(!chat) return {ok:false,reason:'No chat found — open your bot in Telegram and send it any message once, then try again.'};
   try{
     const r=await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`,{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({chat_id:TG_CHAT,text,parse_mode:'HTML',disable_web_page_preview:true})});
+      body:JSON.stringify({chat_id:chat,text,parse_mode:'HTML',disable_web_page_preview:true})});
     const j=await r.json().catch(()=>({}));
     const ok=r.ok && j.ok!==false; if(!ok) alertState.lastErr=(j&&j.description)||('HTTP '+r.status);
     return {ok, status:r.status, desc:j&&j.description};
@@ -960,7 +979,7 @@ function fmtAlert(r){
     `<i>Simulation / not financial advice — verify on your platform before trading.</i>`;
 }
 async function alertScan(){
-  if(!alertState.on || !TG_TOKEN || !TG_CHAT) return;
+  if(!alertState.on || !TG_TOKEN) return;   // chat is auto-resolved at send time
   alertState.lastRun=Date.now();
   const now=Date.now(), cd=alertState.cooldownMin*60000;
   for(const k in alertState.recent){ if(now-alertState.recent[k]>cd) delete alertState.recent[k]; }   // expire dedup entries
@@ -1024,8 +1043,9 @@ async function handler(req,res){
       const cl=data.close.slice(0,-1),hi=data.high.slice(0,-1),lo=data.low.slice(0,-1);
       const sig=computeSignal(cl,hi,lo,tf==='daily'?20:12);
       return sendJSON(res,{sym,verdict:sig.verdict,score:sig.score});}
-    if(p==="/api/alert/status") return sendJSON(res,{configured:!!(TG_TOKEN&&TG_CHAT),on:alertState.on,minConf:alertState.minConf,tfs:alertState.tfs,lastRun:alertState.lastRun,sent:alertState.sent,lastErr:alertState.lastErr});
-    if(p==="/api/alert/test"){ const rr=await sendTelegram('✅ <b>Test alert</b> — Growth Intelligence Telegram is connected. You will get a ping here when a High-confidence quick scalp appears.'); return sendJSON(res,{configured:!!(TG_TOKEN&&TG_CHAT),...rr}); }
+    if(p==="/api/alert/status"){ const chat=await resolveChat(); return sendJSON(res,{hasToken:!!TG_TOKEN,configured:!!(TG_TOKEN&&chat),chat:chat?('…'+String(chat).slice(-4)):null,on:alertState.on,minConf:alertState.minConf,tfs:alertState.tfs,lastRun:alertState.lastRun,sent:alertState.sent,lastErr:alertState.lastErr}); }
+    if(p==="/api/alert/detectchat"){ const chat=await resolveChat(true); return sendJSON(res,{hasToken:!!TG_TOKEN,found:!!chat,chat:chat?('…'+String(chat).slice(-4)):null,lastErr:alertState.lastErr}); }
+    if(p==="/api/alert/test"){ const rr=await sendTelegram('✅ <b>Test alert</b> — Growth Intelligence Telegram is connected. You will get a ping here when a High-confidence quick scalp appears.'); return sendJSON(res,{...rr}); }
     if(p==="/api/alert/config" && req.method==="POST"){ const body=await readBody(req); let c={}; try{c=JSON.parse(body);}catch(e){} if(c.on!=null)alertState.on=!!c.on; if(c.minConf!=null&&!isNaN(+c.minConf))alertState.minConf=Math.max(50,Math.min(95,+c.minConf)); return sendJSON(res,{on:alertState.on,minConf:alertState.minConf}); }
     // static — tolerate index.html living in /public OR the repo root
     let rel=path.normalize(p==="/"?"/index.html":p).replace(/^(\.\.[/\\])+/,"").replace(/^[/\\]+/,"");
@@ -1047,8 +1067,8 @@ if(require.main===module){
   // Paper-bot control loop — one simulated iteration each minute (only acts when you've pressed Start).
   setInterval(()=>{ paper.tick().catch(()=>{}); }, 60000);
   // Telegram alert loop — scan for High-confidence quick scalps every 3 min (inert until a bot token is configured).
-  if(TG_TOKEN&&TG_CHAT){ console.log('  Telegram alerts: ON'); setInterval(()=>{ alertScan().catch(()=>{}); }, 180000); setTimeout(()=>alertScan().catch(()=>{}),15000); }
-  else console.log('  Telegram alerts: off (set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID to enable)');
+  if(TG_TOKEN){ console.log('  Telegram alerts: ON (chat auto-detected from whoever messages the bot)'); setInterval(()=>{ alertScan().catch(()=>{}); }, 180000); setTimeout(()=>alertScan().catch(()=>{}),15000); }
+  else console.log('  Telegram alerts: off (set TELEGRAM_BOT_TOKEN to enable — chat ID optional)');
 }
 module.exports={IND,computeSignal,buildSetup,buildReasons,confidenceOf,alertEligible,fmtAlert,sendTelegram,signalSince,actionNow,parseCandles,authURL,scan,universeFor,fmtTime,
   loadBinance,loadCoinDCX,loadCrypto,ensureCryptoUniverse,usdInr,resampleSeries,tfCfg,getCRYPTO:()=>CRYPTO,getMode:()=>cryptoMode,
