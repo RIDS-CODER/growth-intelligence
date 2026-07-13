@@ -930,36 +930,59 @@ const paper = require('./paper.js')({ scan, liveQuotes, dir:__dirname, rate:()=>
 /* ===== Telegram alerts — ping on a High-confidence quick scalp. Token lives ONLY on the server
    (env var or config.json); it is NEVER sent to the browser or committed to GitHub. Inert until set. ===== */
 const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN || CFG.telegramBotToken || '';
-const TG_CHAT  = process.env.TELEGRAM_CHAT_ID  || CFG.telegramChatId  || '';
-let detectedChat = '';   // if you don't set a chat ID, we find it from whoever last messaged the bot
+// TELEGRAM_CHAT_ID accepts a SINGLE id OR a comma/space list for multiple recipients, e.g. "12345,67890,111213"
+const TG_CHATS = (process.env.TELEGRAM_CHAT_ID || CFG.telegramChatId || '').split(/[,\s;]+/).map(s=>s.trim()).filter(Boolean);
+let detectedChat = '';   // used only as a fallback when NO explicit chat IDs are configured
 const alertState = { on:true, minConf:70, tfs:['5m','15m'], cooldownMin:45, maxPerScan:5, lastRun:0, sent:0, lastErr:null, recent:{} };
-// Resolve the chat: prefer an explicit env/config chat ID; otherwise auto-detect it from getUpdates
-// (the chat of whoever most recently messaged the bot). This removes the fiddly "find your chat ID" step.
-async function resolveChat(force){
-  if(TG_CHAT) return TG_CHAT;
+// auto-detect ONE personal chat (fallback when you set no chat IDs): most recent private, non-bot DM.
+// Only a real person's PRIVATE DM — never a group/channel/bot (which causes "Forbidden: can't send messages to bots").
+async function detectChat(force){
   if(detectedChat && !force) return detectedChat;
   if(!TG_TOKEN) return '';
   try{
-    const r=await fetch(`https://api.telegram.org/bot${TG_TOKEN}/getUpdates`);
-    const j=await r.json();
+    const r=await fetch(`https://api.telegram.org/bot${TG_TOKEN}/getUpdates`); const j=await r.json();
     if(j && j.ok && Array.isArray(j.result)){
-      for(let i=j.result.length-1;i>=0;i--){ const u=j.result[i]||{}; const m=u.message||u.edited_message||u.channel_post||u.my_chat_member;
-        if(m && m.chat && m.chat.id!=null){ detectedChat=String(m.chat.id); break; } }
+      for(let i=j.result.length-1;i>=0;i--){ const u=j.result[i]||{}; const m=u.message||u.edited_message;
+        if(m && m.chat && m.chat.type==='private' && m.chat.id!=null && !(m.from&&m.from.is_bot)){ detectedChat=String(m.chat.id); break; } }
+      if(!detectedChat) alertState.lastErr='No personal message found yet — open the bot in Telegram, send it "hi", then re-detect.';
     } else if(j && j.ok===false){ alertState.lastErr=j.description||'getUpdates failed'; }
   }catch(e){ alertState.lastErr=String(e.message||e); }
   return detectedChat;
 }
+// the recipients: the explicit list if you set one (send to ALL of them), else the single auto-detected chat
+async function resolveChats(force){
+  if(TG_CHATS.length) return TG_CHATS.slice();
+  const c=await detectChat(force); return c?[c]:[];
+}
+// list every distinct person who has DM'd the bot (id + name) so you can collect chat IDs for a group
+async function listChats(){
+  const out=[]; if(!TG_TOKEN) return out;
+  try{ const r=await fetch(`https://api.telegram.org/bot${TG_TOKEN}/getUpdates`); const j=await r.json();
+    if(j&&j.ok&&Array.isArray(j.result)){ const seen=new Set();
+      for(const u of j.result){ const m=u.message||u.edited_message; if(m&&m.chat&&m.chat.type==='private'&&m.chat.id!=null&&!seen.has(m.chat.id)){ seen.add(m.chat.id);
+        out.push({id:String(m.chat.id), name:[m.chat.first_name,m.chat.last_name].filter(Boolean).join(' ')||(m.chat.username?'@'+m.chat.username:'')}); } } }
+  }catch(e){}
+  return out;
+}
+async function tgSend(chat,text){
+  const r=await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`,{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({chat_id:chat,text,parse_mode:'HTML',disable_web_page_preview:true})});
+  const j=await r.json().catch(()=>({}));
+  const ok=r.ok && j.ok!==false; if(!ok) alertState.lastErr=(j&&j.description)||('HTTP '+r.status);
+  return {ok, status:r.status, desc:j&&j.description};
+}
 async function sendTelegram(text){
   if(!TG_TOKEN) return {ok:false,reason:'No bot token set (TELEGRAM_BOT_TOKEN).'};
-  const chat=await resolveChat();
-  if(!chat) return {ok:false,reason:'No chat found — open your bot in Telegram and send it any message once, then try again.'};
-  try{
-    const r=await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`,{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({chat_id:chat,text,parse_mode:'HTML',disable_web_page_preview:true})});
-    const j=await r.json().catch(()=>({}));
-    const ok=r.ok && j.ok!==false; if(!ok) alertState.lastErr=(j&&j.description)||('HTTP '+r.status);
-    return {ok, status:r.status, desc:j&&j.description};
-  }catch(e){ alertState.lastErr=String(e.message||e); return {ok:false,reason:String(e.message||e)}; }
+  const chats=await resolveChats();
+  if(!chats.length) return {ok:false,reason:'No chat yet — open your bot in Telegram, send it a message, then Re-detect.'};
+  let anyOk=false, lastDesc='';
+  for(const chat of chats){
+    let res=await tgSend(chat,text);
+    // single auto-detect that landed on a bot id → clear & re-detect a real personal chat, retry once
+    if(!res.ok && !TG_CHATS.length && /to (the |a )?bots?/i.test(res.desc||'')){ detectedChat=''; const c2=await detectChat(true); if(c2&&c2!==chat) res=await tgSend(c2,text); }
+    if(res.ok) anyOk=true; else lastDesc=res.desc||res.reason||lastDesc;
+  }
+  return {ok:anyOk, recipients:chats.length, desc:anyOk?undefined:lastDesc};
 }
 // a result qualifies for an alert only if it's a scalp/correction setup, High-confidence, and actionable now
 function alertEligible(r,minConf){
@@ -1043,8 +1066,9 @@ async function handler(req,res){
       const cl=data.close.slice(0,-1),hi=data.high.slice(0,-1),lo=data.low.slice(0,-1);
       const sig=computeSignal(cl,hi,lo,tf==='daily'?20:12);
       return sendJSON(res,{sym,verdict:sig.verdict,score:sig.score});}
-    if(p==="/api/alert/status"){ const chat=await resolveChat(); return sendJSON(res,{hasToken:!!TG_TOKEN,configured:!!(TG_TOKEN&&chat),chat:chat?('…'+String(chat).slice(-4)):null,on:alertState.on,minConf:alertState.minConf,tfs:alertState.tfs,lastRun:alertState.lastRun,sent:alertState.sent,lastErr:alertState.lastErr}); }
-    if(p==="/api/alert/detectchat"){ const chat=await resolveChat(true); return sendJSON(res,{hasToken:!!TG_TOKEN,found:!!chat,chat:chat?('…'+String(chat).slice(-4)):null,lastErr:alertState.lastErr}); }
+    if(p==="/api/alert/status"){ const chats=await resolveChats(); return sendJSON(res,{hasToken:!!TG_TOKEN,configured:!!(TG_TOKEN&&chats.length),recipients:chats.length,explicit:!!TG_CHATS.length,chat:chats.length?('…'+String(chats[0]).slice(-4)+(chats.length>1?' +'+(chats.length-1)+' more':'')):null,on:alertState.on,minConf:alertState.minConf,tfs:alertState.tfs,lastRun:alertState.lastRun,sent:alertState.sent,lastErr:alertState.lastErr}); }
+    if(p==="/api/alert/detectchat"){ const c=await detectChat(true); return sendJSON(res,{hasToken:!!TG_TOKEN,found:!!c,chat:c?('…'+String(c).slice(-4)):null,lastErr:alertState.lastErr}); }
+    if(p==="/api/alert/chats"){ return sendJSON(res,{hasToken:!!TG_TOKEN,chats:await listChats(),using:(TG_CHATS.length?TG_CHATS:(detectedChat?[detectedChat]:[])).map(String),explicit:!!TG_CHATS.length}); }
     if(p==="/api/alert/test"){ const rr=await sendTelegram('✅ <b>Test alert</b> — Growth Intelligence Telegram is connected. You will get a ping here when a High-confidence quick scalp appears.'); return sendJSON(res,{...rr}); }
     if(p==="/api/alert/config" && req.method==="POST"){ const body=await readBody(req); let c={}; try{c=JSON.parse(body);}catch(e){} if(c.on!=null)alertState.on=!!c.on; if(c.minConf!=null&&!isNaN(+c.minConf))alertState.minConf=Math.max(50,Math.min(95,+c.minConf)); return sendJSON(res,{on:alertState.on,minConf:alertState.minConf}); }
     // static — tolerate index.html living in /public OR the repo root
