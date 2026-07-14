@@ -28,6 +28,9 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
     allowShort:true, allowPending:true, allowAggressive:false,   // aggressive = market-enter the strongest near-zone setups (still R:R-guarded)
     scalpOnly:true,           // only take quick/scalp regimes (range + correction), never trend/breakout
     minConfPct:68,            // and only at High confidence (68 = the High threshold) — quality over quantity
+    requireEdge:true,         // and only if THIS coin+direction actually made money in its own backtest…
+    minWinRate:50,            // …with a historical win rate ≥ this on that side…
+    minEdgeTrades:8,          // …over at least this many historical trades (else not enough evidence)
     // --- discipline guards (what a smart trader does): never stop inside the noise, don't revenge-trade, don't fight the tape ---
     minStopPct:0.7,           // skip any trade whose stop sits closer than this % of price (inside 1-tick noise → instant stop-out)
     stopCooldownMin:90,       // after a LOSING stop-out, sit out this coin for this long (vs the shorter win cooldown)
@@ -153,6 +156,13 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
     // score proxy if the richer confidence metric isn't on the result (older scan payloads) so the bot isn't bricked.
     const conf = (r.confidence && r.confidence.pct!=null) ? r.confidence.pct : Math.min(97, Math.abs(r.sig.score)*2.2);
     if(conf < (S.minConfPct||0)) return false;
+    // PROVEN EDGE ONLY: this coin's backtest, on THIS direction, must have actually made money — enough trades,
+    // a win rate above the floor, and positive average return. No demonstrated edge on that side → don't take it.
+    if(S.requireEdge){
+      const side = r.setup.dir>0 ? 'long' : 'short';
+      const e = r.btSide && r.btSide[side];
+      if(!e || !(e.trades>=(S.minEdgeTrades||0)) || !(e.winRate>=(S.minWinRate||0)) || !(e.avgRet>0)) return false;
+    }
     return true;
   }
   const conviction = r => Math.abs(r.sig.score) + (r.mtf?r.mtf.agree*6:0) + ((r.bt&&r.bt.score)?r.bt.score*0.3:0);
@@ -225,7 +235,7 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
     const benched=Object.keys(S.stopOuts||{}).filter(s=>(S.stopOuts[s]||0)>=(S.maxStopOutsPerCoin||99));
     return { running:S.running, halted:S.halted, goalHit:S.goalHit, tab:S.tab, timeframes:S.timeframes, usdtInr:(typeof rate==='function'?(rate()||0):0),
       paused:(Date.now()<(S.pauseUntil||0)), pauseUntil:S.pauseUntil||0, lossStreak:S.lossStreak||0, benched,
-      config:{capital:S.capital,riskPct:S.riskPct,dailyTargetPct:S.dailyTargetPct,maxLev:S.maxLev,feeBps:S.feeBps,slipBps:S.slipBps,dayLossLimitPct:S.dayLossLimitPct,allowShort:S.allowShort,allowPending:S.allowPending,allowAggressive:S.allowAggressive,scalpOnly:S.scalpOnly,minConfPct:S.minConfPct,minStopPct:S.minStopPct,stopCooldownMin:S.stopCooldownMin,maxStopOutsPerCoin:S.maxStopOutsPerCoin,lossStreakPause:S.lossStreakPause,streakPauseMin:S.streakPauseMin},
+      config:{capital:S.capital,riskPct:S.riskPct,dailyTargetPct:S.dailyTargetPct,maxLev:S.maxLev,feeBps:S.feeBps,slipBps:S.slipBps,dayLossLimitPct:S.dayLossLimitPct,allowShort:S.allowShort,allowPending:S.allowPending,allowAggressive:S.allowAggressive,scalpOnly:S.scalpOnly,minConfPct:S.minConfPct,requireEdge:S.requireEdge,minWinRate:S.minWinRate,minEdgeTrades:S.minEdgeTrades,minStopPct:S.minStopPct,stopCooldownMin:S.stopCooldownMin,maxStopOutsPerCoin:S.maxStopOutsPerCoin,lossStreakPause:S.lossStreakPause,streakPauseMin:S.streakPauseMin},
       cash:S.cash, equity:eq, startEquity:S.capital, retPct:(eq/S.capital-1)*100,
       dayStartEquity:S.dayStartEquity, dayRetPct:S.dayStartEquity?(eq/S.dayStartEquity-1)*100:0, targetEquity:S.dayStartEquity*(1+S.dailyTargetPct/100),
       marginUsed:grossMargin(), openCount:S.positions.length, pendingCount:S.pending.length,
@@ -236,17 +246,18 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
   }
 
   function setConfig(c){
-    ['capital','riskPct','dailyTargetPct','maxLev','feeBps','slipBps','dayLossLimitPct','cooldownMin','maxConcurrent','minStopPct','stopCooldownMin','maxStopOutsPerCoin','lossStreakPause','streakPauseMin','minConfPct'].forEach(k=>{ if(c[k]!=null&&!isNaN(+c[k])) S[k]=+c[k]; });
+    ['capital','riskPct','dailyTargetPct','maxLev','feeBps','slipBps','dayLossLimitPct','cooldownMin','maxConcurrent','minStopPct','stopCooldownMin','maxStopOutsPerCoin','lossStreakPause','streakPauseMin','minConfPct','minWinRate','minEdgeTrades'].forEach(k=>{ if(c[k]!=null&&!isNaN(+c[k])) S[k]=+c[k]; });
     if(c.tab)S.tab=c.tab; if(c.tf)S.tf=c.tf;
     if(c.allowShort!=null)S.allowShort=!!c.allowShort;
     if(c.allowPending!=null)S.allowPending=!!c.allowPending;
     if(c.allowAggressive!=null)S.allowAggressive=!!c.allowAggressive;
     if(c.scalpOnly!=null)S.scalpOnly=!!c.scalpOnly;
+    if(c.requireEdge!=null)S.requireEdge=!!c.requireEdge;
     save(); return snapshot();
   }
   function start(){ if(!S.startedAt){ S.startedAt=Date.now(); S.cash=S.capital; S.dayStartEquity=S.capital; } S.running=true; S.halted=false; S.goalHit=false; save(); return snapshot(); }
   function stop(){ S.running=false; save(); return snapshot(); }
-  function reset(){ const cfg={capital:S.capital,riskPct:S.riskPct,dailyTargetPct:S.dailyTargetPct,maxLev:S.maxLev,tab:S.tab,tf:S.tf,feeBps:S.feeBps,slipBps:S.slipBps,dayLossLimitPct:S.dayLossLimitPct,allowShort:S.allowShort,allowPending:S.allowPending,allowAggressive:S.allowAggressive,scalpOnly:S.scalpOnly,minConfPct:S.minConfPct,maxConcurrent:S.maxConcurrent,cooldownMin:S.cooldownMin,minStopPct:S.minStopPct,stopCooldownMin:S.stopCooldownMin,maxStopOutsPerCoin:S.maxStopOutsPerCoin,lossStreakPause:S.lossStreakPause,streakPauseMin:S.streakPauseMin};
+  function reset(){ const cfg={capital:S.capital,riskPct:S.riskPct,dailyTargetPct:S.dailyTargetPct,maxLev:S.maxLev,tab:S.tab,tf:S.tf,feeBps:S.feeBps,slipBps:S.slipBps,dayLossLimitPct:S.dayLossLimitPct,allowShort:S.allowShort,allowPending:S.allowPending,allowAggressive:S.allowAggressive,scalpOnly:S.scalpOnly,minConfPct:S.minConfPct,requireEdge:S.requireEdge,minWinRate:S.minWinRate,minEdgeTrades:S.minEdgeTrades,maxConcurrent:S.maxConcurrent,cooldownMin:S.cooldownMin,minStopPct:S.minStopPct,stopCooldownMin:S.stopCooldownMin,maxStopOutsPerCoin:S.maxStopOutsPerCoin,lossStreakPause:S.lossStreakPause,streakPauseMin:S.streakPauseMin};
     S=JSON.parse(JSON.stringify(DEFAULTS)); Object.assign(S,cfg); S.cash=S.capital; save(); return snapshot(); }
 
   return { tick, start, stop, reset, setConfig, getState:()=>snapshot(), __state:()=>S };

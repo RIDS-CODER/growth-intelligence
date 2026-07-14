@@ -95,12 +95,9 @@ function computeSignal(close,high,low,thr,vol,ctx){
   const volMA = vol ? IND.sma(vol,20) : null;
   const volRatio = (volMA && volMA[n]>0 && vol && vol[n]!=null) ? vol[n]/volMA[n] : null;
   const volWeak = volRatio!=null && volRatio < 1.2;       // breakout needs ≥1.2× average volume; thin = fakeout
-  // When Bitcoin is risk-off, alts tend to follow it DOWN — the macro is a tailwind for shorts. So we lower the SELL bar
-  // (~0.7×) to surface more quick correction-shorts, while EVERY short quality gate below still applies (downtrend, real
-  // trend, confirmed down-close) so we still never short into strength or chop. Longs are untouched here (blocked elsewhere).
-  const btcRiskOff = !!(ctx && ctx.btcRiskOff);
-  const sellThr = btcRiskOff ? Math.max(8, Math.round(thr*0.7)) : thr;
-  let verdict=score>=thr?'BUY':score<=-sellThr?'SELL':'HOLD';
+  // (REMOVED the BTC-weak "correction short" promotion: lowering the SELL bar forced a one-directional short bias that
+  //  lost money across multiple days. Shorts and longs now clear the SAME threshold and quality gates — no forced side.)
+  let verdict=score>=thr?'BUY':score<=-thr?'SELL':'HOLD';
   // TRADER GATES — buy the dip only in an uptrend, in a real trend, once the bounce confirms. Breakouts exempt (momentum).
   if(verdict==='BUY'  && !brkUp && !regimeUp) verdict='HOLD';                              // don't catch a falling knife
   if(verdict==='SELL' && !brkDn &&  regimeUp) verdict='HOLD';                              // don't short into strength
@@ -110,7 +107,7 @@ function computeSignal(close,high,low,thr,vol,ctx){
   if(verdict==='SELL' && !brkDn && confirmed && !turnDn) verdict='HOLD';
   if(verdict==='BUY'  && brkUp && volWeak) verdict='HOLD';                                 // breakout on thin volume = fakeout
   if(verdict==='SELL' && brkDn && volWeak) verdict='HOLD';
-  const btcWeakShort = btcRiskOff && verdict==='SELL';                                     // a quick short to fade a BTC-led correction
+  const btcWeakShort = false;                                                              // (correction-short promotion removed)
   const _sw=swingLevels(high,low,2,6);   // recent swing highs/lows for chart-level targets
   return {score,verdict,btcWeakShort,components:out,price,rsiV:rsi[n],s50:s50[n],s200:s200[n],atr:IND.atr(close,high,low)[n],hi20,lo20,regimeUp,turnUp,adx:adxV,volRatio,brkUp:price>=hi20,brkDn:price<=lo20,
     bbL:bb.lower[n],bbU:bb.upper[n],ema20:IND.ema(close,20)[n],lo10:IND.lowest(low,10),hi10:IND.highest(high,10),swHi:_sw.hs,swLo:_sw.ls};
@@ -617,10 +614,11 @@ function processAsset(asset,data,tf){
   // doesn't wobble every minute — it only changes when a new candle closes.
   const cl=data.close.slice(0,-1),hi=data.high.slice(0,-1),lo=data.low.slice(0,-1),tm=data.times?data.times.slice(0,-1):null;
   const vl=data.vol&&data.vol.length===data.close.length?data.vol.slice(0,-1):null;   // closed-bar volume (aligned to cl)
-  // Is Bitcoin risk-off? Then pause alt LONGS (they follow BTC down) AND lean into quick shorts to fade the correction.
-  const btcRiskOff = asset.src==='cg' && asset.tk!=='BTC' && BTC_STATE && BTC_STATE.tf===tf && !BTC_STATE.bull;
-  const sig=computeSignal(cl,hi,lo,thr,vl,{btcRiskOff});
-  if(btcRiskOff && sig.verdict==='BUY'){ sig.verdict='HOLD'; sig.btcBlocked=true; }   // no alt-longs while BTC is weak
+  // Only pause alt LONGS when Bitcoin is ACTIVELY SELLING (a real down-move), not merely below its trend line — the
+  // blanket "below trend → block all longs" was what left the bot short-only in a choppy tape. No forced shorts anymore.
+  const btcSelling = asset.src==='cg' && asset.tk!=='BTC' && BTC_STATE && BTC_STATE.tf===tf && BTC_STATE.verdict==='SELL';
+  const sig=computeSignal(cl,hi,lo,thr,vl);
+  if(btcSelling && sig.verdict==='BUY'){ sig.verdict='HOLD'; sig.btcBlocked=true; }   // pause alt-longs only during a genuine BTC dump
   const setup=buildSetup(sig,tf==='daily'?'daily':'intraday');   // entry/stop/targets anchored to the closed bar (stable)
   sig.closedPrice=sig.price; sig.price=live;                     // now use LIVE price for the action + the card's Current Price
   const since=signalSince(cl,hi,lo,tm);
@@ -630,10 +628,13 @@ function processAsset(asset,data,tf){
   const dec=asset.src==='cg'&&data.price<5?4:2;
   const isIndex=!!asset.isIndex||asset.sym.startsWith('^');
   const asofMs=data.mtime||(data.times?data.times[data.times.length-1]:Date.now());
-  const bt = cl.length>=120 ? assetBtScore(backtestSeries(cl,hi,lo,tf,costFor(asset),{vol:vl})) : null;   // net-of-cost historical grade (same data + volume)
+  const btRaw = cl.length>=120 ? backtestSeries(cl,hi,lo,tf,costFor(asset),{vol:vl}) : null;   // net-of-cost historical, both directions
+  const bt = btRaw ? assetBtScore(btRaw) : null;
+  // per-DIRECTION historical edge, so the bot can require a coin's LONGS (or SHORTS) to have actually made money before taking that side
+  const btSide = btRaw ? {long:{trades:btRaw.longs.trades,winRate:btRaw.longs.winRate,avgRet:btRaw.longs.avgRet},short:{trades:btRaw.shorts.trades,winRate:btRaw.shorts.winRate,avgRet:btRaw.shorts.avgRet}} : null;
   const mtf = multiTfConfirm(data,tf,sig.verdict);   // higher-timeframe agreement (resampled, no extra fetch)
   const confidence = confidenceOf(sig,mtf,bt,setup);
-  return {asset,sig,setup,since,action,reasons,scope,bt,mtf,confidence,dec,isIndex,tf,asof:fmtTime(asofMs),
+  return {asset,sig,setup,since,action,reasons,scope,bt,btSide,mtf,confidence,dec,isIndex,tf,asof:fmtTime(asofMs),
     priceTag:asset.src==='cg'?(cryptoMode==='coindcx'?'live · CoinDCX ₹':'live · global ₹'):(marketOpen()?'LIVE (broker)':'prev close'),series:data.close.slice(-80),
     bars:{h:data.high.slice(-24),l:data.low.slice(-24),c:data.close.slice(-24)}};   // compact OHLC window for the Quick-tab mini candlesticks
 }
