@@ -850,7 +850,7 @@ function card(r,i,isBuy){const{asset,sig,setup,reasons,dec,action,scope,asof,isI
 
 /* ================= ⚡ QUICK TRADES — scalp/quick setups across timeframes, split Long/Short (+ reverse dip-shorts) ================= */
 const QUICK_TFS=['5m','15m','30m','1h'];
-let quickState={open:false, tf:'15m', side:'long', data:{}, loading:false, q:''};
+let quickState={open:false, tf:'15m', side:'long', data:{}, loading:false, q:'', highOnly:false};
 let quickTimer=null;
 const qf=v=>v==null||!isFinite(v)?'—':(Math.abs(v)<5?(+v).toFixed(4):(+v).toFixed(2));
 // mini candlesticks from a compact OHLC window (open ≈ previous close for continuous crypto)
@@ -867,6 +867,7 @@ function toggleQuick(){const el=document.getElementById('quickPanel');quickState
   if(quickState.open){renderQuickShell();loadQuick(quickState.tf);quickStartTimer();}else if(quickTimer){clearInterval(quickTimer);quickTimer=null;}}
 function setQuickTf(tf){quickState.tf=tf;renderQuickShell();if(quickState.data[tf])renderQuickList();else loadQuick(tf);}
 function setQuickSide(s){quickState.side=s;renderQuickShell();}
+function setQuickHigh(){quickState.highOnly=!quickState.highOnly;renderQuickShell();}
 function normQuick(x){const s=x.setup;return {sym:x.asset.sym,name:x.asset.name||x.asset.sym,tk:x.asset.tk||'',dir:s.dir,kind:x.action?x.action.kind:'',live:x.sig.price,entryLo:s.entryLo,entryHi:s.entryHi,target:s.targets[0],targetPct:Math.abs(s.ret[0]),stop:s.stop,stopPct:s.riskPct,rr:s.rrr,conf:x.confidence||{label:'—',pct:null},note:s.note,regime:s.regime,reverse:false,bars:x.bars,targets:(s.targets||[]).slice(0,3),rets:(s.ret||[]).map(Math.abs)};}
 function reverseDipShort(x){const s=x.setup,live=x.sig.price,atr=s.atr;
   if(!(live>0)||!(atr>0))return null;
@@ -909,7 +910,8 @@ function renderQuickShell(){
     <input id="quickSearch" value="${(quickState.q||'').replace(/"/g,'&quot;')}" oninput="setQuickSearch(this.value)" placeholder="🔎 Search a coin in these setups — e.g. SOL, DOGE, BTC" style="width:100%;max-width:340px;padding:8px 12px;margin:3px 0 9px;border-radius:9px;border:1px solid var(--line);background:var(--panel2);color:var(--txt);font-family:var(--mono)">
     <div class="sub" style="margin:2px 0">Timeframe:</div>
     <div style="display:flex;gap:5px;flex-wrap:wrap;margin:3px 0 7px">${tfTabs}</div>
-    <div style="display:flex;gap:5px;flex-wrap:wrap;margin:0 0 9px">${sideTabs}</div>
+    <div style="display:flex;gap:5px;flex-wrap:wrap;margin:0 0 9px;align-items:center">${sideTabs}
+      <button class="btn ${quickState.highOnly?'go':''}" style="padding:4px 12px;font-size:12px;margin-left:6px" onclick="setQuickHigh()" title="Show only High-confidence setups and sort by highest expected return first">🎯 High only · top returns${quickState.highOnly?' ✓':''}</button></div>
     <div id="quickList"></div>
     <div id="quickAlerts" class="small" style="margin-top:10px;padding:8px 11px;border-radius:8px;border:1px dashed rgba(52,211,153,.4);background:rgba(52,211,153,.05)">📲 Telegram alerts: <span class="sub">checking…</span></div>
     <div id="quickAlertChats"></div>
@@ -941,8 +943,12 @@ function renderQuickList(){
   let list=(quickState.side==='long'?d.longs:d.shorts)||[];
   const q=(quickState.q||'').trim().toUpperCase();
   if(q) list=list.filter(x=>((x.sym||'')+' '+(x.name||'')+' '+(x.tk||'')).toUpperCase().includes(q));   // coin search
-  if(!list.length){el.innerHTML='<div class="empty">'+(q?'No quick '+quickState.side+' setups match “'+quickState.q+'” on '+quickState.tf+' — clear the search or try another timeframe/side.':'No quick '+quickState.side+' setups on '+quickState.tf+' right now — try another timeframe.')+'</div>';return;}
-  const sorted=list.slice().sort((a,b)=>((b.conf.pct||0)-(a.conf.pct||0))||(b.rr-a.rr));
+  if(quickState.highOnly) list=list.filter(x=>x.conf&&(x.conf.label==='High'||(x.conf.pct||0)>=68));    // High-confidence only
+  if(!list.length){el.innerHTML='<div class="empty">'+(quickState.highOnly?'No <b>High-confidence</b> ':'No ')+'quick '+quickState.side+' setups'+(q?' matching “'+quickState.q+'”':'')+' on '+quickState.tf+' right now'+(quickState.highOnly?' — turn off “High only” or try another timeframe.':' — try another timeframe.')+'</div>';return;}
+  // High-only view sorts by highest expected return first; otherwise by confidence then R:R
+  const sorted=quickState.highOnly
+    ? list.slice().sort((a,b)=>(b.targetPct||0)-(a.targetPct||0))
+    : list.slice().sort((a,b)=>((b.conf.pct||0)-(a.conf.pct||0))||(b.rr-a.rr));
   el.innerHTML='<div class="cards">'+sorted.map(quickCard).join('')+'</div>';
 }
 function quickCard(q){
