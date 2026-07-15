@@ -23,7 +23,7 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
   const DEFAULTS = {
     running:false, halted:false, goalHit:false,
     capital:100000, riskPct:1, dailyTargetPct:10, maxLev:5, tab:'Crypto', tf:'15m',
-    timeframes:['15m','30m','1h'],                      // the bot hunts across these itself — you don't pick a TF (faster frames = quicker fills)
+    timeframes:['5m','15m','30m','1h'],                 // the bot hunts across ALL of these itself — more scalp opportunities, same quality bar
     feeBps:0, slipBps:0, dayLossLimitPct:5, cooldownMin:20, maxConcurrent:20,
     allowShort:true, allowPending:true, allowAggressive:false,   // aggressive = market-enter the strongest near-zone setups (still R:R-guarded)
     scalpOnly:true,           // only take quick/scalp regimes (range + correction), never trend/breakout
