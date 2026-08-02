@@ -88,6 +88,24 @@ but there's no clean entry (don't chase spikes). Timeframes 5m / 15m / 30m / 1h,
 Use **🎯 Tradeable now only** to hide the WATCH rows. Both Volume Movers and Quick Trades have a
 **$ USDT / ₹ INR** display toggle (defaults to USDT — the currency most scalpers think in).
 
+### Why a price may not match your exchange exactly
+
+Each panel states which currency is exact right now, and it depends on whether this server can reach CoinDCX:
+
+| Server can reach | ₹ INR | $ USDT |
+|---|---|---|
+| **CoinDCX** (host in an India region, or run locally) | exact | exact |
+| **Global feed only** (e.g. a US-hosted server) | ~1–4% under CoinDCX | **exact** |
+
+CoinDCX trades at an **India premium** over the global market, so when the server is outside India it prices ₹
+from the global price × a plain USD/INR rate, which lands slightly below CoinDCX's own ₹ screen. **Use the $ USDT
+view to match your screen in that case** — and note every *percentage* (entry, stop, targets, R:R, and all the
+tracked outcomes) is unaffected either way, because both sides of a ratio move together.
+
+Small residual differences are normal even in CoinDCX mode: panels refresh on a timer (45s) and quotes are cached
+for a few seconds, so a fast-moving coin can read slightly stale; and an exchange screen shows bid/ask around the
+last trade. If ₹ is off by a *consistent* few percent rather than jittering, that's the premium above, not lag.
+
 API: `GET /api/movers?tf=5m` · settings: `moversTop` in `config.json` (or env `MOVERS_TOP`, default 20 coins).
 
 ### 📌 Tracked setups — recommendations never just vanish
