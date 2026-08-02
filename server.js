@@ -821,6 +821,13 @@ async function scan(tab,tf){
     try{const ltp=await upstoxLTP(keys);
       ok.forEach(r=>{if(r.asset.src==='upstox'){const k=keyOf[r.asset.sym];if(k&&ltp[k]){r.sig.price=ltp[k];/* refresh action vs live price */r.action=actionNow(r.sig,r.setup,r.since,fmtTime);}}});}catch(e){}
   }
+  // setup tracker: register the scalps this scan surfaces + update statuses with these live prices
+  if(tab==='Crypto'||tab==='All'){try{
+    const cg=ok.filter(r=>r.asset.src==='cg');
+    trackSetups(cg,tf,'quick');
+    const pm={};cg.forEach(r=>{if(r.sig.price>0)pm[r.asset.sym]=r.sig.price;});
+    sweepSetups(pm);
+  }catch(e){}}
   const cryptoAssets=uni.filter(a=>a.src==='cg');
   const cryptoFailed = cryptoAssets.length>0 && !DEMO && !ok.some(r=>r.asset.src==='cg');
   const out={tab,tf,analyzed:ok.length,total:uni.length,results:ok,ts:Date.now(),demo:DEMO,loggedIn:li,keyOf,cryptoMode,usdtInr:(cryptoMode==='coindcx'?cdxUsdtInr():0),
@@ -891,7 +898,7 @@ async function topMovers(tf){
   const d=await scan("Crypto",tf);
   const stats=DEMO?{}:await ticker24();
   const nBack=BARS_24H[tf]||24;
-  const rows=[];
+  const rows=[],trackable=[];
   (d.results||[]).forEach(r=>{
     if(!r||!r.sig||!r.setup)return;
     const tk=r.asset.tk||"", st=stats[tk]||{};
@@ -908,6 +915,7 @@ async function topMovers(tf){
     const score=Math.round(100*(0.55*mChg+0.30*mSurge+0.15*mAtr));
     // a mover needs REAL participation: a volume surge (≥1.5× normal) or a big 24h move (≥3%)
     if(!((surge!=null&&surge>=1.5)||(chg!=null&&Math.abs(chg)>=3)))return;
+    if(r.sig.verdict!=='HOLD'&&r.action&&SETUP_ACTIONABLE.has(r.action.kind))trackable.push(r);
     const s=r.setup;
     rows.push({sym:r.asset.sym,tk,name:r.asset.name||tk,score,chg24:chg!=null?+(+chg).toFixed(2):null,
       surge:surge!=null?+surge.toFixed(2):null,qv:st.qv||0,atrPct:+atrPct.toFixed(2),
@@ -919,10 +927,94 @@ async function topMovers(tf){
   rows.sort((a,b)=>b.score-a.score);
   rows.length=Math.min(rows.length,MOVERS_TOP);
   rows.forEach((x,i)=>x.rank=i+1);
+  try{const keep=new Set(rows.map(x=>x.sym));trackSetups(trackable.filter(r=>keep.has(r.asset.sym)),tf,'mover');}catch(e){}
   const out={tf,movers:rows,scanned:(d.results||[]).length,ts:Date.now(),demo:DEMO,cryptoMode,
     btc:d.btc||null,usdtInr:d.usdtInr||0};
   if(rows.length)cSet(ck,out);
   return out;
+}
+
+/* ============================================================
+   📌 SETUP TRACKER — every scalp the panels recommend is snapshotted and then
+   FOLLOWED to its outcome (filled → target/stop, or expired unfilled), even after
+   it drops out of the live list. Fixes "I took the trade and the card vanished":
+   the original levels stay available with a live status, and resolved outcomes
+   build a real FORWARD hit-rate (measured, not backtested).
+   ============================================================ */
+const SETUPS_FILE=path.join(__dirname,"setups.json");
+const SETUP_ACTIONABLE=new Set(["buynow","sellnow","buybreak","sellbreak","waitdip","waitbounce"]);
+const TF_MIN={"5m":5,"15m":15,"30m":30,"1h":60,"4h":240,"6h":360,"12h":720,"daily":1440,"intraday":30};
+const SETUP_FILL_BARS=6;        // same fill window the UI quotes: the entry zone must come within ~6 bars or the setup expires
+const SETUP_MAX_HOLD_BARS=48;   // a filled scalp is force-closed after ~48 bars — it's a scalp, not a swing
+let SETUPS={active:[],resolved:[]};
+try{const j=JSON.parse(fs.readFileSync(SETUPS_FILE,"utf8"));if(Array.isArray(j.active)&&Array.isArray(j.resolved))SETUPS=j;}catch(e){}
+let setupsDirty=false;
+function saveSetups(){if(!setupsDirty)return;try{fs.writeFileSync(SETUPS_FILE,JSON.stringify(SETUPS));setupsDirty=false;}catch(e){}}
+// register the setups a panel just displayed (src 'quick' tracks only scalp regimes — what Quick Trades shows)
+function trackSetups(results,tf,src){
+  const now=Date.now(),ms=(TF_MIN[tf]||30)*60000;
+  for(const r of results){
+    if(!r||!r.setup||!r.sig||!r.action||!r.asset)continue;
+    if(r.sig.verdict==='HOLD'||!SETUP_ACTIONABLE.has(r.action.kind))continue;
+    if(src==='quick' && !(r.setup.regime==='range'||r.setup.regime==='correction'))continue;
+    const s=r.setup,id=r.asset.sym+'|'+tf+'|'+(s.dir>0?'L':'S');
+    const ex=SETUPS.active.find(x=>x.id===id);
+    if(ex){ex.seen=now;if(r.sig.price>0)ex.live=r.sig.price;if(src&&ex.src.indexOf(src)<0){ex.src+='+'+src;setupsDirty=true;}continue;}
+    SETUPS.active.push({id,sym:r.asset.sym,tk:r.asset.tk||'',name:r.asset.name||r.asset.tk||r.asset.sym,tf,dir:s.dir,src:src||'scan',
+      entryLo:Math.min(s.entryLo,s.entryHi),entryHi:Math.max(s.entryLo,s.entryHi),stop:s.stop,stop0:s.stop,
+      targets:(s.targets||[]).slice(0,3),ret:(s.ret||[]).slice(0,3),rrr:s.rrr,regime:s.regime,dec:r.dec||2,
+      conf:r.confidence?{label:r.confidence.label,pct:r.confidence.pct}:null,
+      born:now,seen:now,expires:now+SETUP_FILL_BARS*ms,maxEnd:now+SETUP_MAX_HOLD_BARS*ms,
+      status:'waiting',hitT:0,live:r.sig.price});
+    setupsDirty=true;
+  }
+  if(SETUPS.active.length>400)SETUPS.active.splice(0,SETUPS.active.length-400);
+}
+function resolveSetup(x,status,px,now){x.status=status;x.resolvedAt=now;x.exit=px;SETUPS.resolved.push(x);setupsDirty=true;
+  if(SETUPS.resolved.length>300)SETUPS.resolved.splice(0,SETUPS.resolved.length-300);}
+// one status step against a live price. Prices are SAMPLED (~every minute), so an intrabar wick can be missed —
+// statuses are honest but conservative; the resolved stats carry the same caveat.
+function updateSetupWithPrice(x,px,now){
+  if(!(px>0)){ if(x.status==='waiting'&&now>x.expires)resolveSetup(x,'expired',x.live||0,now); return; }
+  x.live=px;
+  if(x.status==='waiting'){
+    const stopped = x.dir>0 ? px<=x.stop : px>=x.stop;
+    if(stopped){resolveSetup(x,'invalid',px,now);return;}         // fell straight through the zone to the stop → never enter
+    if(px>=x.entryLo&&px<=x.entryHi){x.status='filled';x.filledAt=now;x.fill=px;setupsDirty=true;return;}
+    if(now>x.expires){resolveSetup(x,'expired',px,now);return;}   // the zone never came → no trade
+    return;
+  }
+  if(x.status==='filled'){
+    const stopped = x.dir>0 ? px<=x.stop : px>=x.stop;
+    if(stopped){resolveSetup(x, x.hitT>0?'banked':'stopped', px, now);return;}   // after T1 the stop sits at entry → banked, not a loss
+    while(x.hitT<3&&x.targets[x.hitT]!=null&&(x.dir>0?px>=x.targets[x.hitT]:px<=x.targets[x.hitT])){
+      x.hitT++;setupsDirty=true;
+      if(x.hitT===1)x.stop=x.fill!=null?x.fill:(x.entryLo+x.entryHi)/2;   // ratchet: breakeven after T1 (mirrors the engine)
+      if(x.hitT===2)x.stop=x.targets[0];                                   // lock T1 after T2
+    }
+    if(x.hitT>=3){resolveSetup(x,'target',px,now);return;}
+    if(now>x.maxEnd)resolveSetup(x, x.hitT>0?'banked':(x.dir*(px-(x.fill||px))>0?'timeout+':'timeout-'), px, now);
+  }
+}
+function sweepSetups(prices,now){
+  now=now||Date.now(); prices=prices||{};
+  for(let i=SETUPS.active.length-1;i>=0;i--){
+    const x=SETUPS.active[i];
+    updateSetupWithPrice(x,prices[x.sym],now);
+    if(x.status!=='waiting'&&x.status!=='filled')SETUPS.active.splice(i,1);
+  }
+  saveSetups();
+}
+async function setupsSweep(){ try{ const q=await liveQuotes('Crypto'); sweepSetups(q); }catch(e){} }
+// forward record: of the setups that actually FILLED and resolved, how many hit Target 1 before the stop?
+function setupStats(){
+  const done=SETUPS.resolved.filter(x=>['target','stopped','banked','timeout+','timeout-'].includes(x.status));
+  const t1=done.filter(x=>x.hitT>0).length;
+  const wins=done.filter(x=>x.hitT>0||x.status==='timeout+').length;
+  return {tracked:SETUPS.active.length,resolved:done.length,
+    t1Rate:done.length?Math.round(100*t1/done.length):null,
+    winRate:done.length?Math.round(100*wins/done.length):null,
+    noFill:SETUPS.resolved.filter(x=>x.status==='expired'||x.status==='invalid').length};
 }
 
 /* ============================================================
@@ -946,6 +1038,11 @@ function cryptoSignalsFrom(payload){
       results.push(r);
     }catch(e){}
   });
+  // setup tracker works on the browser-fed path too (India users get their ₹ setups tracked the same way)
+  try{ trackSetups(results,tf,'quick');
+    const pm={};results.forEach(r=>{if(r.sig&&r.sig.price>0)pm[r.asset.sym]=r.sig.price;});
+    sweepSetups(pm);
+  }catch(e){}
   return {results,tf,total:(payload.assets||[]).length,analyzed:results.length,source:"coindcx-client",
     btc:BTC_STATE?{bull:BTC_STATE.bull,verdict:BTC_STATE.verdict}:null};
 }
@@ -1117,6 +1214,11 @@ async function handler(req,res){
       return sendJSON(res,cryptoSignalsFrom(payload));}
     if(p==="/api/movers"){   // 🔥 coins with the biggest volume-backed movement right now, scalp plan attached
       return sendJSON(res,await topMovers(u.searchParams.get("tf")||"5m"));}
+    if(p==="/api/setups"){   // 📌 tracked setups: every recommendation followed to its outcome + forward hit-rate
+      const tfq=u.searchParams.get("tf")||null;
+      const active=SETUPS.active.filter(x=>!tfq||x.tf===tfq).slice().sort((a,b)=>b.born-a.born).slice(0,60);
+      const recent=SETUPS.resolved.filter(x=>!tfq||x.tf===tfq).slice(-30).reverse();
+      return sendJSON(res,{active,recent,stats:setupStats(),usdtInr:(cryptoMode==='coindcx'?cdxUsdtInr():0),ts:Date.now(),demo:DEMO});}
     if(p==="/api/research"){   // one coin, several timeframes, averaged consensus (short or long horizon)
       const sym=u.searchParams.get("sym")||"", horizon=u.searchParams.get("horizon")==="long"?"long":"short";
       return sendJSON(res,await researchCoin(sym,horizon));}
@@ -1165,6 +1267,8 @@ if(require.main===module){
   });
   // Paper-bot control loop — one simulated iteration each minute (only acts when you've pressed Start).
   setInterval(()=>{ paper.tick().catch(()=>{}); }, 60000);
+  // Setup-tracker sweep — follow every recommended scalp to its stop/target/expiry, once a minute.
+  setInterval(()=>{ setupsSweep().catch(()=>{}); }, 60000);
   // Telegram alert loop — scan for High-confidence quick scalps every 3 min (inert until a bot token is configured).
   if(TG_TOKEN){ console.log('  Telegram alerts: ON (chat auto-detected from whoever messages the bot)'); setInterval(()=>{ alertScan().catch(()=>{}); }, 180000); setTimeout(()=>alertScan().catch(()=>{}),15000); }
   else console.log('  Telegram alerts: off (set TELEGRAM_BOT_TOKEN to enable — chat ID optional)');
@@ -1172,5 +1276,6 @@ if(require.main===module){
 module.exports={IND,computeSignal,buildSetup,buildReasons,confidenceOf,alertEligible,fmtAlert,sendTelegram,signalSince,actionNow,parseCandles,authURL,scan,universeFor,fmtTime,
   loadBinance,loadCoinDCX,loadCrypto,ensureCryptoUniverse,usdInr,resampleSeries,tfCfg,getCRYPTO:()=>CRYPTO,getMode:()=>cryptoMode,
   backtestSeries,scoreSeriesArr,backtest,processAsset,blendResearch,assetBtScore,cdxLiveInr,cdxUsdtInr,topMovers,ticker24,
+  trackSetups,sweepSetups,updateSetupWithPrice,setupStats,__getSetups:()=>SETUPS,__resetSetups:()=>{SETUPS={active:[],resolved:[]};},
   btcStateFromSeries,__setBtc:(s)=>{BTC_STATE=s;},
   __setCdxTicker:(t)=>{cdxTicker=t;}};
