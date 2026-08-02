@@ -1095,11 +1095,52 @@ async function loadTrackedSetups(){
 const ageTxt=ms=>{const m=Math.max(1,Math.round((Date.now()-ms)/60000));return m<60?m+'m':m<1440?Math.round(m/60)+'h':Math.round(m/1440)+'d';};
 function trackedStatus(x){
   if(x.status==='waiting')return {txt:'⏳ WAITING — entry not reached',col:'var(--accent2)'};
-  if(x.status==='filled')return x.hitT>0?{txt:'✅ T'+x.hitT+' HIT — stop at '+(x.hitT===1?'entry':'T1'),col:'var(--buy)'}:{txt:'🎯 IN TRADE — filled',col:'var(--buy)'};
+  if(x.status==='filled'){
+    // A signal that has flipped against an open trade outranks everything else — the reason you entered is gone.
+    if(x.rev)return {txt:'⚠ REVERSED — signal flipped against you',col:'#fb7185'};
+    if(x.hitT>0)return {txt:'✅ T'+x.hitT+' HIT — stop at '+(x.hitT===1?'entry':'T'+(x.hitT-1)),col:'var(--buy)'};
+    const p=x.pnlNow;
+    if(p!=null&&p<0)return {txt:'🎯 IN TRADE — '+p.toFixed(1)+'% (underwater)',col:'#fbbf24'};
+    return {txt:'🎯 IN TRADE'+(p!=null?' — +'+p.toFixed(1)+'%':' — filled'),col:'var(--buy)'};
+  }
   return {txt:x.status,col:'var(--muted)'};
+}
+// What to actually DO when a live trade has turned against you — shown under a reversed/underwater row.
+function trackedAdvice(x){
+  if(x.status!=='filled')return '';
+  if(x.rev)return `<div style="margin:2px 0 6px;padding:6px 9px;border-radius:7px;background:rgba(251,113,133,.1);border:1px solid rgba(251,113,133,.4);color:#fecdd3;font-size:11.5px;line-height:1.45">
+    <b>⚠ The setup that justified this trade is gone</b> — the engine now reads ${x.dir>0?'SELL':'BUY'} on ${x.tk||x.name}, the opposite of your ${x.dir>0?'long':'short'}.
+    ${x.hitT>0?`You have already banked T${x.hitT} and your stop sits at ${x.hitT===1?'entry':'T'+(x.hitT-1)}, so the rest is protected — let the stop do its job.`
+      :`Standard scalp discipline is to <b>close at market now</b> rather than hold to the stop: a reversed scalp usually reaches the stop anyway, and exiting early makes the loss smaller than the planned one. Holding on turns a small planned loss into an unplanned bigger one.`}</div>`;
+  if(x.pnlNow!=null&&x.pnlNow<0)return `<div class="sub" style="margin:2px 0 6px;font-size:11.5px">Going against you but the signal still stands — the plan allows for this. Your stop at <b>${scalpPrice(x.stop)}</b> is the exit; don't move it further away.</div>`;
+  return '';
 }
 const RESOLVED_TAG={target:['✅ all targets','var(--buy)'],banked:['✅ banked (T1+)','var(--buy)'],stopped:['⛔ stopped','var(--sell)'],
   'timeout+':['⏱ closed +','var(--buy)'],'timeout-':['⏱ closed −','var(--sell)'],expired:['⌛ never filled','var(--muted)'],invalid:['🚫 invalidated before fill','var(--muted)']};
+// Plain-English "what this meant if you had money in it" — the whole point of the history section.
+const OUTCOME_MEANING={
+  target:'Ran to all three targets. Full plan played out.',
+  banked:'Hit Target 1+, then the ratcheted stop closed the rest at or above your entry — a win, not a loss.',
+  stopped:'Went against you from the start and hit the stop. This is the planned loss — the reason position sizing matters.',
+  'timeout+':'Never reached a target, but was in profit when the scalp window ran out. Closed green.',
+  'timeout-':'Never reached a target and was underwater when the window ran out. Small loss, no stop hit.',
+  expired:'Price never came down to the entry zone. NO TRADE — you were never in it, so nothing was lost.',
+  invalid:'Price broke through the stop before ever reaching the entry. NO TRADE — the setup was voided before it started.'};
+const FILLED_STATUS=new Set(['target','stopped','banked','timeout+','timeout-']);
+function historyRow(x){
+  const t=RESOLVED_TAG[x.status]; if(!t)return '';
+  const P=scalpPrice, filled=FILLED_STATUS.has(x.status), pnl=x.pnlPct;
+  const pc=pnl==null?'var(--muted)':pnl>0?'var(--buy)':pnl<0?'var(--sell)':'var(--muted)';
+  return `<div style="padding:7px 9px;border-bottom:1px solid var(--line);font-size:12px">
+    <div style="display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline">
+      <b style="min-width:64px">${x.tk||x.name}</b><span class="sub">${x.tf}</span>
+      <b style="color:${x.dir>0?'var(--buy)':'var(--sell)'}">${x.dir>0?'LONG':'SHORT'}</b>
+      <span style="color:${t[1]};font-weight:700">${t[0]}</span>
+      ${filled?`<span style="color:${pc};font-weight:800;font-family:var(--mono)">${pnl==null?'':(pnl>0?'+':'')+pnl.toFixed(2)+'%'}</span>`:'<span class="sub">no trade</span>'}
+      <span class="sub">entry ${P(x.entryLo)}–${P(x.entryHi)}${filled&&x.fill?' · filled '+P(x.fill):''}${x.exit?' · exit '+P(x.exit):''}</span>
+      <span class="sub">${ageTxt(x.resolvedAt||x.born)} ago</span></div>
+    <div class="sub" style="margin-top:2px;font-size:11.5px">${OUTCOME_MEANING[x.status]||''}</div></div>`;
+}
 function trackedRow(x){
   const P=scalpPrice,st=trackedStatus(x),isL=x.dir>0;
   const nextT=x.status==='filled'&&x.hitT<3?x.targets[x.hitT]:x.targets[0];
@@ -1113,21 +1154,38 @@ function trackedRow(x){
     <span class="sub">live <b style="color:var(--txt)">${P(x.live)}</b></span>
     <span class="sub">${ageTxt(x.born)} ago${x.conf&&x.conf.pct!=null?' · ◆'+x.conf.pct+'%':''}</span></div>`;
 }
+let trackedOpen={}, historyOpen={};   // remember which dropdowns the user left open, per panel
+function toggleTracked(id,on){trackedOpen[id]=on;}
+function toggleHistory(id,on){historyOpen[id]=on;}
 async function renderTracked(elId){
   const el=document.getElementById(elId); if(!el)return;
   const d=await loadTrackedSetups(); if(!el.isConnected)return;
   if(!d){el.innerHTML='';return;}
-  const act=(d.active||[]).slice(0,10), rec=(d.recent||[]).filter(x=>RESOLVED_TAG[x.status]).slice(0,8), s=d.stats||{};
+  const act=(d.active||[]).slice(0,12);
+  const hist=(d.history||d.recent||[]).filter(x=>RESOLVED_TAG[x.status]).slice(0,25);
+  const s=d.stats||{};
+  const live=act.filter(x=>x.status==='filled').length, waiting=act.filter(x=>x.status==='waiting').length, revd=s.reversed||0;
+  // headline the dropdown so it's useful while collapsed
+  const summary=[act.length?`<b>${act.length}</b> tracked`:'nothing tracked yet',
+    live?`<b style="color:var(--buy)">${live}</b> in trade`:'', waiting?`${waiting} waiting`:'',
+    revd?`<b style="color:#fb7185">⚠ ${revd} reversed</b>`:'',
+    s.resolved?`· record <b style="color:${(s.t1Rate||0)>=55?'var(--buy)':'#fbbf24'}">${s.t1Rate}%</b> to T1 (${s.resolved})`:''].filter(Boolean).join(' · ');
   const statsTxt = s.resolved
-    ? `Forward record so far: <b>${s.resolved}</b> filled setups resolved · <b style="color:${(s.t1Rate||0)>=55?'var(--buy)':'#fbbf24'}">${s.t1Rate}%</b> hit Target 1 before the stop${s.noFill?` · ${s.noFill} never filled (no trade, no loss)`:''}`
+    ? `Forward record: <b>${s.resolved}</b> filled setups resolved · <b style="color:${(s.t1Rate||0)>=55?'var(--buy)':'#fbbf24'}">${s.t1Rate}%</b> hit Target 1 before the stop${s.avgPnl!=null?` · avg <b style="color:${s.avgPnl>=0?'var(--buy)':'var(--sell)'}">${s.avgPnl>0?'+':''}${s.avgPnl}%</b> per filled trade`:''}${s.noFill?` · ${s.noFill} never filled (no trade, no loss)`:''}`
     : 'Forward record builds automatically as tracked setups resolve — check back after a few sessions.';
-  const recHtml=rec.length?`<div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:6px">${rec.map(x=>{const t=RESOLVED_TAG[x.status];
-    return `<span class="btmini" style="border-color:${t[1]};color:${t[1]}" title="entry ${qf(x.entryLo)}–${qf(x.entryHi)} · resolved ${ageTxt(x.resolvedAt||x.born)} ago">${x.tk||x.name} ${x.tf} ${x.dir>0?'L':'S'} — ${t[0]}</span>`;}).join('')}</div>`:'';
-  el.innerHTML=`<div style="margin:0 0 10px;padding:9px 11px;border-radius:9px;border:1px dashed rgba(34,211,238,.4);background:rgba(34,211,238,.04)">
-    <div style="font-size:12.5px;font-weight:700">📌 Tracked setups <span class="sub" style="font-weight:400">— every recommendation shown here is snapshotted and followed to its stop/target, even after it leaves the live list. If you entered one that disappeared, its status lives here. Prices checked ~every minute.</span></div>
-    ${act.length?`<div style="margin-top:6px;border-top:1px solid var(--line)">${act.map(trackedRow).join('')}</div>`:'<div class="sub" style="margin-top:6px">Nothing being tracked yet — setups appear here the moment a panel recommends them.</div>'}
-    <div class="sub" style="margin-top:7px">${statsTxt}</div>
-    ${recHtml}</div>`;
+  el.innerHTML=`<details ${trackedOpen[elId]?'open':''} ontoggle="toggleTracked('${elId}',this.open)" style="margin:0 0 10px;border-radius:9px;border:1px dashed rgba(34,211,238,.4);background:rgba(34,211,238,.04)">
+    <summary style="cursor:pointer;padding:9px 11px;font-size:12.5px;font-weight:700;list-style:revert">📌 Tracked setups <span class="sub" style="font-weight:400">— ${summary}</span></summary>
+    <div style="padding:0 11px 10px">
+      <div class="sub" style="font-size:11.5px;margin-bottom:4px">Every recommendation is snapshotted and followed to its stop/target, even after it leaves the live list. If you entered one that disappeared, its status is here. Prices checked ~every minute.</div>
+      ${act.length?`<div style="border-top:1px solid var(--line)">${act.map(x=>trackedRow(x)+trackedAdvice(x)).join('')}</div>`:'<div class="sub">Nothing being tracked yet — setups appear here the moment a panel recommends them.</div>'}
+      <div class="sub" style="margin-top:7px">${statsTxt}</div>
+      <details ${historyOpen[elId]?'open':''} ontoggle="toggleHistory('${elId}',this.open)" style="margin-top:8px;border-top:1px solid var(--line);padding-top:7px">
+        <summary style="cursor:pointer;font-size:12px;font-weight:700;list-style:revert">🕘 Past recommendations <span class="sub" style="font-weight:400">— what happened to each one, and what it meant if you had money in it${hist.length?` (${hist.length})`:''}</span></summary>
+        ${hist.length?`<div style="margin-top:5px;border-top:1px solid var(--line)">${hist.map(historyRow).join('')}</div>
+          <div class="sub" style="margin-top:6px;font-size:11.5px">%s are the realized result of the engine's own exit plan — a third banked at each target, the rest closed at the exit price — for <b>one unit</b> per trade, before fees and slippage. Rows marked <b>no trade</b> never filled, so they cost nothing. ${s.netPnl!=null?`Net across every filled trade: <b style="color:${s.netPnl>=0?'var(--buy)':'var(--sell)'}">${s.netPnl>0?'+':''}${s.netPnl}%</b>.`:''}</div>`
+          :'<div class="sub" style="margin-top:5px">No past recommendations yet — this fills in as tracked setups resolve.</div>'}
+      </details>
+    </div></details>`;
 }
 
 function ladder(s){const v=[s.stop,s.entry,...s.targets],lo=Math.min(...v),hi=Math.max(...v),sp=hi-lo||1,pos=x=>((x-lo)/sp)*100;
