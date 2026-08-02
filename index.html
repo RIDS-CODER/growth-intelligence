@@ -169,6 +169,7 @@
     <button class="btn" id="tradesBtn" onclick="toggleTrades()" style="border-color:var(--accent2);background:rgba(34,211,238,.12);color:#a5f3fc">📋 My Trades (0)</button>
     <button class="btn" id="researchBtn" onclick="toggleResearch()" style="border-color:#a78bfa;background:rgba(167,139,250,.14);color:#ddd6fe">🔎 Research a coin</button>
     <button class="btn" id="quickBtn" onclick="toggleQuick()" style="border-color:#f59e0b;background:rgba(245,158,11,.15);color:#fde68a">⚡ Quick Trades</button>
+    <button class="btn" id="moversBtn" onclick="toggleMovers()" style="border-color:#fb7185;background:rgba(251,113,133,.14);color:#fecdd3">🔥 Volume Movers</button>
     <button class="btn" id="paperBtn" onclick="togglePaper()" style="border-color:#34d399;background:rgba(52,211,153,.14);color:#a7f3d0">🤖 Paper Bot</button>
     <span class="pstat" id="filterNote"></span>
   </div>
@@ -176,6 +177,7 @@
   <div id="cryptoNote" style="display:none"></div>
   <div id="btcNote" style="display:none"></div>
   <div id="quickPanel" style="display:none"></div>
+  <div id="moversPanel" style="display:none"></div>
   <div id="researchPanel" style="display:none"></div>
   <div id="paperPanel" style="display:none"></div>
   <div id="tradesPanel" style="display:none"></div>
@@ -969,6 +971,76 @@ function quickCard(q){
       ${q.note?`<div style="margin:4px 0;padding:6px 9px;border-radius:7px;background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.35);color:#fbbf24;font-size:11.5px;line-height:1.4">${q.note}</div>`:''}
       <div class="sub" style="margin-top:4px">⏱ works in ~${fillWindowText(quickState.tf)} (≈${FILL_BARS} bars) · Live <b>${qf(q.live)}</b></div></div></div>`;
 }
+/* ================= 🔥 VOLUME MOVERS — coins moving the most on real volume right now, ranked for quick scalps ================= */
+const MOVER_TFS=['5m','15m','30m','1h'];
+const MOVER_ACTIONABLE=['buynow','sellnow','buybreak','sellbreak','waitdip','waitbounce'];
+let moversState={open:false, tf:'5m', data:{}, loading:false, actionOnly:false};
+let moversTimer=null;
+const fmtQv=v=>!(v>0)?'—':v>=1e7?'₹'+(v/1e7).toFixed(1)+' Cr':v>=1e5?'₹'+(v/1e5).toFixed(1)+' L':'₹'+Math.round(v).toLocaleString('en-IN');
+function moversStartTimer(){ if(moversTimer)clearInterval(moversTimer); moversTimer=setInterval(()=>{ if(moversState.open)loadMovers(moversState.tf); }, 45000); }
+function toggleMovers(){const el=document.getElementById('moversPanel');moversState.open=el.style.display==='none';el.style.display=moversState.open?'block':'none';
+  if(moversState.open){renderMoversShell();loadMovers(moversState.tf);moversStartTimer();}else if(moversTimer){clearInterval(moversTimer);moversTimer=null;}}
+function setMoversTf(tf){moversState.tf=tf;renderMoversShell();if(moversState.data[tf])renderMoversList();else loadMovers(tf);}
+function setMoversAction(){moversState.actionOnly=!moversState.actionOnly;renderMoversShell();}
+async function loadMovers(tf){
+  moversState.loading=true; renderMoversList();
+  try{ const d=await(await fetch('/api/movers?tf='+tf+'&_='+Date.now())).json();
+    moversState.data[tf]={movers:d.movers||[],ts:d.ts||Date.now(),scanned:d.scanned}; }
+  catch(e){ moversState.data[tf]={movers:[],err:String(e.message||e)}; }
+  moversState.loading=false; renderMoversList();   // list-only refresh → the shell (tabs/buttons) never rebuilds mid-click
+}
+function renderMoversShell(){
+  const el=document.getElementById('moversPanel'); if(!el)return;
+  const d=moversState.data[moversState.tf]||{};
+  const tfTabs=MOVER_TFS.map(tf=>`<div class="rztab ${tf===moversState.tf?'on':''}" onclick="setMoversTf('${tf}')">${tf}</div>`).join('');
+  el.innerHTML=`<div class="tradespanel" style="border-color:rgba(251,113,133,.45)">
+    <h3>🔥 Volume Movers <span class="sub">— biggest volume-backed moves right now · crypto</span> <button class="btn" style="padding:2px 9px;font-size:11px" onclick="loadMovers(moversState.tf)">↻ refresh ${moversState.tf}</button> <span class="sub" id="moversUpd">${d.ts?'· updated '+new Date(d.ts).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true}):''}</span> <span class="sub">· auto ⟳ 45s</span></h3>
+    <div class="sub" style="margin:2px 0">Timeframe:</div>
+    <div style="display:flex;gap:5px;flex-wrap:wrap;margin:3px 0 9px;align-items:center">${tfTabs}
+      <button class="btn ${moversState.actionOnly?'go':''}" style="padding:4px 12px;font-size:12px;margin-left:6px" onclick="setMoversAction()" title="Hide movers where the engine sees no clean entry right now">🎯 Tradeable now only${moversState.actionOnly?' ✓':''}</button></div>
+    <div id="moversList"></div>
+    <p class="small" style="color:var(--muted);margin-top:9px">Ranked by <b>🔥 Mover Score</b> — 24h move (55%) + <b>volume surge vs the coin's own average</b> (30%) + bar range (15%). A high score means the coin is MOVING on real participation — it is <b>not</b> a buy signal by itself. The ⚡ plan on each card is the engine's actual scalp entry / stop / target for this timeframe, and <b>WATCH</b> means it's moving but there's no clean edge — stand aside rather than chase. Quick in-and-out only. Not financial advice.</p></div>`;
+  renderMoversList();
+}
+function moverCard(m){
+  const s=m.setup||{}, isBuy=s.dir>0;
+  const tradeable=m.verdict!=='HOLD'&&m.action&&MOVER_ACTIONABLE.includes(m.action.kind);
+  const col=isBuy?'var(--buy)':'var(--sell)';
+  const scoreCol=m.score>=70?'#fb7185':m.score>=45?'#fbbf24':'var(--muted)';
+  const chgCol=(m.chg24||0)>=0?'var(--buy)':'var(--sell)';
+  const surgeTxt=m.surge!=null?('<b>'+m.surge.toFixed(1)+'×</b> avg vol'):'vol n/a';
+  const conf=m.conf||{label:'—',pct:null}, confCol=conf.label==='High'?'var(--buy)':conf.label==='Medium'?'#fbbf24':'var(--muted)';
+  const verb=isBuy?(m.action&&(m.action.kind==='buynow'||m.action.kind==='buybreak')?'BUY NOW':'BUY DIP'):(m.action&&(m.action.kind==='sellnow'||m.action.kind==='sellbreak')?'SHORT NOW':'SHORT BOUNCE');
+  const plan=tradeable
+    ? `<div style="font-size:13px;line-height:1.65;margin:3px 0"><b style="color:${col}">⚡ ${verb}</b> <b>${qf(s.entryLo)}–${qf(s.entryHi)}</b> → quick target <b>${qf(s.targets[0])}</b> <span style="color:${col};font-weight:700">(+${Math.abs(s.ret[0]).toFixed(1)}%)</span> · stop <b>${qf(s.stop)}</b> <span style="color:var(--sell)">(−${s.riskPct.toFixed(1)}%)</span> · R:R <b>${(s.rrr||0).toFixed(1)}:1</b> · <span style="color:${confCol};font-weight:700" title="Setup confidence — quality gauge, not a win probability">◆ ${conf.label}${conf.pct!=null?' '+conf.pct+'%':''}</span></div>`
+    : `<div style="font-size:12.5px;margin:3px 0;color:var(--muted)">⏸ <b>Moving, but no clean edge</b> — the engine sees no safe entry right now (chasing a spike is how scalps die). Watch it: a dip to support or a fresh breakout turns this into a plan.</div>`;
+  return `<div class="tc ${tradeable&&!isBuy?'sellcard':''}">
+    <div class="hd" onclick="this.parentNode.classList.toggle('open')" style="cursor:pointer">
+      <div class="l"><div class="name">#${m.rank} ${m.name}</div>
+        <div class="sub">${m.tk?m.tk+' · ':''}${m.sym} · <span style="color:${chgCol};font-weight:700">${m.chg24!=null?((m.chg24>=0?'+':'')+m.chg24.toFixed(1)+'% / 24h'):'—'}</span> · ${surgeTxt} · 24h vol ${fmtQv(m.qv)} · <span style="color:var(--accent2)">▾ chart &amp; plan</span></div></div>
+      <div class="r"><span class="verdict ${tradeable?(isBuy?'BUY':'SELL'):'HOLD'}">${tradeable?(isBuy?'LONG':'SHORT'):'WATCH'}</span>
+        <div class="btmini" style="border-color:${scoreCol};color:${scoreCol};margin-top:6px" title="Mover Score — how much volume-backed movement is happening (activity gauge, not trade quality)">🔥 ${m.score}</div></div></div>
+    <div class="bd">
+      ${quickCandles(m.bars)}
+      ${plan}
+      ${s.note?`<div style="margin:4px 0;padding:6px 9px;border-radius:7px;background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.35);color:#fbbf24;font-size:11.5px;line-height:1.4">${s.note}</div>`:''}
+      <div class="sub" style="margin-top:4px">Live <b>${qf(m.live)}</b> · bar range ~${(m.atrPct||0).toFixed(1)}% · ⏱ works in ${fillWindowText(moversState.tf)}${m.tk?' · <a style="color:var(--accent2);cursor:pointer" onclick="event.stopPropagation();openResearchFor(\''+(m.tk||m.sym)+'\',\'short\')">🔎 research</a>':''}</div>
+    </div></div>`;
+}
+function renderMoversList(){
+  const el=document.getElementById('moversList'); if(!el)return;
+  const d=moversState.data[moversState.tf];
+  const upd=document.getElementById('moversUpd');
+  if(upd&&d&&d.ts)upd.textContent='· updated '+new Date(d.ts).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true});
+  if(moversState.loading&&!d){el.innerHTML='<div class="sub" style="padding:14px">⏳ Ranking the biggest volume movers on '+moversState.tf+'…</div>';return;}
+  if(!d){el.innerHTML='<div class="sub" style="padding:14px">—</div>';return;}
+  if(d.err){el.innerHTML='<div class="sub" style="padding:14px;color:var(--sell)">Couldn’t load '+moversState.tf+': '+d.err+'</div>';return;}
+  let list=d.movers||[];
+  if(moversState.actionOnly)list=list.filter(m=>m.verdict!=='HOLD'&&m.action&&MOVER_ACTIONABLE.includes(m.action.kind));
+  if(!list.length){el.innerHTML='<div class="empty">No big volume movers on '+moversState.tf+' right now'+(moversState.actionOnly?' with a tradeable setup — turn off “Tradeable now only” to watch the raw movers.':' — the market is quiet; check back in a few minutes.')+'</div>';return;}
+  el.innerHTML='<div class="cards">'+list.map(moverCard).join('')+'</div>';
+}
+
 function ladder(s){const v=[s.stop,s.entry,...s.targets],lo=Math.min(...v),hi=Math.max(...v),sp=hi-lo||1,pos=x=>((x-lo)/sp)*100;
   const mk=(x,c,l,b)=>`<div class="mk" style="left:${pos(x)}%;background:${c}"></div><div class="lab ${b?'bot':''}" style="left:${pos(x)}%;color:${c}">${l}</div>`;
   return `<div class="ladder">${mk(s.stop,'var(--sell)','SL',0)}${mk(s.entry,'var(--accent2)','Entry',1)}${mk(s.targets[0],'var(--buy)','T1',0)}${mk(s.targets[1],'var(--buy)','T2',1)}${mk(s.targets[2],'var(--buy)','T3',0)}</div>`;}

@@ -65,6 +65,22 @@ That's it — live prices for the rest of the day.
 
 ---
 
+## 🔥 Volume Movers — scalp the coins that are actually moving
+
+Click **🔥 Volume Movers** on the dashboard to see the crypto coins with the **biggest volume-backed
+movement right now**, ranked by a 0–100 **Mover Score**:
+
+- **55% — size of the 24h move** (from the exchange's own 24h stats),
+- **30% — volume surge** vs that coin's *own* 20-bar average (a real crowd, not a thin wick),
+- **15% — bar range** (enough room per bar to make a scalp worth taking).
+
+A coin only qualifies as a mover with **real participation**: a volume surge ≥ 1.5× normal, or a 24h move ≥ 3%.
+Each mover card carries the engine's actual **quick-scalp plan** for that timeframe — entry zone, stop, targets,
+R:R and confidence — or shows **WATCH** when the coin is moving but there's no clean entry (don't chase spikes).
+Timeframes 5m / 15m / 30m / 1h, auto-refreshing every 45s. Use **🎯 Tradeable now only** to hide the WATCH rows.
+
+API: `GET /api/movers?tf=5m` · settings: `moversTop` in `config.json` (or env `MOVERS_TOP`, default 20 coins).
+
 ## How prices stay accurate
 
 - **Stocks/ETFs/indices:** Upstox real-time last-traded price (LTP), refreshed every few seconds, plus
