@@ -854,6 +854,78 @@ async function liveQuotes(tab){
 }
 
 /* ============================================================
+   🔥 HIGH-VOLUME MOVERS — the coins moving the MOST right now on real volume,
+   ranked for quick scalps. Reuses the cached scan (no extra candle fetches), so
+   every mover arrives with the engine's actual entry/stop/target plan attached.
+   ============================================================ */
+const MOVERS_TOP=parseInt(process.env.MOVERS_TOP)||parseInt(CFG.moversTop)||20;
+const BARS_24H={"5m":288,"15m":96,"30m":48,"1h":24,"4h":6,"6h":4,"12h":2,"daily":1,"intraday":48};
+let tick24Cache=null,tick24At=0;
+// 24h stats per coin {BASE:{chg,qv}} — chg = 24h % change, qv = 24h traded value in ₹ (from the active crypto source)
+async function ticker24(){
+  if(tick24Cache&&Date.now()-tick24At<60000)return tick24Cache;
+  const out={};
+  try{
+    if(cryptoMode==="coindcx"){
+      const t=await cdxGetTicker();
+      t.forEach(x=>{ if(!x.market||!x.market.endsWith("INR"))return;
+        const base=x.market.slice(0,-3); if(isStableBase(base))return;
+        const last=+x.last_price||0, chg=+x.change_24_hour;
+        const row={chg:isFinite(chg)?chg:null, qv:(+x.volume||0)*last};
+        if(!out[base]||row.qv>out[base].qv)out[base]=row;
+      });
+    }else{
+      const arr=await binanceGet("/api/v3/ticker/24hr"); const fx=await usdInr();
+      if(Array.isArray(arr))arr.forEach(x=>{ if(!x.symbol||!x.symbol.endsWith("USDT"))return;
+        const base=x.symbol.slice(0,-4); if(isStableBase(base))return;
+        const chg=+x.priceChangePercent;
+        out[base]={chg:isFinite(chg)?chg:null, qv:(+x.quoteVolume||0)*fx};
+      });
+    }
+    if(Object.keys(out).length){tick24Cache=out;tick24At=Date.now();}
+  }catch(e){ if(tick24Cache)return tick24Cache; }
+  return out;
+}
+async function topMovers(tf){
+  const ck="movers:"+tf; const hit=cGet(ck,TTL_CRYPTO); if(hit)return {...hit,cached:true};
+  const d=await scan("Crypto",tf);
+  const stats=DEMO?{}:await ticker24();
+  const nBack=BARS_24H[tf]||24;
+  const rows=[];
+  (d.results||[]).forEach(r=>{
+    if(!r||!r.sig||!r.setup)return;
+    const tk=r.asset.tk||"", st=stats[tk]||{};
+    let chg=st.chg;
+    if(chg==null&&Array.isArray(r.series)&&r.series.length>2){
+      const c=r.series, i=Math.max(0,c.length-1-nBack);   // exchange stat unavailable → measure from this scan's own candles
+      if(c[i]>0)chg=(c[c.length-1]/c[i]-1)*100;
+    }
+    const surge=r.sig.volRatio!=null?+r.sig.volRatio:null;                    // latest closed bar vs the coin's own 20-bar average
+    const atrPct=(r.sig.atr>0&&r.sig.price>0)?r.sig.atr/r.sig.price*100:0;
+    // MOVER SCORE — how much volume-backed movement is happening NOW (an activity gauge, NOT trade quality):
+    // 55% size of the 24h move · 30% volume surge vs the coin's normal · 15% per-bar range (scalp room)
+    const mChg=Math.min(1,Math.abs(chg||0)/12), mSurge=surge!=null?Math.min(1,surge/3):0.35, mAtr=Math.min(1,atrPct/3);
+    const score=Math.round(100*(0.55*mChg+0.30*mSurge+0.15*mAtr));
+    // a mover needs REAL participation: a volume surge (≥1.5× normal) or a big 24h move (≥3%)
+    if(!((surge!=null&&surge>=1.5)||(chg!=null&&Math.abs(chg)>=3)))return;
+    const s=r.setup;
+    rows.push({sym:r.asset.sym,tk,name:r.asset.name||tk,score,chg24:chg!=null?+(+chg).toFixed(2):null,
+      surge:surge!=null?+surge.toFixed(2):null,qv:st.qv||0,atrPct:+atrPct.toFixed(2),
+      live:r.sig.price,dec:r.dec,verdict:r.sig.verdict,tradeScore:r.sig.score,
+      setup:{dir:s.dir,type:s.type,regime:s.regime,entryLo:s.entryLo,entryHi:s.entryHi,entry:s.entry,stop:s.stop,riskPct:s.riskPct,
+        targets:s.targets,ret:s.ret,rrr:s.rrr,suggestedLev:s.suggestedLev,hold:s.hold,note:s.note},
+      action:r.action?{kind:r.action.kind,cls:r.action.cls}:null,conf:r.confidence||null,bars:r.bars});
+  });
+  rows.sort((a,b)=>b.score-a.score);
+  rows.length=Math.min(rows.length,MOVERS_TOP);
+  rows.forEach((x,i)=>x.rank=i+1);
+  const out={tf,movers:rows,scanned:(d.results||[]).length,ts:Date.now(),demo:DEMO,cryptoMode,
+    btc:d.btc||null,usdtInr:d.usdtInr||0};
+  if(rows.length)cSet(ck,out);
+  return out;
+}
+
+/* ============================================================
    HTTP
    ============================================================ */
 async function getJSON(url,headers){const r=await fetch(url,{headers});if(!r.ok)throw new Error("HTTP "+r.status+" "+url.slice(0,60));return r.json();}
@@ -1043,6 +1115,8 @@ async function handler(req,res){
     if(p==="/api/crypto-signals" && req.method==="POST"){
       const body=await readBody(req);let payload;try{payload=JSON.parse(body);}catch(e){return sendJSON(res,{error:"bad json"},400);}
       return sendJSON(res,cryptoSignalsFrom(payload));}
+    if(p==="/api/movers"){   // 🔥 coins with the biggest volume-backed movement right now, scalp plan attached
+      return sendJSON(res,await topMovers(u.searchParams.get("tf")||"5m"));}
     if(p==="/api/research"){   // one coin, several timeframes, averaged consensus (short or long horizon)
       const sym=u.searchParams.get("sym")||"", horizon=u.searchParams.get("horizon")==="long"?"long":"short";
       return sendJSON(res,await researchCoin(sym,horizon));}
@@ -1097,6 +1171,6 @@ if(require.main===module){
 }
 module.exports={IND,computeSignal,buildSetup,buildReasons,confidenceOf,alertEligible,fmtAlert,sendTelegram,signalSince,actionNow,parseCandles,authURL,scan,universeFor,fmtTime,
   loadBinance,loadCoinDCX,loadCrypto,ensureCryptoUniverse,usdInr,resampleSeries,tfCfg,getCRYPTO:()=>CRYPTO,getMode:()=>cryptoMode,
-  backtestSeries,scoreSeriesArr,backtest,processAsset,blendResearch,assetBtScore,cdxLiveInr,cdxUsdtInr,
+  backtestSeries,scoreSeriesArr,backtest,processAsset,blendResearch,assetBtScore,cdxLiveInr,cdxUsdtInr,topMovers,ticker24,
   btcStateFromSeries,__setBtc:(s)=>{BTC_STATE=s;},
   __setCdxTicker:(t)=>{cdxTicker=t;}};
