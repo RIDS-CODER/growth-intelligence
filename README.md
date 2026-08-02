@@ -100,11 +100,33 @@ scan. Now **every recommendation the panels show is snapshotted server-side and 
   ratcheting to breakeven after T1 and to T1 after T2 (exactly like the engine's exit plan),
 - resolved as **✅ all targets / ✅ banked / ⛔ stopped / ⌛ never filled / 🚫 invalidated before fill**.
 
-The 📌 block at the top of both panels shows every active setup with its ORIGINAL levels and live status —
-so if you took a trade and the card left the list, its stop/target guidance is still right there. Resolved
-outcomes accumulate into a **forward record** ("X resolved · Y% hit Target 1 before the stop") — a measured,
-real-time hit rate of the recommendations themselves, not a backtest. Statuses are sampled ~once a minute
-(state survives restarts via `setups.json`). API: `GET /api/setups`.
+The **📌 Tracked setups** dropdown at the top of both panels (collapsed by default — the summary line shows
+how many are tracked, in trade, reversed, and the running hit rate) lists every active setup with its
+ORIGINAL levels and live status, so if you took a trade and the card left the list, its stop/target guidance
+is still right there. Filled trades also show live unrealized %.
+
+**⚠ If a trade reverses on you.** When the engine's signal for a coin you're holding flips to the opposite
+side, the setup is marked **⚠ REVERSED** and tells you what to do — the reason you entered no longer exists:
+
+- **Reversed before any target** → *close at market now*. A reversed scalp usually reaches the stop anyway,
+  and exiting early makes the loss smaller than the planned one.
+- **Reversed after Target 1** → *let the stop do its job*. You've already banked a third and the stop has
+  ratcheted to your entry, so the rest is protected.
+- **Merely underwater, signal intact** → *hold to plan*. The stop is the exit; don't widen it.
+
+The tracker only ever flags — it never closes a position for you, and the flag clears if the signal comes
+back onside.
+
+**🕘 Past recommendations** (a nested dropdown) is the history: every resolved setup with what happened, the
+realized %, and a plain-English note on *what it meant if you had money in it* — e.g. `stopped −3.96%`
+("the planned loss — the reason position sizing matters") vs `never filled` ("NO TRADE — nothing was lost").
+Percentages follow the engine's own exit plan (a third banked at each target, remainder at the exit) for one
+unit per trade, **before fees and slippage**. Stop-outs are recorded at the stop price, not the sampled
+price, so a once-a-minute sampling gap doesn't overstate losses.
+
+Together these build a **forward record** — a measured, real-time hit rate of the recommendations
+themselves, distinct from the backtest. Statuses are sampled ~once a minute (state survives restarts via
+`setups.json`). API: `GET /api/setups` (`?tf=`, `?limit=`).
 
 ## How prices stay accurate
 

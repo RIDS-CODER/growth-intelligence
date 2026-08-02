@@ -830,6 +830,7 @@ async function scan(tab,tf){
   if(tab==='Crypto'||tab==='All'){try{
     const cg=ok.filter(r=>r.asset.src==='cg');
     trackSetups(cg,tf,'quick');
+    markReversals(cg,tf);        // flag filled trades whose signal has flipped against them
     const pm={};cg.forEach(r=>{if(r.sig.price>0)pm[r.asset.sym]=r.sig.price;});
     sweepSetups(pm);
   }catch(e){}}
@@ -984,8 +985,32 @@ function trackSetups(results,tf,src){
   }
   if(SETUPS.active.length>400)SETUPS.active.splice(0,SETUPS.active.length-400);
 }
-function resolveSetup(x,status,px,now){x.status=status;x.resolvedAt=now;x.exit=px;SETUPS.resolved.push(x);setupsDirty=true;
+// Realized return of the engine's own exit plan: 1/3 banked at each target hit, the remainder exited at `exit`.
+// Mirrors the backtest's scale-out, so a tracked outcome is comparable to a backtested one. null = never filled.
+function realizedPct(x,exit){
+  if(x.fill==null||!(x.fill>0)||!(exit>0))return null;
+  let gross=0,rem=1;
+  for(let k=0;k<Math.min(x.hitT,3);k++){ if(x.targets[k]==null)break; gross+=(1/3)*x.dir*(x.targets[k]-x.fill)/x.fill; rem-=1/3; }
+  if(rem>0.001)gross+=rem*x.dir*(exit-x.fill)/x.fill;
+  return +(gross*100).toFixed(2);
+}
+function resolveSetup(x,status,px,now){x.status=status;x.resolvedAt=now;x.exit=px;x.pnlPct=realizedPct(x,px);
+  SETUPS.resolved.push(x);setupsDirty=true;
   if(SETUPS.resolved.length>300)SETUPS.resolved.splice(0,SETUPS.resolved.length-300);}
+// REVERSAL WATCH — a filled trade whose signal has since flipped to the opposite side. The thesis that justified
+// the entry is gone, so the honest guidance is "exit at market", not "sit and wait for the stop to be hit".
+// Cleared automatically if the signal comes back onside. Only ever a FLAG — the tracker never closes your trade for you.
+function markReversals(results,tf){
+  const now=Date.now(),v={};
+  (results||[]).forEach(r=>{if(r&&r.asset&&r.sig)v[r.asset.sym]=r.sig.verdict;});
+  SETUPS.active.forEach(x=>{
+    if(x.tf!==tf||x.status!=='filled')return;
+    const cur=v[x.sym]; if(!cur)return;
+    const against = x.dir>0 ? cur==='SELL' : cur==='BUY';
+    if(against&&!x.rev){x.rev=now;setupsDirty=true;}
+    else if(!against&&x.rev){delete x.rev;setupsDirty=true;}
+  });
+}
 // one status step against a live price. Prices are SAMPLED (~every minute), so an intrabar wick can be missed —
 // statuses are honest but conservative; the resolved stats carry the same caveat.
 function updateSetupWithPrice(x,px,now){
@@ -1000,13 +1025,16 @@ function updateSetupWithPrice(x,px,now){
   }
   if(x.status==='filled'){
     const stopped = x.dir>0 ? px<=x.stop : px>=x.stop;
-    if(stopped){resolveSetup(x, x.hitT>0?'banked':'stopped', px, now);return;}   // after T1 the stop sits at entry → banked, not a loss
+    // Exit AT the stop price, not at the sampled price: a stop order fills at its level, and prices here are
+    // sampled ~once a minute, so using the observed price would overstate the loss by the whole sampling gap.
+    // (Matches how the backtest exits, keeping tracked and backtested results comparable. Real slippage not modelled.)
+    if(stopped){resolveSetup(x, x.hitT>0?'banked':'stopped', x.stop, now);return;}   // after T1 the stop sits at entry → banked, not a loss
     while(x.hitT<3&&x.targets[x.hitT]!=null&&(x.dir>0?px>=x.targets[x.hitT]:px<=x.targets[x.hitT])){
       x.hitT++;setupsDirty=true;
       if(x.hitT===1)x.stop=x.fill!=null?x.fill:(x.entryLo+x.entryHi)/2;   // ratchet: breakeven after T1 (mirrors the engine)
       if(x.hitT===2)x.stop=x.targets[0];                                   // lock T1 after T2
     }
-    if(x.hitT>=3){resolveSetup(x,'target',px,now);return;}
+    if(x.hitT>=3){resolveSetup(x,'target',x.targets[2],now);return;}   // final third fills at T3, not the sampled overshoot
     if(now>x.maxEnd)resolveSetup(x, x.hitT>0?'banked':(x.dir*(px-(x.fill||px))>0?'timeout+':'timeout-'), px, now);
   }
 }
@@ -1021,13 +1049,19 @@ function sweepSetups(prices,now){
 }
 async function setupsSweep(){ try{ const q=await liveQuotes('Crypto'); sweepSetups(q); }catch(e){} }
 // forward record: of the setups that actually FILLED and resolved, how many hit Target 1 before the stop?
+const SETUP_FILLED_STATUS=['target','stopped','banked','timeout+','timeout-'];
 function setupStats(){
-  const done=SETUPS.resolved.filter(x=>['target','stopped','banked','timeout+','timeout-'].includes(x.status));
+  const done=SETUPS.resolved.filter(x=>SETUP_FILLED_STATUS.includes(x.status));
   const t1=done.filter(x=>x.hitT>0).length;
   const wins=done.filter(x=>x.hitT>0||x.status==='timeout+').length;
+  const pnls=done.map(x=>x.pnlPct).filter(v=>v!=null);
+  const sum=pnls.reduce((a,b)=>a+b,0);
   return {tracked:SETUPS.active.length,resolved:done.length,
     t1Rate:done.length?Math.round(100*t1/done.length):null,
     winRate:done.length?Math.round(100*wins/done.length):null,
+    avgPnl:pnls.length?+(sum/pnls.length).toFixed(2):null,   // average realized % per filled trade (before fees)
+    netPnl:pnls.length?+sum.toFixed(2):null,                 // sum of every filled trade, 1 unit each
+    reversed:SETUPS.active.filter(x=>x.rev).length,
     noFill:SETUPS.resolved.filter(x=>x.status==='expired'||x.status==='invalid').length};
 }
 
@@ -1053,7 +1087,7 @@ function cryptoSignalsFrom(payload){
     }catch(e){}
   });
   // setup tracker works on the browser-fed path too (India users get their ₹ setups tracked the same way)
-  try{ trackSetups(results,tf,'quick');
+  try{ trackSetups(results,tf,'quick'); markReversals(results,tf);
     const pm={};results.forEach(r=>{if(r.sig&&r.sig.price>0)pm[r.asset.sym]=r.sig.price;});
     sweepSetups(pm);
   }catch(e){}
@@ -1229,10 +1263,11 @@ async function handler(req,res){
     if(p==="/api/movers"){   // 🔥 coins with the biggest volume-backed movement right now, scalp plan attached
       return sendJSON(res,await topMovers(u.searchParams.get("tf")||"5m"));}
     if(p==="/api/setups"){   // 📌 tracked setups: every recommendation followed to its outcome + forward hit-rate
-      const tfq=u.searchParams.get("tf")||null;
-      const active=SETUPS.active.filter(x=>!tfq||x.tf===tfq).slice().sort((a,b)=>b.born-a.born).slice(0,60);
-      const recent=SETUPS.resolved.filter(x=>!tfq||x.tf===tfq).slice(-30).reverse();
-      return sendJSON(res,{active,recent,stats:setupStats(),usdtInr:(cryptoMode==='coindcx'?cdxUsdtInr():0),ts:Date.now(),demo:DEMO});}
+      const tfq=u.searchParams.get("tf")||null, lim=Math.min(200,parseInt(u.searchParams.get("limit"))||40);
+      const active=SETUPS.active.filter(x=>!tfq||x.tf===tfq).slice().sort((a,b)=>b.born-a.born).slice(0,60)
+        .map(x=>({...x,pnlNow:x.status==='filled'?realizedPct(x,x.live):null}));   // live unrealized %, so you know where you stand
+      const history=SETUPS.resolved.filter(x=>!tfq||x.tf===tfq).slice(-lim).reverse();
+      return sendJSON(res,{active,recent:history,history,stats:setupStats(),usdtInr:(cryptoMode==='coindcx'?cdxUsdtInr():0),ts:Date.now(),demo:DEMO});}
     if(p==="/api/research"){   // one coin, several timeframes, averaged consensus (short or long horizon)
       const sym=u.searchParams.get("sym")||"", horizon=u.searchParams.get("horizon")==="long"?"long":"short";
       return sendJSON(res,await researchCoin(sym,horizon));}
@@ -1290,6 +1325,7 @@ if(require.main===module){
 module.exports={IND,computeSignal,buildSetup,buildReasons,confidenceOf,alertEligible,fmtAlert,sendTelegram,signalSince,actionNow,parseCandles,authURL,scan,universeFor,fmtTime,
   loadBinance,loadCoinDCX,loadCrypto,ensureCryptoUniverse,usdInr,resampleSeries,tfCfg,getCRYPTO:()=>CRYPTO,getMode:()=>cryptoMode,
   backtestSeries,scoreSeriesArr,backtest,processAsset,blendResearch,assetBtScore,cdxLiveInr,cdxUsdtInr,topMovers,ticker24,
-  trackSetups,sweepSetups,updateSetupWithPrice,setupStats,__getSetups:()=>SETUPS,__resetSetups:()=>{SETUPS={active:[],resolved:[]};},
+  trackSetups,sweepSetups,updateSetupWithPrice,setupStats,markReversals,realizedPct,volMetrics,
+  __getSetups:()=>SETUPS,__resetSetups:()=>{SETUPS={active:[],resolved:[]};},
   btcStateFromSeries,__setBtc:(s)=>{BTC_STATE=s;},
   __setCdxTicker:(t)=>{cdxTicker=t;}};
