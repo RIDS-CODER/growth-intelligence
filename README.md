@@ -75,9 +75,11 @@ movement right now**, ranked by a 0–100 **Mover Score**:
 - **15% — bar range** (enough room per bar to make a scalp worth taking).
 
 A coin only qualifies as a mover with **real participation**: a volume surge ≥ 1.5× normal, or a 24h move ≥ 3%.
-Each mover card carries the engine's actual **quick-scalp plan** for that timeframe — entry zone, stop, targets,
-R:R and confidence — or shows **WATCH** when the coin is moving but there's no clean entry (don't chase spikes).
-Timeframes 5m / 15m / 30m / 1h, auto-refreshing every 45s. Use **🎯 Tradeable now only** to hide the WATCH rows.
+Each mover card carries the engine's actual **quick-scalp plan** for that timeframe — a labeled entry zone,
+stop and three targets in their own boxes, plus R:R and confidence — or shows **WATCH** when the coin is moving
+but there's no clean entry (don't chase spikes). Timeframes 5m / 15m / 30m / 1h, auto-refreshing every 45s.
+Use **🎯 Tradeable now only** to hide the WATCH rows. Both Volume Movers and Quick Trades have a
+**$ USDT / ₹ INR** display toggle (defaults to USDT — the currency most scalpers think in).
 
 API: `GET /api/movers?tf=5m` · settings: `moversTop` in `config.json` (or env `MOVERS_TOP`, default 20 coins).
 

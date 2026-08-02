@@ -127,6 +127,10 @@
   .lv{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:9px 10px}.lv .k{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}.lv .v{font-family:var(--mono);font-size:14px;font-weight:700;margin-top:2px}.lv .r{font-family:var(--mono);font-size:11px;margin-top:1px}
   .lv.t1{border-color:rgba(22,199,132,.3)}.lv.t2{border-color:rgba(22,199,132,.42)}.lv.t3{border-color:rgba(22,199,132,.55)}.lv.stop{border-color:rgba(234,57,67,.42)}.lv.stop .v{color:var(--sell)}.lv .r{color:var(--buy)}
   .sellcard .lv .r{color:var(--sell)}.sellcard .lv.stop .v{color:var(--buy)}
+  /* compact level boxes for the Quick Trades / Volume Movers cards — entry zone on its own row, then stop + targets */
+  .qlevels{display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:6px;margin:8px 0}
+  .qlevels .lv{padding:7px 9px}.qlevels .lv .v{font-size:12.5px}
+  .lv.entry{border-color:rgba(34,211,238,.5)}.lv.entry .v{color:var(--accent2)}
   .ladder{height:42px;border-radius:9px;background:var(--panel2);position:relative;margin:6px 0 14px;border:1px solid var(--line);overflow:hidden}.ladder .mk{position:absolute;top:0;bottom:0;width:2px}.ladder .lab{position:absolute;font-size:9px;font-family:var(--mono);top:3px;transform:translateX(-50%);white-space:nowrap}.ladder .lab.bot{top:auto;bottom:3px}
   .kv{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;font-size:12.5px;margin:4px 0 10px}.kv .k{color:var(--muted)}.kv .v{font-family:var(--mono);text-align:right}
   .sizing{background:var(--panel2);border:1px solid rgba(99,102,241,.28);border-radius:11px;padding:11px 12px;margin:12px 0 4px}.sizing h4{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:#a5b4fc;margin-bottom:8px}
@@ -855,6 +859,15 @@ const QUICK_TFS=['5m','15m','30m','1h'];
 let quickState={open:false, tf:'15m', side:'long', data:{}, loading:false, q:'', highOnly:false};
 let quickTimer=null;
 const qf=v=>v==null||!isFinite(v)?'—':(Math.abs(v)<5?(+v).toFixed(4):(+v).toFixed(2));
+// ₹/$ display toggle shared by Quick Trades + Volume Movers (scalpers usually think in USDT). Server values are always ₹.
+let scalpCcy='USDT';
+function scalpPrice(v){ if(v==null||!isFinite(v))return '—';
+  if(scalpCcy==='USDT'&&usdtInr>0){const u=v/usdtInr;return '$'+u.toLocaleString('en-US',{minimumFractionDigits:u<5?4:2,maximumFractionDigits:u<5?4:2});}
+  return '₹'+Number(v).toLocaleString('en-IN',{minimumFractionDigits:Math.abs(v)<5?4:2,maximumFractionDigits:Math.abs(v)<5?4:2});}
+function setScalpCcy(c){scalpCcy=c;if(quickState.open)renderQuickShell();if(moversState.open)renderMoversShell();}
+const scalpCcyTabs=()=>`<span class="sub" style="margin-left:8px">Show in:</span>
+  <div class="rztab ${scalpCcy==='USDT'?'on':''}" onclick="setScalpCcy('USDT')">$ USDT</div>
+  <div class="rztab ${scalpCcy==='INR'?'on':''}" onclick="setScalpCcy('INR')">₹ INR</div>`;
 // mini candlesticks from a compact OHLC window (open ≈ previous close for continuous crypto)
 function quickCandles(bars){
   if(!bars||!bars.c||bars.c.length<2)return '';
@@ -880,11 +893,12 @@ function reverseDipShort(x){const s=x.setup,live=x.sig.price,atr=s.atr;
   const base=x.confidence||{pct:45}, pct=Math.max(3,Math.round((base.pct||45)*0.8));   // counter-trend → a notch lower
   return {sym:x.asset.sym,name:x.asset.name||x.asset.sym,tk:x.asset.tk||'',dir:-1,kind:'revshort',live,entryLo:live,entryHi:live,target,targetPct,stop,stopPct,rr,
     conf:{label:pct>=68?'High':pct>=45?'Medium':'Low',pct},regime:'reversedip',reverse:true,bars:x.bars,targets:[target],rets:[targetPct],
-    note:'↔ Reverse of a dip-buy: short the drop into support '+qf(target)+' and cover there (where the long begins). Counter-trend — quick in-and-out, tight stop.'};}
+    note:'↔ Reverse of a dip-buy: short the drop into the support zone (Target 1) and cover there — that\'s where the long begins. Counter-trend — quick in-and-out, tight stop.'};}
 async function loadQuick(tf){
   quickState.loading=true; renderQuickList();
   try{
     const d=await(await fetch('/api/scan?tab=Crypto&tf='+tf+'&_='+Date.now())).json();
+    if(d.usdtInr>0)usdtInr=d.usdtInr; if(!(usdtInr>0))await ensureRate();   // keep the ₹→$ rate fresh for the USDT view
     const res=(d.results||[]);
     const quick=res.filter(x=>x.setup&&(x.setup.regime==='range'||x.setup.regime==='correction'));   // scalp/quick only
     const longs=quick.filter(x=>x.setup.dir>0).map(normQuick);
@@ -913,7 +927,8 @@ function renderQuickShell(){
     <div class="sub" style="margin:2px 0">Timeframe:</div>
     <div style="display:flex;gap:5px;flex-wrap:wrap;margin:3px 0 7px">${tfTabs}</div>
     <div style="display:flex;gap:5px;flex-wrap:wrap;margin:0 0 9px;align-items:center">${sideTabs}
-      <button class="btn ${quickState.highOnly?'go':''}" style="padding:4px 12px;font-size:12px;margin-left:6px" onclick="setQuickHigh()" title="Show only High-confidence setups and sort by highest expected return first">🎯 High only · top returns${quickState.highOnly?' ✓':''}</button></div>
+      <button class="btn ${quickState.highOnly?'go':''}" style="padding:4px 12px;font-size:12px;margin-left:6px" onclick="setQuickHigh()" title="Show only High-confidence setups and sort by highest expected return first">🎯 High only · top returns${quickState.highOnly?' ✓':''}</button>
+      ${scalpCcyTabs()}</div>
     <div id="quickList"></div>
     <div id="quickAlerts" class="small" style="margin-top:10px;padding:8px 11px;border-radius:8px;border:1px dashed rgba(52,211,153,.4);background:rgba(52,211,153,.05)">📲 Telegram alerts: <span class="sub">checking…</span></div>
     <div id="quickAlertChats"></div>
@@ -954,11 +969,11 @@ function renderQuickList(){
   el.innerHTML='<div class="cards">'+sorted.map(quickCard).join('')+'</div>';
 }
 function quickCard(q){
-  const isBuy=q.dir>0, col=isBuy?'var(--buy)':'var(--sell)';
+  const isBuy=q.dir>0, col=isBuy?'var(--buy)':'var(--sell)', P=scalpPrice;
   const confCol=q.conf.label==='High'?'var(--buy)':q.conf.label==='Medium'?'#fbbf24':'var(--muted)';
   const verb=q.reverse?'SHORT INTO DIP':(isBuy?(q.kind==='buynow'||q.kind==='buybreak'?'BUY NOW':'BUY DIP'):(q.kind==='sellnow'||q.kind==='sellbreak'?'SHORT NOW':'SHORT BOUNCE'));
   const tag=q.regime==='correction'?'<span style="color:#f87171">₿ fade</span>':q.reverse?'<span style="color:#f59e0b">↔ reverse</span>':'<span style="color:#fbbf24">⚡ scalp</span>';
-  const zone=q.reverse?('@ '+qf(q.live)):('<b>'+qf(q.entryLo)+'–'+qf(q.entryHi)+'</b>');
+  const tgts=(q.targets||[]).map((t,k)=>`<div class="lv t${k+1}"><div class="k">Target ${k+1}</div><div class="v">${P(t)}</div><div class="r">+${(q.rets[k]||0).toFixed(1)}%</div></div>`).join('');
   return `<div class="tc ${isBuy?'':'sellcard'}">
     <div class="hd" onclick="this.parentNode.classList.toggle('open')" style="cursor:pointer"><div class="l"><div class="name">${q.name}</div>
       <div class="sub">${q.tk?q.tk+' · ':''}${q.sym} · ${tag} · ${quickState.tf} · <span style="color:var(--accent2)">▾ chart &amp; targets</span></div></div>
@@ -966,10 +981,14 @@ function quickCard(q){
         <div class="btmini" style="border-color:${confCol};color:${confCol};margin-top:6px" title="Setup confidence — quality gauge, not a win probability">◆ ${q.conf.label}${q.conf.pct!=null?' '+q.conf.pct+'%':''}</div></div></div>
     <div class="bd">
       ${quickCandles(q.bars)}
-      <div style="font-size:13px;line-height:1.65;margin:3px 0"><b style="color:${col}">${verb}</b> ${zone} → quick target <b>${qf(q.target)}</b> <span style="color:${col};font-weight:700">(+${q.targetPct.toFixed(1)}%)</span> · stop <b>${qf(q.stop)}</b> <span style="color:var(--sell)">(−${q.stopPct.toFixed(1)}%)</span> · R:R <b>${(q.rr||0).toFixed(1)}:1</b></div>
-      ${(q.targets&&q.targets.length>1)?`<div class="sub">runners → T2 <b>${qf(q.targets[1])}</b> (+${(q.rets[1]||0).toFixed(1)}%) · T3 <b>${qf(q.targets[2])}</b> (+${(q.rets[2]||0).toFixed(1)}%)</div>`:''}
+      <div style="font-size:13px;line-height:1.6;margin:3px 0"><b style="color:${col}">${verb}</b> · R:R <b>${(q.rr||0).toFixed(1)}:1</b> · Live <b>${P(q.live)}</b></div>
+      <div class="qlevels">
+        <div class="lv entry" style="grid-column:1/-1"><div class="k">${q.reverse?'Entry — at market (short the drop)':'Entry zone — '+(isBuy?'buy':'sell/short')+' between'}</div><div class="v">${q.reverse?P(q.live):P(q.entryLo)+' &nbsp;–&nbsp; '+P(q.entryHi)}</div></div>
+        <div class="lv stop"><div class="k">Stop loss</div><div class="v">${P(q.stop)}</div><div class="r" style="color:var(--sell)">−${q.stopPct.toFixed(1)}%</div></div>
+        ${tgts}
+      </div>
       ${q.note?`<div style="margin:4px 0;padding:6px 9px;border-radius:7px;background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.35);color:#fbbf24;font-size:11.5px;line-height:1.4">${q.note}</div>`:''}
-      <div class="sub" style="margin-top:4px">⏱ works in ~${fillWindowText(quickState.tf)} (≈${FILL_BARS} bars) · Live <b>${qf(q.live)}</b></div></div></div>`;
+      <div class="sub" style="margin-top:4px">⏱ works in ${fillWindowText(quickState.tf)} (≈${FILL_BARS} bars) · take profit at Target 1, let runners ride to T2/T3 with the stop moved to entry</div></div></div>`;
 }
 /* ================= 🔥 VOLUME MOVERS — coins moving the most on real volume right now, ranked for quick scalps ================= */
 const MOVER_TFS=['5m','15m','30m','1h'];
@@ -985,6 +1004,7 @@ function setMoversAction(){moversState.actionOnly=!moversState.actionOnly;render
 async function loadMovers(tf){
   moversState.loading=true; renderMoversList();
   try{ const d=await(await fetch('/api/movers?tf='+tf+'&_='+Date.now())).json();
+    if(d.usdtInr>0)usdtInr=d.usdtInr; if(!(usdtInr>0))await ensureRate();   // keep the ₹→$ rate fresh for the USDT view
     moversState.data[tf]={movers:d.movers||[],ts:d.ts||Date.now(),scanned:d.scanned}; }
   catch(e){ moversState.data[tf]={movers:[],err:String(e.message||e)}; }
   moversState.loading=false; renderMoversList();   // list-only refresh → the shell (tabs/buttons) never rebuilds mid-click
@@ -997,13 +1017,14 @@ function renderMoversShell(){
     <h3>🔥 Volume Movers <span class="sub">— biggest volume-backed moves right now · crypto</span> <button class="btn" style="padding:2px 9px;font-size:11px" onclick="loadMovers(moversState.tf)">↻ refresh ${moversState.tf}</button> <span class="sub" id="moversUpd">${d.ts?'· updated '+new Date(d.ts).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true}):''}</span> <span class="sub">· auto ⟳ 45s</span></h3>
     <div class="sub" style="margin:2px 0">Timeframe:</div>
     <div style="display:flex;gap:5px;flex-wrap:wrap;margin:3px 0 9px;align-items:center">${tfTabs}
-      <button class="btn ${moversState.actionOnly?'go':''}" style="padding:4px 12px;font-size:12px;margin-left:6px" onclick="setMoversAction()" title="Hide movers where the engine sees no clean entry right now">🎯 Tradeable now only${moversState.actionOnly?' ✓':''}</button></div>
+      <button class="btn ${moversState.actionOnly?'go':''}" style="padding:4px 12px;font-size:12px;margin-left:6px" onclick="setMoversAction()" title="Hide movers where the engine sees no clean entry right now">🎯 Tradeable now only${moversState.actionOnly?' ✓':''}</button>
+      ${scalpCcyTabs()}</div>
     <div id="moversList"></div>
     <p class="small" style="color:var(--muted);margin-top:9px">Ranked by <b>🔥 Mover Score</b> — 24h move (55%) + <b>volume surge vs the coin's own average</b> (30%) + bar range (15%). A high score means the coin is MOVING on real participation — it is <b>not</b> a buy signal by itself. The ⚡ plan on each card is the engine's actual scalp entry / stop / target for this timeframe, and <b>WATCH</b> means it's moving but there's no clean edge — stand aside rather than chase. Quick in-and-out only. Not financial advice.</p></div>`;
   renderMoversList();
 }
 function moverCard(m){
-  const s=m.setup||{}, isBuy=s.dir>0;
+  const s=m.setup||{}, isBuy=s.dir>0, P=scalpPrice;
   const tradeable=m.verdict!=='HOLD'&&m.action&&MOVER_ACTIONABLE.includes(m.action.kind);
   const col=isBuy?'var(--buy)':'var(--sell)';
   const scoreCol=m.score>=70?'#fb7185':m.score>=45?'#fbbf24':'var(--muted)';
@@ -1011,8 +1032,14 @@ function moverCard(m){
   const surgeTxt=m.surge!=null?('<b>'+m.surge.toFixed(1)+'×</b> avg vol'):'vol n/a';
   const conf=m.conf||{label:'—',pct:null}, confCol=conf.label==='High'?'var(--buy)':conf.label==='Medium'?'#fbbf24':'var(--muted)';
   const verb=isBuy?(m.action&&(m.action.kind==='buynow'||m.action.kind==='buybreak')?'BUY NOW':'BUY DIP'):(m.action&&(m.action.kind==='sellnow'||m.action.kind==='sellbreak')?'SHORT NOW':'SHORT BOUNCE');
+  const tgts=(s.targets||[]).map((t,k)=>`<div class="lv t${k+1}"><div class="k">Target ${k+1}</div><div class="v">${P(t)}</div><div class="r">+${Math.abs(s.ret&&s.ret[k]||0).toFixed(1)}%</div></div>`).join('');
   const plan=tradeable
-    ? `<div style="font-size:13px;line-height:1.65;margin:3px 0"><b style="color:${col}">⚡ ${verb}</b> <b>${qf(s.entryLo)}–${qf(s.entryHi)}</b> → quick target <b>${qf(s.targets[0])}</b> <span style="color:${col};font-weight:700">(+${Math.abs(s.ret[0]).toFixed(1)}%)</span> · stop <b>${qf(s.stop)}</b> <span style="color:var(--sell)">(−${s.riskPct.toFixed(1)}%)</span> · R:R <b>${(s.rrr||0).toFixed(1)}:1</b> · <span style="color:${confCol};font-weight:700" title="Setup confidence — quality gauge, not a win probability">◆ ${conf.label}${conf.pct!=null?' '+conf.pct+'%':''}</span></div>`
+    ? `<div style="font-size:13px;line-height:1.6;margin:3px 0"><b style="color:${col}">⚡ ${verb}</b> · R:R <b>${(s.rrr||0).toFixed(1)}:1</b> · <span style="color:${confCol};font-weight:700" title="Setup confidence — quality gauge, not a win probability">◆ ${conf.label}${conf.pct!=null?' '+conf.pct+'%':''}</span></div>
+      <div class="qlevels">
+        <div class="lv entry" style="grid-column:1/-1"><div class="k">Entry zone — ${isBuy?'buy':'sell/short'} between</div><div class="v">${P(s.entryLo)} &nbsp;–&nbsp; ${P(s.entryHi)}</div></div>
+        <div class="lv stop"><div class="k">Stop loss</div><div class="v">${P(s.stop)}</div><div class="r" style="color:var(--sell)">−${(s.riskPct||0).toFixed(1)}%</div></div>
+        ${tgts}
+      </div>`
     : `<div style="font-size:12.5px;margin:3px 0;color:var(--muted)">⏸ <b>Moving, but no clean edge</b> — the engine sees no safe entry right now (chasing a spike is how scalps die). Watch it: a dip to support or a fresh breakout turns this into a plan.</div>`;
   return `<div class="tc ${tradeable&&!isBuy?'sellcard':''}">
     <div class="hd" onclick="this.parentNode.classList.toggle('open')" style="cursor:pointer">
@@ -1024,7 +1051,7 @@ function moverCard(m){
       ${quickCandles(m.bars)}
       ${plan}
       ${s.note?`<div style="margin:4px 0;padding:6px 9px;border-radius:7px;background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.35);color:#fbbf24;font-size:11.5px;line-height:1.4">${s.note}</div>`:''}
-      <div class="sub" style="margin-top:4px">Live <b>${qf(m.live)}</b> · bar range ~${(m.atrPct||0).toFixed(1)}% · ⏱ works in ${fillWindowText(moversState.tf)}${m.tk?' · <a style="color:var(--accent2);cursor:pointer" onclick="event.stopPropagation();openResearchFor(\''+(m.tk||m.sym)+'\',\'short\')">🔎 research</a>':''}</div>
+      <div class="sub" style="margin-top:4px">Live <b>${P(m.live)}</b> · bar range ~${(m.atrPct||0).toFixed(1)}% · ⏱ works in ${fillWindowText(moversState.tf)}${m.tk?' · <a style="color:var(--accent2);cursor:pointer" onclick="event.stopPropagation();openResearchFor(\''+(m.tk||m.sym)+'\',\'short\')">🔎 research</a>':''}</div>
     </div></div>`;
 }
 function renderMoversList(){
