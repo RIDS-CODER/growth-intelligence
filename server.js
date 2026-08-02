@@ -821,6 +821,11 @@ async function scan(tab,tf){
     try{const ltp=await upstoxLTP(keys);
       ok.forEach(r=>{if(r.asset.src==='upstox'){const k=keyOf[r.asset.sym];if(k&&ltp[k]){r.sig.price=ltp[k];/* refresh action vs live price */r.action=actionNow(r.sig,r.setup,r.since,fmtTime);}}});}catch(e){}
   }
+  // attach the 🔥 volume/activity metrics to every crypto result so BOTH panels show the same score
+  if(tab==='Crypto'||tab==='All'){try{
+    const t24=DEMO?{}:await ticker24();
+    ok.forEach(r=>{if(r.asset.src==='cg'){const v=volMetrics(r,t24,tf);if(v)r.vol=v;}});
+  }catch(e){}}
   // setup tracker: register the scalps this scan surfaces + update statuses with these live prices
   if(tab==='Crypto'||tab==='All'){try{
     const cg=ok.filter(r=>r.asset.src==='cg');
@@ -893,32 +898,41 @@ async function ticker24(){
   }catch(e){ if(tick24Cache)return tick24Cache; }
   return out;
 }
+// VOLUME/ACTIVITY METRICS for one result — the 🔥 Mover Score plus the raw numbers behind it.
+// Shared by Volume Movers and Quick Trades so both panels show the SAME score for the same coin.
+// The score is an ACTIVITY gauge (is this coin actually moving, with a real crowd?) — NOT trade quality;
+// setup quality stays the separate Confidence %.
+function volMetrics(r,stats,tf){
+  if(!r||!r.sig)return null;
+  const st=(stats&&stats[r.asset.tk||""])||{};
+  let chg=st.chg;
+  if(chg==null&&Array.isArray(r.series)&&r.series.length>2){
+    const c=r.series, i=Math.max(0,c.length-1-(BARS_24H[tf]||24));   // exchange stat unavailable → measure from this scan's own candles
+    if(c[i]>0)chg=(c[c.length-1]/c[i]-1)*100;
+  }
+  const surge=r.sig.volRatio!=null?+r.sig.volRatio:null;             // latest closed bar vs the coin's own 20-bar average
+  const atrPct=(r.sig.atr>0&&r.sig.price>0)?r.sig.atr/r.sig.price*100:0;
+  // 55% size of the 24h move · 30% volume surge vs the coin's normal · 15% per-bar range (scalp room)
+  const mChg=Math.min(1,Math.abs(chg||0)/12), mSurge=surge!=null?Math.min(1,surge/3):0.35, mAtr=Math.min(1,atrPct/3);
+  return {score:Math.round(100*(0.55*mChg+0.30*mSurge+0.15*mAtr)),
+    chg24:chg!=null?+(+chg).toFixed(2):null, surge:surge!=null?+surge.toFixed(2):null,
+    qv:st.qv||0, atrPct:+atrPct.toFixed(2),
+    // "real participation" gate — the same bar Volume Movers requires to list a coin at all
+    hot:((surge!=null&&surge>=1.5)||(chg!=null&&Math.abs(chg)>=3))};
+}
 async function topMovers(tf){
   const ck="movers:"+tf; const hit=cGet(ck,TTL_CRYPTO); if(hit)return {...hit,cached:true};
   const d=await scan("Crypto",tf);
-  const stats=DEMO?{}:await ticker24();
-  const nBack=BARS_24H[tf]||24;
   const rows=[],trackable=[];
   (d.results||[]).forEach(r=>{
     if(!r||!r.sig||!r.setup)return;
-    const tk=r.asset.tk||"", st=stats[tk]||{};
-    let chg=st.chg;
-    if(chg==null&&Array.isArray(r.series)&&r.series.length>2){
-      const c=r.series, i=Math.max(0,c.length-1-nBack);   // exchange stat unavailable → measure from this scan's own candles
-      if(c[i]>0)chg=(c[c.length-1]/c[i]-1)*100;
-    }
-    const surge=r.sig.volRatio!=null?+r.sig.volRatio:null;                    // latest closed bar vs the coin's own 20-bar average
-    const atrPct=(r.sig.atr>0&&r.sig.price>0)?r.sig.atr/r.sig.price*100:0;
-    // MOVER SCORE — how much volume-backed movement is happening NOW (an activity gauge, NOT trade quality):
-    // 55% size of the 24h move · 30% volume surge vs the coin's normal · 15% per-bar range (scalp room)
-    const mChg=Math.min(1,Math.abs(chg||0)/12), mSurge=surge!=null?Math.min(1,surge/3):0.35, mAtr=Math.min(1,atrPct/3);
-    const score=Math.round(100*(0.55*mChg+0.30*mSurge+0.15*mAtr));
-    // a mover needs REAL participation: a volume surge (≥1.5× normal) or a big 24h move (≥3%)
-    if(!((surge!=null&&surge>=1.5)||(chg!=null&&Math.abs(chg)>=3)))return;
+    const tk=r.asset.tk||"";
+    const v=r.vol||volMetrics(r,{},tf);           // scan already attached these; recompute only as a safety net
+    if(!v||!v.hot)return;                          // a mover needs REAL participation
+    const {score,chg24,surge,qv,atrPct}=v;
     if(r.sig.verdict!=='HOLD'&&r.action&&SETUP_ACTIONABLE.has(r.action.kind))trackable.push(r);
     const s=r.setup;
-    rows.push({sym:r.asset.sym,tk,name:r.asset.name||tk,score,chg24:chg!=null?+(+chg).toFixed(2):null,
-      surge:surge!=null?+surge.toFixed(2):null,qv:st.qv||0,atrPct:+atrPct.toFixed(2),
+    rows.push({sym:r.asset.sym,tk,name:r.asset.name||tk,score,chg24,surge,qv,atrPct,
       live:r.sig.price,dec:r.dec,verdict:r.sig.verdict,tradeScore:r.sig.score,
       setup:{dir:s.dir,type:s.type,regime:s.regime,entryLo:s.entryLo,entryHi:s.entryHi,entry:s.entry,stop:s.stop,riskPct:s.riskPct,
         targets:s.targets,ret:s.ret,rrr:s.rrr,suggestedLev:s.suggestedLev,hold:s.hold,note:s.note},

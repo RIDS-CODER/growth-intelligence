@@ -856,7 +856,7 @@ function card(r,i,isBuy){const{asset,sig,setup,reasons,dec,action,scope,asof,isI
 
 /* ================= ⚡ QUICK TRADES — scalp/quick setups across timeframes, split Long/Short (+ reverse dip-shorts) ================= */
 const QUICK_TFS=['5m','15m','30m','1h'];
-let quickState={open:false, tf:'15m', side:'long', data:{}, loading:false, q:'', highOnly:false};
+let quickState={open:false, tf:'15m', side:'long', data:{}, loading:false, q:'', highOnly:false, byVol:false};
 let quickTimer=null;
 const qf=v=>v==null||!isFinite(v)?'—':(Math.abs(v)<5?(+v).toFixed(4):(+v).toFixed(2));
 // ₹/$ display toggle shared by Quick Trades + Volume Movers (scalpers usually think in USDT). Server values are always ₹.
@@ -877,13 +877,24 @@ function quickCandles(bars){
     s+=`<line x1="${x.toFixed(1)}" y1="${y(h[i]).toFixed(1)}" x2="${x.toFixed(1)}" y2="${y(l[i]).toFixed(1)}" stroke="${col}" stroke-width="1"/><rect x="${(x-bw/2).toFixed(1)}" y="${top.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(1,bot-top).toFixed(1)}" fill="${col}"/>`;}
   return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:52px;display:block;margin:5px 0;background:rgba(255,255,255,.02);border-radius:6px">${s}</svg>`;
 }
+// 🔥 Volume/activity score — shared by Quick Trades and Volume Movers so the same coin shows the same number.
+// It measures how much volume-backed MOVEMENT is happening, not whether the trade is good (that's Confidence ◆).
+const volScoreCol=s=>s>=70?'#fb7185':s>=45?'#fbbf24':'var(--muted)';
+const VOL_TITLE='🔥 Volume score (0–100) — how much volume-backed movement this coin has right now: 55% size of the 24h move + 30% volume surge vs its own average + 15% bar range. High = it is MOVING with a real crowd behind it, so a scalp can reach its target quickly. It is an activity gauge, NOT a buy signal and NOT trade quality — that is the ◆ Confidence badge.';
+function volChip(v){ if(!v||v.score==null)return '';
+  // 'quiet' only when the participation gate explicitly failed — mover rows already passed it and carry no flag
+  return `<div class="btmini" style="border-color:${volScoreCol(v.score)};color:${volScoreCol(v.score)};margin-top:6px" title="${VOL_TITLE}">🔥 ${v.score}${v.hot===false?' · quiet':''}</div>`;}
+function volLine(v){ if(!v)return '<span class="sub">vol —</span>';
+  const c=(v.chg24||0)>=0?'var(--buy)':'var(--sell)';
+  return `${v.chg24!=null?`<span style="color:${c};font-weight:700">${(v.chg24>=0?'+':'')+v.chg24.toFixed(1)}% / 24h</span> · `:''}${v.surge!=null?`<b>${v.surge.toFixed(1)}×</b> avg vol`:'vol n/a'}`;}
 function quickStartTimer(){ if(quickTimer)clearInterval(quickTimer); quickTimer=setInterval(()=>{ if(quickState.open)loadQuick(quickState.tf); }, 45000); }
 function toggleQuick(){const el=document.getElementById('quickPanel');quickState.open=el.style.display==='none';el.style.display=quickState.open?'block':'none';
   if(quickState.open){renderQuickShell();loadQuick(quickState.tf);quickStartTimer();}else if(quickTimer){clearInterval(quickTimer);quickTimer=null;}}
 function setQuickTf(tf){quickState.tf=tf;renderQuickShell();if(quickState.data[tf])renderQuickList();else loadQuick(tf);}
 function setQuickSide(s){quickState.side=s;renderQuickShell();}
 function setQuickHigh(){quickState.highOnly=!quickState.highOnly;renderQuickShell();}
-function normQuick(x){const s=x.setup;return {sym:x.asset.sym,name:x.asset.name||x.asset.sym,tk:x.asset.tk||'',dir:s.dir,kind:x.action?x.action.kind:'',live:x.sig.price,entryLo:s.entryLo,entryHi:s.entryHi,target:s.targets[0],targetPct:Math.abs(s.ret[0]),stop:s.stop,stopPct:s.riskPct,rr:s.rrr,conf:x.confidence||{label:'—',pct:null},note:s.note,regime:s.regime,reverse:false,bars:x.bars,targets:(s.targets||[]).slice(0,3),rets:(s.ret||[]).map(Math.abs)};}
+function setQuickByVol(){quickState.byVol=!quickState.byVol;renderQuickShell();}
+function normQuick(x){const s=x.setup;return {sym:x.asset.sym,name:x.asset.name||x.asset.sym,tk:x.asset.tk||'',dir:s.dir,kind:x.action?x.action.kind:'',live:x.sig.price,vol:x.vol||null,entryLo:s.entryLo,entryHi:s.entryHi,target:s.targets[0],targetPct:Math.abs(s.ret[0]),stop:s.stop,stopPct:s.riskPct,rr:s.rrr,conf:x.confidence||{label:'—',pct:null},note:s.note,regime:s.regime,reverse:false,bars:x.bars,targets:(s.targets||[]).slice(0,3),rets:(s.ret||[]).map(Math.abs)};}
 function reverseDipShort(x){const s=x.setup,live=x.sig.price,atr=s.atr;
   if(!(live>0)||!(atr>0))return null;
   const target=s.entryHi;                       // support/dip zone — first touch on the way down
@@ -892,7 +903,7 @@ function reverseDipShort(x){const s=x.setup,live=x.sig.price,atr=s.atr;
   if(!(rr>=1)||targetPct<0.4)return null;        // only worth it with ≥1:1 and real room to the dip
   const base=x.confidence||{pct:45}, pct=Math.max(3,Math.round((base.pct||45)*0.8));   // counter-trend → a notch lower
   return {sym:x.asset.sym,name:x.asset.name||x.asset.sym,tk:x.asset.tk||'',dir:-1,kind:'revshort',live,entryLo:live,entryHi:live,target,targetPct,stop,stopPct,rr,
-    conf:{label:pct>=68?'High':pct>=45?'Medium':'Low',pct},regime:'reversedip',reverse:true,bars:x.bars,targets:[target],rets:[targetPct],
+    conf:{label:pct>=68?'High':pct>=45?'Medium':'Low',pct},regime:'reversedip',reverse:true,bars:x.bars,targets:[target],rets:[targetPct],vol:x.vol||null,
     note:'↔ Reverse of a dip-buy: short the drop into the support zone (Target 1) and cover there — that\'s where the long begins. Counter-trend — quick in-and-out, tight stop.'};}
 async function loadQuick(tf){
   quickState.loading=true; renderQuickList();
@@ -929,6 +940,7 @@ function renderQuickShell(){
     <div style="display:flex;gap:5px;flex-wrap:wrap;margin:3px 0 7px">${tfTabs}</div>
     <div style="display:flex;gap:5px;flex-wrap:wrap;margin:0 0 9px;align-items:center">${sideTabs}
       <button class="btn ${quickState.highOnly?'go':''}" style="padding:4px 12px;font-size:12px;margin-left:6px" onclick="setQuickHigh()" title="Show only High-confidence setups and sort by highest expected return first">🎯 High only · top returns${quickState.highOnly?' ✓':''}</button>
+      <button class="btn ${quickState.byVol?'go':''}" style="padding:4px 12px;font-size:12px" onclick="setQuickByVol()" title="Sort these setups by the 🔥 volume score — the coins with the most volume-backed movement first, so a scalp reaches its target sooner">🔥 Sort by volume${quickState.byVol?' ✓':''}</button>
       ${scalpCcyTabs()}</div>
     <div id="quickTracked"></div>
     <div id="quickList"></div>
@@ -965,7 +977,10 @@ function renderQuickList(){
   if(quickState.highOnly) list=list.filter(x=>x.conf&&(x.conf.label==='High'||(x.conf.pct||0)>=68));    // High-confidence only
   if(!list.length){el.innerHTML='<div class="empty">'+(quickState.highOnly?'No <b>High-confidence</b> ':'No ')+'quick '+quickState.side+' setups'+(q?' matching “'+quickState.q+'”':'')+' on '+quickState.tf+' right now'+(quickState.highOnly?' — turn off “High only” or try another timeframe.':' — try another timeframe.')+'</div>';return;}
   // High-only view sorts by highest expected return first; otherwise by confidence then R:R
-  const sorted=quickState.highOnly
+  const vs=x=>(x.vol&&x.vol.score)||0;
+  const sorted=quickState.byVol
+    ? list.slice().sort((a,b)=>vs(b)-vs(a)||((b.conf.pct||0)-(a.conf.pct||0)))     // most movement first
+    : quickState.highOnly
     ? list.slice().sort((a,b)=>(b.targetPct||0)-(a.targetPct||0))
     : list.slice().sort((a,b)=>((b.conf.pct||0)-(a.conf.pct||0))||(b.rr-a.rr));
   el.innerHTML='<div class="cards">'+sorted.map(quickCard).join('')+'</div>';
@@ -978,9 +993,10 @@ function quickCard(q){
   const tgts=(q.targets||[]).map((t,k)=>`<div class="lv t${k+1}"><div class="k">Target ${k+1}</div><div class="v">${P(t)}</div><div class="r">+${(q.rets[k]||0).toFixed(1)}%</div></div>`).join('');
   return `<div class="tc ${isBuy?'':'sellcard'}">
     <div class="hd" onclick="this.parentNode.classList.toggle('open')" style="cursor:pointer"><div class="l"><div class="name">${q.name}</div>
-      <div class="sub">${q.tk?q.tk+' · ':''}${q.sym} · ${tag} · ${quickState.tf} · <span style="color:var(--accent2)">▾ chart &amp; targets</span></div></div>
+      <div class="sub">${q.tk?q.tk+' · ':''}${q.sym} · ${tag} · ${quickState.tf} · ${volLine(q.vol)} · <span style="color:var(--accent2)">▾ chart &amp; targets</span></div></div>
       <div class="r"><span class="verdict ${isBuy?'BUY':'SELL'}">${isBuy?'LONG':'SHORT'}</span>
-        <div class="btmini" style="border-color:${confCol};color:${confCol};margin-top:6px" title="Setup confidence — quality gauge, not a win probability">◆ ${q.conf.label}${q.conf.pct!=null?' '+q.conf.pct+'%':''}</div></div></div>
+        <div class="btmini" style="border-color:${confCol};color:${confCol};margin-top:6px" title="Setup confidence — quality gauge, not a win probability">◆ ${q.conf.label}${q.conf.pct!=null?' '+q.conf.pct+'%':''}</div>
+        ${volChip(q.vol)}</div></div>
     <div class="bd">
       ${quickCandles(q.bars)}
       <div style="font-size:13px;line-height:1.6;margin:3px 0"><b style="color:${col}">${verb}</b> · R:R <b>${(q.rr||0).toFixed(1)}:1</b> · Live <b>${P(q.live)}</b></div>
@@ -1031,14 +1047,11 @@ function moverCard(m){
   const s=m.setup||{}, isBuy=s.dir>0, P=scalpPrice;
   const tradeable=m.verdict!=='HOLD'&&m.action&&MOVER_ACTIONABLE.includes(m.action.kind);
   const col=isBuy?'var(--buy)':'var(--sell)';
-  const scoreCol=m.score>=70?'#fb7185':m.score>=45?'#fbbf24':'var(--muted)';
-  const chgCol=(m.chg24||0)>=0?'var(--buy)':'var(--sell)';
-  const surgeTxt=m.surge!=null?('<b>'+m.surge.toFixed(1)+'×</b> avg vol'):'vol n/a';
   const conf=m.conf||{label:'—',pct:null}, confCol=conf.label==='High'?'var(--buy)':conf.label==='Medium'?'#fbbf24':'var(--muted)';
   const verb=isBuy?(m.action&&(m.action.kind==='buynow'||m.action.kind==='buybreak')?'BUY NOW':'BUY DIP'):(m.action&&(m.action.kind==='sellnow'||m.action.kind==='sellbreak')?'SHORT NOW':'SHORT BOUNCE');
   const tgts=(s.targets||[]).map((t,k)=>`<div class="lv t${k+1}"><div class="k">Target ${k+1}</div><div class="v">${P(t)}</div><div class="r">+${Math.abs(s.ret&&s.ret[k]||0).toFixed(1)}%</div></div>`).join('');
   const plan=tradeable
-    ? `<div style="font-size:13px;line-height:1.6;margin:3px 0"><b style="color:${col}">⚡ ${verb}</b> · R:R <b>${(s.rrr||0).toFixed(1)}:1</b> · <span style="color:${confCol};font-weight:700" title="Setup confidence — quality gauge, not a win probability">◆ ${conf.label}${conf.pct!=null?' '+conf.pct+'%':''}</span></div>
+    ? `<div style="font-size:13px;line-height:1.6;margin:3px 0"><b style="color:${col}">⚡ ${verb}</b> · R:R <b>${(s.rrr||0).toFixed(1)}:1</b></div>
       <div class="qlevels">
         <div class="lv entry" style="grid-column:1/-1"><div class="k">Entry zone — ${isBuy?'buy':'sell/short'} between</div><div class="v">${P(s.entryLo)} &nbsp;–&nbsp; ${P(s.entryHi)}</div></div>
         <div class="lv stop"><div class="k">Stop loss</div><div class="v">${P(s.stop)}</div><div class="r" style="color:var(--sell)">−${(s.riskPct||0).toFixed(1)}%</div></div>
@@ -1048,9 +1061,9 @@ function moverCard(m){
   return `<div class="tc ${tradeable&&!isBuy?'sellcard':''}">
     <div class="hd" onclick="this.parentNode.classList.toggle('open')" style="cursor:pointer">
       <div class="l"><div class="name">#${m.rank} ${m.name}</div>
-        <div class="sub">${m.tk?m.tk+' · ':''}${m.sym} · <span style="color:${chgCol};font-weight:700">${m.chg24!=null?((m.chg24>=0?'+':'')+m.chg24.toFixed(1)+'% / 24h'):'—'}</span> · ${surgeTxt} · 24h vol ${fmtQv(m.qv)} · <span style="color:var(--accent2)">▾ chart &amp; plan</span></div></div>
+        <div class="sub">${m.tk?m.tk+' · ':''}${m.sym} · ${volLine(m)} · 24h vol ${fmtQv(m.qv)} · <span style="color:var(--accent2)">▾ chart &amp; plan</span></div></div>
       <div class="r"><span class="verdict ${tradeable?(isBuy?'BUY':'SELL'):'HOLD'}">${tradeable?(isBuy?'LONG':'SHORT'):'WATCH'}</span>
-        <div class="btmini" style="border-color:${scoreCol};color:${scoreCol};margin-top:6px" title="Mover Score — how much volume-backed movement is happening (activity gauge, not trade quality)">🔥 ${m.score}</div></div></div>
+        ${volChip(m)}${tradeable?`<div class="btmini" style="border-color:${confCol};color:${confCol};margin-top:6px" title="Setup confidence — quality gauge, not a win probability">◆ ${conf.label}${conf.pct!=null?' '+conf.pct+'%':''}</div>`:''}</div></div>
     <div class="bd">
       ${quickCandles(m.bars)}
       ${plan}

@@ -68,11 +68,18 @@ That's it — live prices for the rest of the day.
 ## 🔥 Volume Movers — scalp the coins that are actually moving
 
 Click **🔥 Volume Movers** on the dashboard to see the crypto coins with the **biggest volume-backed
-movement right now**, ranked by a 0–100 **Mover Score**:
+movement right now**, ranked by a 0–100 **volume score** (shown as a 🔥 badge on **both** panels):
 
 - **55% — size of the 24h move** (from the exchange's own 24h stats),
 - **30% — volume surge** vs that coin's *own* 20-bar average (a real crowd, not a thin wick),
 - **15% — bar range** (enough room per bar to make a scalp worth taking).
+
+**What the score means:** it answers *"is this coin actually moving, with a real crowd behind it?"* — high score =
+the move is fast and well-funded, so a scalp reaches its target sooner and you can get filled without slippage.
+It is an **activity gauge, not a buy signal and not trade quality**. Setup quality remains the separate
+**◆ Confidence %**. Read them together: 🔥 high + ◆ High = a good setup on a coin that's actually moving;
+🔥 high + ◆ Low = lots of noise, no edge (stand aside); 🔥 low + ◆ High = a clean setup that may take a while
+to pay. The same score appears on Quick Trades cards, where **🔥 Sort by volume** ranks setups by it.
 
 A coin only qualifies as a mover with **real participation**: a volume surge ≥ 1.5× normal, or a 24h move ≥ 3%.
 Each mover card carries the engine's actual **quick-scalp plan** for that timeframe — a labeled entry zone,
