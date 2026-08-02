@@ -83,6 +83,22 @@ Use **🎯 Tradeable now only** to hide the WATCH rows. Both Volume Movers and Q
 
 API: `GET /api/movers?tf=5m` · settings: `moversTop` in `config.json` (or env `MOVERS_TOP`, default 20 coins).
 
+### 📌 Tracked setups — recommendations never just vanish
+
+Live lists refresh every 45s, so a setup you entered could previously disappear from the panel on the next
+scan. Now **every recommendation the panels show is snapshotted server-side and followed to its outcome**:
+
+- **⏳ WAITING** — entry zone not reached yet (expires after ~6 bars if the zone never comes → *no trade*),
+- **🎯 IN TRADE** — price entered the zone; **✅ T1/T2/T3 HIT** as targets are reached, with the stop
+  ratcheting to breakeven after T1 and to T1 after T2 (exactly like the engine's exit plan),
+- resolved as **✅ all targets / ✅ banked / ⛔ stopped / ⌛ never filled / 🚫 invalidated before fill**.
+
+The 📌 block at the top of both panels shows every active setup with its ORIGINAL levels and live status —
+so if you took a trade and the card left the list, its stop/target guidance is still right there. Resolved
+outcomes accumulate into a **forward record** ("X resolved · Y% hit Target 1 before the stop") — a measured,
+real-time hit rate of the recommendations themselves, not a backtest. Statuses are sampled ~once a minute
+(state survives restarts via `setups.json`). API: `GET /api/setups`.
+
 ## How prices stay accurate
 
 - **Stocks/ETFs/indices:** Upstox real-time last-traded price (LTP), refreshed every few seconds, plus
