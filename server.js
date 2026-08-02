@@ -451,6 +451,16 @@ async function usdInr(){
   for(const t of tries){try{const r=await t();if(r>0){fxRate=r;fxAt=Date.now();return r;}}catch(e){}}
   return fxRate||86;
 }
+// THE rate this server used to build the ₹ prices it is serving. The UI divides by exactly this to show $ USDT,
+// so the round trip is lossless: coindcx mode → CoinDCX's own USDT/INR; global mode → the FX rate used by loadBinance.
+// Reporting 0 here (as this used to in global mode) made the UI substitute CoinDCX's rate against Binance-derived ₹,
+// which understated every $ price by the India premium (~1–4%).
+function priceRate(){
+  if(cryptoMode==='coindcx'){const r=cdxUsdtInr(); if(r>0)return r;}
+  return fxRate||0;
+}
+// 'coindcx' = ₹ and $ both exact vs CoinDCX · 'fx' = $ exact vs the global market, ₹ runs ~1–4% under CoinDCX (India premium)
+function priceRateSrc(){return (cryptoMode==='coindcx'&&cdxUsdtInr()>0)?'coindcx':'fx';}
 const isStableBase=b=>STABLE_TK.has(b)||/(UP|DOWN|BULL|BEAR)$/.test(b)||/^\d/.test(b);
 // CoinGecko fallback — works from ANY server region (incl. US), INR native. Uses your demo key if set.
 const cgHeaders=()=>COINGECKO_KEY?{"x-cg-demo-api-key":COINGECKO_KEY}:{};
@@ -836,7 +846,7 @@ async function scan(tab,tf){
   }catch(e){}}
   const cryptoAssets=uni.filter(a=>a.src==='cg');
   const cryptoFailed = cryptoAssets.length>0 && !DEMO && !ok.some(r=>r.asset.src==='cg');
-  const out={tab,tf,analyzed:ok.length,total:uni.length,results:ok,ts:Date.now(),demo:DEMO,loggedIn:li,keyOf,cryptoMode,usdtInr:(cryptoMode==='coindcx'?cdxUsdtInr():0),
+  const out={tab,tf,analyzed:ok.length,total:uni.length,results:ok,ts:Date.now(),demo:DEMO,loggedIn:li,keyOf,cryptoMode,usdtInr:priceRate(),rateSrc:priceRateSrc(),
     btc:((tab==='Crypto'||tab==='All')&&BTC_STATE)?{bull:BTC_STATE.bull,verdict:BTC_STATE.verdict}:null,
     note: cryptoFailed?"Crypto unreachable — this server's region can't reach CoinDCX. For exact CoinDCX ₹, host in an India region (e.g. DigitalOcean Bangalore/BLR); otherwise the global ₹ feed is used.":undefined};
   if(ok.length>0 && !cryptoFailed) cSet(ck,out);   // never cache an empty/failed scan
@@ -944,7 +954,7 @@ async function topMovers(tf){
   rows.forEach((x,i)=>x.rank=i+1);
   try{const keep=new Set(rows.map(x=>x.sym));trackSetups(trackable.filter(r=>keep.has(r.asset.sym)),tf,'mover');}catch(e){}
   const out={tf,movers:rows,scanned:(d.results||[]).length,ts:Date.now(),demo:DEMO,cryptoMode,
-    btc:d.btc||null,usdtInr:d.usdtInr||0};
+    btc:d.btc||null,usdtInr:d.usdtInr||priceRate(),rateSrc:d.rateSrc||priceRateSrc()};
   if(rows.length)cSet(ck,out);
   return out;
 }
@@ -1254,7 +1264,7 @@ async function handler(req,res){
     if(p==="/api/scan"){ // no login gate — crypto/commodity-ETF work without Upstox; stocks just skip until logged in
       const data=await scan(u.searchParams.get("tab")||"Stocks",u.searchParams.get("tf")||"intraday");return sendJSON(res,data);}
     if(p==="/api/quotes"){
-      {const q=await liveQuotes(u.searchParams.get("tab")||"Stocks");return sendJSON(res,{quotes:q,usdtInr:(cryptoMode==='coindcx'?cdxUsdtInr():0),loggedIn:loggedIn(),ts:Date.now()});}}
+      {const q=await liveQuotes(u.searchParams.get("tab")||"Stocks");return sendJSON(res,{quotes:q,usdtInr:priceRate(),rateSrc:priceRateSrc(),loggedIn:loggedIn(),ts:Date.now()});}}
     if(p==="/api/backtest"){
       const data=await backtest(u.searchParams.get("tab")||"Stocks",u.searchParams.get("tf")||"daily");return sendJSON(res,data);}
     if(p==="/api/crypto-signals" && req.method==="POST"){
@@ -1267,7 +1277,7 @@ async function handler(req,res){
       const active=SETUPS.active.filter(x=>!tfq||x.tf===tfq).slice().sort((a,b)=>b.born-a.born).slice(0,60)
         .map(x=>({...x,pnlNow:x.status==='filled'?realizedPct(x,x.live):null}));   // live unrealized %, so you know where you stand
       const history=SETUPS.resolved.filter(x=>!tfq||x.tf===tfq).slice(-lim).reverse();
-      return sendJSON(res,{active,recent:history,history,stats:setupStats(),usdtInr:(cryptoMode==='coindcx'?cdxUsdtInr():0),ts:Date.now(),demo:DEMO});}
+      return sendJSON(res,{active,recent:history,history,stats:setupStats(),usdtInr:priceRate(),rateSrc:priceRateSrc(),ts:Date.now(),demo:DEMO});}
     if(p==="/api/research"){   // one coin, several timeframes, averaged consensus (short or long horizon)
       const sym=u.searchParams.get("sym")||"", horizon=u.searchParams.get("horizon")==="long"?"long":"short";
       return sendJSON(res,await researchCoin(sym,horizon));}
@@ -1325,7 +1335,8 @@ if(require.main===module){
 module.exports={IND,computeSignal,buildSetup,buildReasons,confidenceOf,alertEligible,fmtAlert,sendTelegram,signalSince,actionNow,parseCandles,authURL,scan,universeFor,fmtTime,
   loadBinance,loadCoinDCX,loadCrypto,ensureCryptoUniverse,usdInr,resampleSeries,tfCfg,getCRYPTO:()=>CRYPTO,getMode:()=>cryptoMode,
   backtestSeries,scoreSeriesArr,backtest,processAsset,blendResearch,assetBtScore,cdxLiveInr,cdxUsdtInr,topMovers,ticker24,
-  trackSetups,sweepSetups,updateSetupWithPrice,setupStats,markReversals,realizedPct,volMetrics,
+  trackSetups,sweepSetups,updateSetupWithPrice,setupStats,markReversals,realizedPct,volMetrics,priceRate,priceRateSrc,
+  __setFx:(r)=>{fxRate=r;fxAt=Date.now();},__setMode:(m)=>{cryptoMode=m;},
   __getSetups:()=>SETUPS,__resetSetups:()=>{SETUPS={active:[],resolved:[]};},
   btcStateFromSeries,__setBtc:(s)=>{BTC_STATE=s;},
   __setCdxTicker:(t)=>{cdxTicker=t;}};

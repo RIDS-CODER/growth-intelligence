@@ -860,10 +860,17 @@ let quickState={open:false, tf:'15m', side:'long', data:{}, loading:false, q:'',
 let quickTimer=null;
 const qf=v=>v==null||!isFinite(v)?'—':(Math.abs(v)<5?(+v).toFixed(4):(+v).toFixed(2));
 // ₹/$ display toggle shared by Quick Trades + Volume Movers (scalpers usually think in USDT). Server values are always ₹.
-let scalpCcy='USDT';
+let scalpCcy='USDT', scalpRateSrc='';
 function scalpPrice(v){ if(v==null||!isFinite(v))return '—';
+  // Divides by the SAME rate the server used to build these ₹ values, so $ is the exact source price (no double conversion).
   if(scalpCcy==='USDT'&&usdtInr>0){const u=v/usdtInr;return '$'+u.toLocaleString('en-US',{minimumFractionDigits:u<5?4:2,maximumFractionDigits:u<5?4:2});}
   return '₹'+Number(v).toLocaleString('en-IN',{minimumFractionDigits:Math.abs(v)<5?4:2,maximumFractionDigits:Math.abs(v)<5?4:2});}
+// Honest, compact statement of which currency is exact against your exchange right now.
+function scalpPriceNote(){
+  if(!usdtInr)return '';
+  if(scalpRateSrc==='coindcx')return `<span class="sub" style="color:var(--buy)">✅ CoinDCX live · $ and ₹ both match your CoinDCX screen (1 USDT = ₹${usdtInr.toFixed(2)})</span>`;
+  return `<span class="sub" style="color:#fbbf24" title="This server can't reach CoinDCX, so ₹ is built from the global price × a plain USD/INR rate. CoinDCX charges an India premium over that, so its ₹ screen reads slightly higher. Every % — entry, stop, targets, R:R — is unaffected.">⚠ Global feed · <b>$ prices are exact</b>; ₹ runs ~1–4% under CoinDCX (India premium) — use the $ view to match your screen</span>`;
+}
 function setScalpCcy(c){scalpCcy=c;if(quickState.open)renderQuickShell();if(moversState.open)renderMoversShell();}
 const scalpCcyTabs=()=>`<span class="sub" style="margin-left:8px">Show in:</span>
   <div class="rztab ${scalpCcy==='USDT'?'on':''}" onclick="setScalpCcy('USDT')">$ USDT</div>
@@ -909,7 +916,8 @@ async function loadQuick(tf){
   quickState.loading=true; renderQuickList();
   try{
     const d=await(await fetch('/api/scan?tab=Crypto&tf='+tf+'&_='+Date.now())).json();
-    if(d.usdtInr>0)usdtInr=d.usdtInr; if(!(usdtInr>0))await ensureRate();   // keep the ₹→$ rate fresh for the USDT view
+    if(d.usdtInr>0){usdtInr=d.usdtInr;scalpRateSrc=d.rateSrc||'';}  // use the SAME rate the server priced with — never a substitute rate
+    if(!(usdtInr>0))await ensureRate();
     const res=(d.results||[]);
     const quick=res.filter(x=>x.setup&&(x.setup.regime==='range'||x.setup.regime==='correction'));   // scalp/quick only
     const longs=quick.filter(x=>x.setup.dir>0).map(normQuick);
@@ -942,6 +950,7 @@ function renderQuickShell(){
       <button class="btn ${quickState.highOnly?'go':''}" style="padding:4px 12px;font-size:12px;margin-left:6px" onclick="setQuickHigh()" title="Show only High-confidence setups and sort by highest expected return first">🎯 High only · top returns${quickState.highOnly?' ✓':''}</button>
       <button class="btn ${quickState.byVol?'go':''}" style="padding:4px 12px;font-size:12px" onclick="setQuickByVol()" title="Sort these setups by the 🔥 volume score — the coins with the most volume-backed movement first, so a scalp reaches its target sooner">🔥 Sort by volume${quickState.byVol?' ✓':''}</button>
       ${scalpCcyTabs()}</div>
+    <div style="margin:0 0 8px">${scalpPriceNote()}</div>
     <div id="quickTracked"></div>
     <div id="quickList"></div>
     <div id="quickAlerts" class="small" style="margin-top:10px;padding:8px 11px;border-radius:8px;border:1px dashed rgba(52,211,153,.4);background:rgba(52,211,153,.05)">📲 Telegram alerts: <span class="sub">checking…</span></div>
@@ -1022,7 +1031,8 @@ function setMoversAction(){moversState.actionOnly=!moversState.actionOnly;render
 async function loadMovers(tf){
   moversState.loading=true; renderMoversList();
   try{ const d=await(await fetch('/api/movers?tf='+tf+'&_='+Date.now())).json();
-    if(d.usdtInr>0)usdtInr=d.usdtInr; if(!(usdtInr>0))await ensureRate();   // keep the ₹→$ rate fresh for the USDT view
+    if(d.usdtInr>0){usdtInr=d.usdtInr;scalpRateSrc=d.rateSrc||'';}  // use the SAME rate the server priced with — never a substitute rate
+    if(!(usdtInr>0))await ensureRate();
     moversState.data[tf]={movers:d.movers||[],ts:d.ts||Date.now(),scanned:d.scanned}; }
   catch(e){ moversState.data[tf]={movers:[],err:String(e.message||e)}; }
   moversState.loading=false; renderMoversList();   // list-only refresh → the shell (tabs/buttons) never rebuilds mid-click
@@ -1038,6 +1048,7 @@ function renderMoversShell(){
     <div style="display:flex;gap:5px;flex-wrap:wrap;margin:3px 0 9px;align-items:center">${tfTabs}
       <button class="btn ${moversState.actionOnly?'go':''}" style="padding:4px 12px;font-size:12px;margin-left:6px" onclick="setMoversAction()" title="Hide movers where the engine sees no clean entry right now">🎯 Tradeable now only${moversState.actionOnly?' ✓':''}</button>
       ${scalpCcyTabs()}</div>
+    <div style="margin:0 0 8px">${scalpPriceNote()}</div>
     <div id="moversTracked"></div>
     <div id="moversList"></div>
     <p class="small" style="color:var(--muted);margin-top:9px">Ranked by <b>🔥 Mover Score</b> — 24h move (55%) + <b>volume surge vs the coin's own average</b> (30%) + bar range (15%). A high score means the coin is MOVING on real participation — it is <b>not</b> a buy signal by itself. The ⚡ plan on each card is the engine's actual scalp entry / stop / target for this timeframe, and <b>WATCH</b> means it's moving but there's no clean edge — stand aside rather than chase. Quick in-and-out only. Not financial advice.</p></div>`;
