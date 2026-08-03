@@ -174,6 +174,7 @@
     <button class="btn" id="researchBtn" onclick="toggleResearch()" style="border-color:#a78bfa;background:rgba(167,139,250,.14);color:#ddd6fe">🔎 Research a coin</button>
     <button class="btn" id="quickBtn" onclick="toggleQuick()" style="border-color:#f59e0b;background:rgba(245,158,11,.15);color:#fde68a">⚡ Quick Trades</button>
     <button class="btn" id="moversBtn" onclick="toggleMovers()" style="border-color:#fb7185;background:rgba(251,113,133,.14);color:#fecdd3">🔥 Volume Movers</button>
+    <button class="btn" id="radarBtn" onclick="toggleRadar()" style="border-color:#818cf8;background:rgba(129,140,248,.15);color:#c7d2fe">🎯 Options Radar</button>
     <button class="btn" id="paperBtn" onclick="togglePaper()" style="border-color:#34d399;background:rgba(52,211,153,.14);color:#a7f3d0">🤖 Paper Bot</button>
     <span class="pstat" id="filterNote"></span>
   </div>
@@ -182,6 +183,7 @@
   <div id="btcNote" style="display:none"></div>
   <div id="quickPanel" style="display:none"></div>
   <div id="moversPanel" style="display:none"></div>
+  <div id="radarPanel" style="display:none"></div>
   <div id="researchPanel" style="display:none"></div>
   <div id="paperPanel" style="display:none"></div>
   <div id="tradesPanel" style="display:none"></div>
@@ -770,7 +772,9 @@ function renderBacktest(d){
 }
 
 function render(results){
-  lastResults=results;
+  // Guard: an error payload (or any response without `results`) would otherwise leave
+  // lastResults undefined and permanently break the quote poller until a page reload.
+  lastResults=Array.isArray(results)?results:[];
   const ms=getMinScore();
   // clean (actionable) setups first, "late" ones (price already at/through the stop) pushed to the bottom
   const mAgree=r=>r.mtf?r.mtf.agree:0;   // higher timeframe agreement count
@@ -1197,6 +1201,162 @@ async function renderTracked(elId){
           :'<div class="sub" style="margin-top:5px">No past recommendations yet — this fills in as tracked setups resolve.</div>'}
       </details>
     </div></details>`;
+}
+
+/* ================= 🎯 OPTIONS RADAR — mispricing screener (analysis, not advice) ================= */
+let radarState={open:false,data:null,perf:null,loading:false,explain:null,bt:null,btLoading:false};
+let radarTimer=null;
+const rf=v=>v==null||!isFinite(v)?'—':'₹'+Number(v).toLocaleString('en-IN',{maximumFractionDigits:Math.abs(v)<100?2:0});
+function toggleRadar(){const el=document.getElementById('radarPanel');radarState.open=el.style.display==='none';
+  el.style.display=radarState.open?'block':'none';
+  if(radarState.open){renderRadar();loadRadar();if(radarTimer)clearInterval(radarTimer);
+    radarTimer=setInterval(()=>{if(radarState.open)loadRadar();},120000);}
+  else if(radarTimer){clearInterval(radarTimer);radarTimer=null;}}
+async function loadRadar(){
+  radarState.loading=true;renderRadar();
+  try{
+    const [d,p]=await Promise.all([
+      fetch('/api/options/scan').then(r=>r.json()),
+      fetch('/api/options/performance?days=90').then(r=>r.json()).catch(()=>null)
+    ]);
+    radarState.data=d;radarState.perf=p;
+  }catch(e){radarState.data={error:String(e.message||e)};}
+  radarState.loading=false;renderRadar();
+}
+async function radarExplain(){
+  const inp=document.getElementById('radarWhy');if(!inp)return;
+  const id=(inp.value||'').trim();if(!id)return;
+  radarState.explain={loading:true,id};renderRadarExplain();
+  try{ radarState.explain=await fetch('/api/options/explain?id='+encodeURIComponent(id)).then(r=>r.json()); }
+  catch(e){ radarState.explain={found:false,message:'Lookup failed.'}; }
+  renderRadarExplain();
+}
+async function radarBacktest(){
+  radarState.btLoading=true;renderRadarBt();
+  try{
+    const u=(document.getElementById('radarBtU')||{}).value||'BTC';
+    radarState.bt=await fetch('/api/options/backtest?underlying='+u+'&days=30').then(r=>r.json());
+  }catch(e){radarState.bt={error:String(e.message||e)};}
+  radarState.btLoading=false;renderRadarBt();
+}
+/* The performance strip is deliberately always visible, including when the record is bad. */
+function radarPerfStrip(p){
+  if(!p||!p.overall||!p.n)
+    return `<div class="sub" style="padding:7px 10px;border-radius:8px;background:rgba(148,163,184,.08);border:1px dashed var(--line)">
+      📉 <b>Rolling 90d record: no completed signals yet.</b> The screener has not yet earned a hit rate — treat every card below as unvalidated.</div>`;
+  const hr=(p.overall.hit_rate*100), ret=p.overall.avg_ret_pct;
+  const good=hr>=50&&ret>0;
+  const ci=p.overall.ci&&p.overall.ci[0]!=null?` (95% CI ${(p.overall.ci[0]*100).toFixed(0)}–${(p.overall.ci[1]*100).toFixed(0)}%)`:'';
+  return `<div class="sub" style="padding:7px 10px;border-radius:8px;border:1px solid ${good?'rgba(52,211,153,.4)':'rgba(248,113,113,.45)'};background:${good?'rgba(52,211,153,.07)':'rgba(248,113,113,.07)'}">
+    📉 <b>Rolling ${p.window_days}d record:</b> <b style="color:${hr>=50?'var(--buy)':'var(--sell)'}">${hr.toFixed(0)}% hit rate</b>${ci} ·
+    avg <b style="color:${ret>=0?'var(--buy)':'var(--sell)'}">${ret>0?'+':''}${ret}%</b> per signal ·
+    <b>${p.n}</b> completed${p.postTax&&p.postTax.avg_ret_pct!=null?` · after VDA tax <b style="color:${p.postTax.avg_ret_pct>=0?'var(--buy)':'var(--sell)'}">${p.postTax.avg_ret_pct>0?'+':''}${p.postTax.avg_ret_pct}%</b>`:''}
+    ${p.lowSample?' · <span style="color:#fbbf24">too few trades to be meaningful</span>':''}</div>`;
+}
+function radarCard(s){
+  const isBuy=s.side==='buy', col=isBuy?'var(--buy)':'var(--sell)';
+  const exp=new Date(s.expiry_ms).toLocaleDateString('en-IN',{day:'2-digit',month:'short'});
+  const scoreCol=s.score_10>=7?'var(--buy)':s.score_10>=4?'#fbbf24':'var(--muted)';
+  const q=s.quality||{};
+  const badges=[
+    q.backfilled?`<span class="btmini" style="border-color:#fbbf24;color:#fbbf24" title="The IV-percentile leg is scored against Deribit backfill, not this venue's own 90-day history.">⚠ backfilled baseline</span>`:'',
+    q.degraded_fit?`<span class="btmini" style="border-color:var(--muted);color:var(--muted)" title="Too few strikes in this expiry to fit a reliable vol curve — the smile-residual signal abstained.">thin chain</span>`:'',
+    q.iv_src==='computed'?`<span class="btmini" style="border-color:var(--muted);color:var(--muted)" title="IV solved from the mark rather than published by the venue.">IV computed</span>`:''
+  ].filter(Boolean).join(' ');
+  const struct=s.structure?`<div style="margin:6px 0;padding:7px 10px;border-radius:8px;background:rgba(52,211,153,.08);border:1px solid rgba(52,211,153,.35);font-size:12px;line-height:1.5">
+      🛡 <b>Defined-risk vertical</b> — short ${s.structure.short_strike} / long ${s.structure.long_strike} (${s.kind}).
+      Net credit <b>${rf(s.structure.net_credit_inr)}</b> · <b>max loss capped at ${rf(s.structure.max_loss_inr)}</b>.
+      <span class="sub">Never a naked short.</span></div>`:'';
+  return `<div class="tc ${isBuy?'':'sellcard'}">
+    <div class="hd" onclick="this.parentNode.classList.toggle('open')" style="cursor:pointer">
+      <div class="l"><div class="name">${s.underlying} ${s.strike} ${s.kind==='call'?'C':'P'}</div>
+        <div class="sub">${exp} · ${s.tenor} · ${s.econ.dte_days.toFixed(1)}d · IV ${(s.iv*100).toFixed(1)}%${s.rvol30?` vs RV ${(s.rvol30*100).toFixed(0)}%`:''} · Δ${s.delta.toFixed(2)} · <span style="color:var(--accent2)">▾ detail</span></div></div>
+      <div class="r"><span class="verdict ${isBuy?'BUY':'SELL'}">${isBuy?'BUY':'SELL'}</span>
+        <div class="btmini" style="border-color:${scoreCol};color:${scoreCol};margin-top:6px" title="Mispricing score out of 10 — how far from fair value, NOT a directional forecast.">${s.score_10.toFixed(1)}/10</div></div></div>
+    <div class="bd">
+      <div style="font-size:12.5px;line-height:1.55;margin:2px 0"><b style="color:${col}">WHY</b> — ${s.why}</div>
+      <div style="font-size:12.5px;line-height:1.55;margin:4px 0;padding:6px 9px;border-radius:7px;background:rgba(251,191,36,.09);border:1px solid rgba(251,191,36,.3)"><b style="color:#fbbf24">WHY NOT</b> — ${s.why_not}</div>
+      ${struct}
+      <div class="qlevels">
+        <div class="lv entry"><div class="k">Premium</div><div class="v">${rf(s.econ.premium_inr)}</div></div>
+        <div class="lv stop"><div class="k">Max loss</div><div class="v">${rf(s.econ.max_loss_inr)}</div></div>
+        <div class="lv"><div class="k">Breakeven</div><div class="v">${Number(s.econ.breakeven).toLocaleString('en-IN',{maximumFractionDigits:0})}</div></div>
+        <div class="lv"><div class="k">Theta / day</div><div class="v" style="color:var(--sell)">${rf(s.econ.theta_day_inr)}</div></div>
+        <div class="lv"><div class="k">Move needed</div><div class="v">${s.econ.req_move_pct}%</div></div>
+        <div class="lv"><div class="k">Days left</div><div class="v">${s.econ.dte_days.toFixed(1)}</div></div>
+      </div>
+      <div class="sub" style="margin-top:5px;font-size:11.5px">🇮🇳 VDA tax drag on the illustrated gain: <b>${rf(s.econ.tax_drag_inr)}</b> — ${s.econ.tax_note}. Losses cannot be offset, so a 50% hit rate is loss-making after tax.</div>
+      ${badges?`<div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:6px">${badges}</div>`:''}
+      <div class="sub" style="margin-top:5px;font-size:11px">signals: ${Object.entries(s.z).filter(([,v])=>v!=null).map(([k,v])=>k+' '+v.toFixed(2)).join(' · ')||'—'}</div>
+    </div></div>`;
+}
+function renderRadarExplain(){
+  const el=document.getElementById('radarWhyOut');if(!el)return;
+  const e=radarState.explain;
+  if(!e){el.innerHTML='';return;}
+  if(e.loading){el.innerHTML='<div class="sub" style="margin-top:6px">Looking up…</div>';return;}
+  if(!e.found){el.innerHTML=`<div class="sub" style="margin-top:6px;color:var(--muted)">${e.message}</div>`;return;}
+  if(e.surfaced){el.innerHTML=`<div class="sub" style="margin-top:6px;color:var(--buy)">✅ ${e.message}</div>`;return;}
+  el.innerHTML=`<div style="margin-top:6px;padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:var(--panel2);font-size:12px;line-height:1.5">
+    <b>${e.headline}</b><br>${e.message}
+    ${e.detail&&Object.keys(e.detail).length?`<br><span class="sub" style="font-family:var(--mono)">${Object.entries(e.detail).map(([k,v])=>k+'='+v).join('  ')}</span>`:''}</div>`;
+}
+function renderRadarBt(){
+  const el=document.getElementById('radarBtOut');if(!el)return;
+  if(radarState.btLoading){el.innerHTML='<div class="sub" style="margin-top:6px">⏳ Replaying the stored chain tape…</div>';return;}
+  const b=radarState.bt;if(!b){el.innerHTML='';return;}
+  if(b.error){el.innerHTML=`<div class="sub" style="margin-top:6px;color:var(--muted)">${b.error}</div>`;return;}
+  const o=b.overall||{};
+  const attrib=Object.entries(b.attribution||{}).map(([k,v])=>
+    `<tr><td>${k}</td><td>${v.n}</td><td>${v.hit_rate!=null?(v.hit_rate*100).toFixed(0)+'%':'—'}</td><td style="color:${v.avg_ret_pct>=0?'var(--buy)':'var(--sell)'}">${v.avg_ret_pct!=null?(v.avg_ret_pct>0?'+':'')+v.avg_ret_pct+'%':'—'}</td></tr>`).join('');
+  el.innerHTML=`<div style="margin-top:8px;padding:9px 11px;border-radius:8px;border:1px solid var(--line);background:var(--panel2);font-size:12px">
+    <b>${b.verdict}</b>
+    <div class="sub" style="margin-top:5px">${b.n} completed · ${b.unresolved} still open (excluded) ·
+      hit ${o.hit_rate!=null?(o.hit_rate*100).toFixed(0)+'%':'—'}${o.ci&&o.ci[0]!=null?` (CI ${(o.ci[0]*100).toFixed(0)}–${(o.ci[1]*100).toFixed(0)}%)`:''} ·
+      avg <b style="color:${o.avg_ret_pct>=0?'var(--buy)':'var(--sell)'}">${o.avg_ret_pct!=null?(o.avg_ret_pct>0?'+':'')+o.avg_ret_pct+'%':'—'}</b> ·
+      after tax <b style="color:${(b.postTax&&b.postTax.avg_ret_pct)>=0?'var(--buy)':'var(--sell)'}">${b.postTax&&b.postTax.avg_ret_pct!=null?(b.postTax.avg_ret_pct>0?'+':'')+b.postTax.avg_ret_pct+'%':'—'}</b></div>
+    ${attrib?`<table class="bttable" style="margin-top:6px"><thead><tr><th>Signal</th><th>Trades</th><th>Hit</th><th>Avg</th></tr></thead><tbody>${attrib}</tbody></table>`:''}
+    <div class="sub" style="margin-top:5px;font-size:11px">${b.assumptions?`Slippage: ${b.assumptions.slippage}. ${b.assumptions.tax}.`:''}</div></div>`;
+}
+function renderRadar(){
+  const el=document.getElementById('radarPanel');if(!el)return;
+  const d=radarState.data;
+  const body=(()=>{
+    if(radarState.loading&&!d)return '<div class="sub" style="padding:14px">⏳ Scanning the options chain…</div>';
+    if(!d)return '<div class="sub" style="padding:14px">—</div>';
+    if(d.error)return `<div class="sub" style="padding:14px;color:var(--sell)">${d.error}</div>`;
+    const nb=(d.buys||[]).length, ns=(d.sells||[]).length;
+    if(!nb&&!ns)return `<div class="empty">No contract currently clears the filters and scores as mispriced.${d.errors&&Object.keys(d.errors).length?`<br><span class="sub">Feed issues: ${Object.entries(d.errors).map(([k,v])=>k+' — '+v).join('; ')}</span>`:''}</div>`;
+    return `<h4 class="sec" style="font-size:13px;margin:10px 0 6px">📈 Top ${nb} BUY <span class="sub">— cheap vs fair value</span></h4>
+      <div class="cards">${(d.buys||[]).map(radarCard).join('')||'<div class="empty">None.</div>'}</div>
+      <h4 class="sec" style="font-size:13px;margin:12px 0 6px">📉 Top ${ns} SELL <span class="sub">— rich vs fair value, always as a defined-risk spread</span></h4>
+      <div class="cards">${(d.sells||[]).map(radarCard).join('')||'<div class="empty">None.</div>'}</div>`;
+  })();
+  el.innerHTML=`<div class="tradespanel" style="border-color:rgba(129,140,248,.45)">
+    <h3>🎯 Options Radar <span class="sub">— ranked by MISPRICING vs fair value, not by price forecast</span>
+      <button class="btn" style="padding:2px 9px;font-size:11px" onclick="loadRadar()">↻ rescan</button>
+      ${d&&d.ts?`<span class="sub">· ${new Date(d.ts).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true})}</span>`:''}
+      ${d&&d.state?`<span class="sub">· ${d.state.venue} · ${d.state.storeKind}</span>`:''}</h3>
+    <div style="margin:6px 0">${radarPerfStrip(radarState.perf)}</div>
+    ${d&&d.backfilled?`<div class="sub" style="margin:6px 0;padding:6px 9px;border-radius:7px;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.3);color:#fbbf24">⚠ Some cards below are scored against a <b>Deribit backfilled</b> IV baseline — this venue has not yet accumulated 90 days of its own history.</div>`:''}
+    ${body}
+    <div style="margin-top:12px;padding-top:9px;border-top:1px solid var(--line)">
+      <div style="font-size:12.5px;font-weight:700;margin-bottom:4px">🔍 Why isn't a contract here?</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+        <input id="radarWhy" placeholder="Paste a contract id, e.g. BTC-26DEC25-90000-C" style="flex:1;min-width:260px;padding:7px 11px;border-radius:8px;border:1px solid var(--line);background:var(--panel2);color:var(--txt);font-family:var(--mono);font-size:12px">
+        <button class="btn" style="padding:5px 12px;font-size:12px" onclick="radarExplain()">Look up</button></div>
+      <div id="radarWhyOut"></div>
+    </div>
+    <div style="margin-top:10px;padding-top:9px;border-top:1px solid var(--line)">
+      <div style="font-size:12.5px;font-weight:700;margin-bottom:4px">🧪 Backtest the screener</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+        <select id="radarBtU" style="padding:6px 10px;border-radius:8px;border:1px solid var(--line);background:var(--panel2);color:var(--txt);font-size:12px"><option>BTC</option><option>ETH</option><option>SOL</option></select>
+        <button class="btn" style="padding:5px 12px;font-size:12px" onclick="radarBacktest()">Replay last 30d of stored chains</button>
+        <span class="sub" style="font-size:11px">fills at mark ± half-spread</span></div>
+      <div id="radarBtOut"></div>
+    </div>
+    <p class="small" style="color:var(--muted);margin-top:10px"><b>This is analysis, not investment advice.</b> Scores rank how far a contract sits from a fitted fair value — they are <b>not</b> a forecast of direction and not a probability of profit. Every SELL is shown only as a defined-risk vertical with a capped max loss; naked shorts are never surfaced. Figures are pre-fee and assume you can transact near the mark. Options can expire worthless — size accordingly.</p></div>`;
+  renderRadarExplain(); renderRadarBt();
 }
 
 function ladder(s){const v=[s.stop,s.entry,...s.targets],lo=Math.min(...v),hi=Math.max(...v),sp=hi-lo||1,pos=x=>((x-lo)/sp)*100;

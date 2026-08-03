@@ -3,5 +3,38 @@
   "upstoxApiSecret": "PASTE_YOUR_UPSTOX_API_SECRET_HERE",
   "redirectUri": "http://localhost:5180/callback",
   "port": 5180,
-  "demo": true
+  "demo": true,
+
+  "optionsRadar": {
+    "enabled": true,
+    "venue": "deribit",
+    "underlyings": ["BTC", "ETH", "SOL"],
+    "topN": 3,
+
+    "weights": {
+      "iv_rv": 0.30,
+      "iv_pctile": 0.20,
+      "smile_resid": 0.25,
+      "term_slope": 0.10,
+      "theta_eff": 0.15,
+      "funding_tilt": 0.00
+    },
+
+    "filters": {
+      "maxSpreadPct": 8,
+      "minOI": 50,
+      "minAbsDelta": 0.15,
+      "maxAbsDelta": 0.70,
+      "minHoursToExpiry": 12
+    },
+
+    "fundingTiltEnabled": false,
+
+    "tax": {
+      "gainsRatePct": 30,
+      "cessPct": 4,
+      "tdsPct": 1,
+      "applyTds": false
+    }
+  }
 }

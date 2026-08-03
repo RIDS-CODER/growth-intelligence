@@ -1155,6 +1155,44 @@ async function researchCoin(rawSym,horizon){
 // Paper-trading engine (simulation) — reuses this server's scan + live quotes. Never places real orders.
 const paper = require('./paper.js')({ scan, liveQuotes, dir:__dirname, rate:()=>cdxUsdtInr() });
 
+/* ===== Options Radar — mispricing screener over the options chain. Analysis only; it never
+   places orders and never surfaces a naked short. Inert unless enabled in config. ===== */
+const RADAR_CFG = CFG.optionsRadar || {};
+// declared before the radar closure that reads it, so the dependency is obvious
+const RVOL_CACHE={};
+let radar=null;
+if(RADAR_CFG.enabled!==false){
+  try{
+    radar = require('./options/radar.js').create({
+      config: RADAR_CFG,
+      dir: __dirname,
+      venue: RADAR_CFG.venue || 'deribit',
+      underlyings: RADAR_CFG.underlyings,
+      coindcx: RADAR_CFG.coindcx || {},
+      // Deribit quotes in USD; convert for the ₹ economics on the cards.
+      toInr: v => (cryptoMode==='coindcx' && cdxUsdtInr()>0) ? v*cdxUsdtInr() : v*(fxRate||86),
+      // 30d realized vol of the underlying, reused from the existing crypto candle feed.
+      realizedVol: (u)=>{ const c=RVOL_CACHE[u]; return (c&&Date.now()-c.at<3600e3)?c.v:null; }
+    });
+  }catch(e){ console.log('  Options Radar disabled:', e.message); }
+}
+// 30d realized vol per underlying, refreshed hourly off the daily candles we already fetch.
+async function refreshRvol(){
+  if(!radar)return;
+  for(const u of (RADAR_CFG.underlyings||['BTC','ETH','SOL'])){
+    try{
+      const asset = cryptoMode==='coindcx'
+        ? {sym:u+'INR',pair:'I-'+u+'_INR',binance:u+'USDT',tk:u,name:u,cls:'Crypto',src:'cg'}
+        : {sym:u+'USDT',binance:u+'USDT',tk:u,name:u,cls:'Crypto',src:'cg'};
+      const d=await loadCrypto(asset,'daily');
+      const closes=(d.close||[]).slice(-31);
+      const V=require('./options/vol.js');
+      const rv=V.realizedVol(closes,365);
+      if(isFinite(rv)&&rv>0)RVOL_CACHE[u]={v:rv,at:Date.now()};
+    }catch(e){}
+  }
+}
+
 /* ===== Telegram alerts — ping on a High-confidence quick scalp. Token lives ONLY on the server
    (env var or config.json); it is NEVER sent to the browser or committed to GitHub. Inert until set. ===== */
 const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN || CFG.telegramBotToken || '';
@@ -1272,6 +1310,26 @@ async function handler(req,res){
       return sendJSON(res,cryptoSignalsFrom(payload));}
     if(p==="/api/movers"){   // 🔥 coins with the biggest volume-backed movement right now, scalp plan attached
       return sendJSON(res,await topMovers(u.searchParams.get("tf")||"5m"));}
+    if(p.startsWith("/api/options/")){   // 🎯 Options Radar — mispricing screener (analysis only)
+      if(!radar)return sendJSON(res,{error:"Options Radar is disabled in config."},503);
+      if(p==="/api/options/scan"){
+        const d=await radar.scan();
+        return sendJSON(res,{...d,state:radar.state()});
+      }
+      if(p==="/api/options/explain"){    // "why isn't X here?"
+        return sendJSON(res,radar.explain(u.searchParams.get("id")||""));
+      }
+      if(p==="/api/options/performance"){
+        return sendJSON(res,radar.performance(parseInt(u.searchParams.get("days"))||90));
+      }
+      if(p==="/api/options/backtest"){
+        const und=u.searchParams.get("underlying")||"BTC";
+        const days=parseInt(u.searchParams.get("days"))||30;
+        const hold=u.searchParams.get("hold")?parseFloat(u.searchParams.get("hold")):null;
+        return sendJSON(res,await radar.backtest(und,Date.now()-days*864e5,Date.now(),{holdDays:hold}));
+      }
+      return sendJSON(res,{error:"unknown options route"},404);
+    }
     if(p==="/api/setups"){   // 📌 tracked setups: every recommendation followed to its outcome + forward hit-rate
       const tfq=u.searchParams.get("tf")||null, lim=Math.min(200,parseInt(u.searchParams.get("limit"))||40);
       const active=SETUPS.active.filter(x=>!tfq||x.tf===tfq).slice().sort((a,b)=>b.born-a.born).slice(0,60)
@@ -1328,6 +1386,12 @@ if(require.main===module){
   setInterval(()=>{ paper.tick().catch(()=>{}); }, 60000);
   // Setup-tracker sweep — follow every recommended scalp to its stop/target/expiry, once a minute.
   setInterval(()=>{ setupsSweep().catch(()=>{}); }, 60000);
+  // Options Radar — realized-vol refresh hourly; the chain is scanned on request.
+  if(radar){
+    console.log(`  Options Radar: ON (venue ${radar.venue}, store ${radar.state().storeKind})`);
+    refreshRvol().catch(()=>{});
+    setInterval(()=>{ refreshRvol().catch(()=>{}); }, 3600000);
+  }
   // Telegram alert loop — scan for High-confidence quick scalps every 3 min (inert until a bot token is configured).
   if(TG_TOKEN){ console.log('  Telegram alerts: ON (chat auto-detected from whoever messages the bot)'); setInterval(()=>{ alertScan().catch(()=>{}); }, 180000); setTimeout(()=>alertScan().catch(()=>{}),15000); }
   else console.log('  Telegram alerts: off (set TELEGRAM_BOT_TOKEN to enable — chat ID optional)');
