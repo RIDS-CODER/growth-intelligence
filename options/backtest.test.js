@@ -13,16 +13,24 @@ const DAY=86400000;
 function tape(opts){
   opts=opts||{};
   const t0=opts.t0||Date.UTC(2026,0,1);
-  const dte=opts.dte||10, expiry=t0+dte*DAY;
-  const steps=opts.steps||12, stepMs=opts.stepMs||DAY;
+  // Long enough that a trend is established BEFORE expiry: the view needs ~10 price points,
+  // so a 12-step tape would only form a view on its final day, with no time left to trade.
+  const dte=opts.dte||25, expiry=t0+dte*DAY;
+  const steps=opts.steps||30, stepMs=opts.stepMs||DAY;
   const out=[];
   for(let i=0;i<steps;i++){
     const ts=t0+i*stepMs;
-    const F=(opts.F||100)*(1+(opts.driftPerStep||0)*i);
+    // A tape needs a trend a trader would actually recognise, or the direction gate correctly
+    // refuses to trade it. 1.5%/day scores 25 = 'clearly rising'; 0.6%/day scores 10 = no view.
+    const F=(opts.F||100)*(1+(opts.driftPerStep===undefined?0.015:opts.driftPerStep)*i);
     const T=Math.max(1e-9,(expiry-ts)/(365*DAY));
     const quotes=[];
-    for(const mult of [0.94,0.96,0.98,1.00,1.02,1.04,1.06]){
-      const K=+( (opts.F||100)*mult ).toFixed(2);
+    // A fixed ABSOLUTE strike grid spanning the whole drift range, the way a real venue keeps
+    // old strikes listed while adding new ones around spot. Pinning the ladder to the starting
+    // price instead would push every contract deep ITM as the tape drifts, and the delta filter
+    // would (correctly) reject the entire chain.
+    const grid=opts.strikes||[88,92,96,100,104,108,112,116,120,124,128];
+    for(const K of grid){
       const k=Math.log(K/F);
       const iv=(opts.iv||0.60)+0.3*k*k;
       for(const kind of ["call","put"]){
@@ -38,6 +46,15 @@ function tape(opts){
   return out;
 }
 
+test("a directionless tape produces NO trades — the gate applies in backtest too",()=>{
+  const r=B.replay(tape({rvol30:0.30,driftPerStep:0}),{history:()=>null});
+  assert.strictEqual(r.n,0,"flat prices give no view, so nothing is traded");
+  assert.match(r.assumptions.direction_view,/derived from the tape/,"and it says where the view came from");
+});
+test("a caller-supplied view is used in preference to the fallback",()=>{
+  const r=B.replay(tape({rvol30:0.30}),{history:()=>null,view:()=>({score:30,label:"clearly rising"})});
+  assert.match(r.assumptions.direction_view,/caller-supplied/);
+});
 test("replay produces completed trades with coherent accounting",()=>{
   const r=B.replay(tape({rvol30:0.30}),{history:()=>null});
   assert.ok(r.n>0,"produced trades");
@@ -75,14 +92,14 @@ test("intrinsic settlement is correct for longs and for spreads",()=>{
 });
 test("unresolved positions are excluded, not marked to last price",()=>{
   // Tape ends well before expiry, so open trades cannot be settled.
-  const r=B.replay(tape({dte:60,steps:3}),{history:()=>null});
+  const r=B.replay(tape({dte:90,steps:16}),{history:()=>null});
   assert.ok(r.unresolved>=0,"unresolved counted");
   for(const t of r.trades)assert.ok(t.exit_how==="expiry"||t.exit_how==="close",
     "every counted trade actually closed");
   assert.strictEqual(r.n,r.trades.length,"n counts only completed trades");
 });
 test("holdDays closes positions early",()=>{
-  const held=B.replay(tape({dte:30,steps:10}),{history:()=>null,holdDays:2});
+  const held=B.replay(tape({dte:40,steps:25}),{history:()=>null,holdDays:2});
   for(const t of held.trades)
     assert.ok(t.held_days>=2-1e-9||t.exit_how==="expiry",`closed at the horizon, held ${t.held_days}`);
 });

@@ -1253,41 +1253,62 @@ function radarPerfStrip(p){
     <b>${p.n}</b> completed${p.postTax&&p.postTax.avg_ret_pct!=null?` · after VDA tax <b style="color:${p.postTax.avg_ret_pct>=0?'var(--buy)':'var(--sell)'}">${p.postTax.avg_ret_pct>0?'+':''}${p.postTax.avg_ret_pct}%</b>`:''}
     ${p.lowSample?' · <span style="color:#fbbf24">too few trades to be meaningful</span>':''}</div>`;
 }
+/* The card is written for someone who has never traded an option: what to do, what it costs,
+   what you win, what you lose, by when. All the vol maths is demoted behind "the numbers". */
 function radarCard(s){
-  const isBuy=s.side==='buy', col=isBuy?'var(--buy)':'var(--sell)';
-  const exp=new Date(s.expiry_ms).toLocaleDateString('en-IN',{day:'2-digit',month:'short'});
-  const scoreCol=s.score_10>=7?'var(--buy)':s.score_10>=4?'#fbbf24':'var(--muted)';
+  const p=s.plain||{}, isBuy=s.side==='buy', col=isBuy?'var(--buy)':'var(--sell)';
   const q=s.quality||{};
+  const up=(s.kind==='call')===isBuy;                       // what the position wants the coin to do
+  const arrow=up?'📈':'📉';
+  const confCol=s.score_10>=7?'var(--buy)':s.score_10>=5?'#fbbf24':'var(--muted)';
+  const rows=(p.payoff||[]).map(r=>{
+    const good=r.pnl>0;
+    return `<tr>
+      <td style="font-family:var(--mono)">${r.move_pct>0?'+':''}${r.move_pct}%</td>
+      <td style="font-family:var(--mono);color:var(--muted)">${rf(r.price)}</td>
+      <td style="font-family:var(--mono);text-align:right;color:${good?'var(--buy)':'var(--sell)'};font-weight:700">${r.pnl>0?'+':''}${rf(r.pnl)}</td>
+      <td class="sub" style="font-size:11px">${r.pnl>0?'profit':(r.total_loss?'total loss':'loss')}</td></tr>`;}).join('');
+  const cautions=(p.cautions||[]).map(c=>`<li style="margin:2px 0">${c}</li>`).join('');
   const badges=[
-    q.backfilled?`<span class="btmini" style="border-color:#fbbf24;color:#fbbf24" title="The IV-percentile leg is scored against Deribit backfill, not this venue's own 90-day history.">⚠ backfilled baseline</span>`:'',
-    q.degraded_fit?`<span class="btmini" style="border-color:var(--muted);color:var(--muted)" title="Too few strikes in this expiry to fit a reliable vol curve — the smile-residual signal abstained.">thin chain</span>`:'',
-    q.iv_src==='computed'?`<span class="btmini" style="border-color:var(--muted);color:var(--muted)" title="IV solved from the mark rather than published by the venue.">IV computed</span>`:''
+    q.backfilled?`<span class="btmini" style="border-color:#fbbf24;color:#fbbf24" title="Part of the pricing check uses another exchange's history because this venue hasn't built up 90 days of its own yet.">reference data</span>`:'',
+    q.degraded_fit?`<span class="btmini" style="border-color:var(--muted);color:var(--muted)" title="Few strikes listed for this expiry, so the pricing comparison is less reliable.">thin chain</span>`:''
   ].filter(Boolean).join(' ');
-  const struct=s.structure?`<div style="margin:6px 0;padding:7px 10px;border-radius:8px;background:rgba(52,211,153,.08);border:1px solid rgba(52,211,153,.35);font-size:12px;line-height:1.5">
-      🛡 <b>Defined-risk vertical</b> — short ${s.structure.short_strike} / long ${s.structure.long_strike} (${s.kind}).
-      Net credit <b>${rf(s.structure.net_credit_inr)}</b> · <b>max loss capped at ${rf(s.structure.max_loss_inr)}</b>.
-      <span class="sub">Never a naked short.</span></div>`:'';
   return `<div class="tc ${isBuy?'':'sellcard'}">
     <div class="hd" onclick="this.parentNode.classList.toggle('open')" style="cursor:pointer">
-      <div class="l"><div class="name">${s.underlying} ${s.strike} ${s.kind==='call'?'C':'P'}</div>
-        <div class="sub">${exp} · ${s.tenor} · ${s.econ.dte_days.toFixed(1)}d · IV ${(s.iv*100).toFixed(1)}%${s.rvol30?` vs RV ${(s.rvol30*100).toFixed(0)}%`:''} · Δ${s.delta.toFixed(2)} · <span style="color:var(--accent2)">▾ detail</span></div></div>
-      <div class="r"><span class="verdict ${isBuy?'BUY':'SELL'}">${isBuy?'BUY':'SELL'}</span>
-        <div class="btmini" style="border-color:${scoreCol};color:${scoreCol};margin-top:6px" title="Mispricing score out of 10 — how far from fair value, NOT a directional forecast.">${s.score_10.toFixed(1)}/10</div></div></div>
+      <div class="l">
+        <div class="name">${arrow} ${p.thesis||s.underlying}</div>
+        <div class="sub" style="margin-top:3px;color:var(--txt);font-size:12.5px"><b>${p.action||''}</b></div>
+        <div class="sub">${p.days_left!=null?p.days_left.toFixed(0)+' days left':''} · <span style="color:var(--accent2)">▾ full plan &amp; payoff</span></div></div>
+      <div class="r"><span class="verdict ${isBuy?'BUY':'SELL'}">${isBuy?'BUY':'SPREAD'}</span>
+        <div class="btmini" style="border-color:${confCol};color:${confCol};margin-top:6px" title="How good this setup looks overall. Not a probability of profit.">${p.confidence_word||''}</div></div></div>
     <div class="bd">
-      <div style="font-size:12.5px;line-height:1.55;margin:2px 0"><b style="color:${col}">WHY</b> — ${s.why}</div>
-      <div style="font-size:12.5px;line-height:1.55;margin:4px 0;padding:6px 9px;border-radius:7px;background:rgba(251,191,36,.09);border:1px solid rgba(251,191,36,.3)"><b style="color:#fbbf24">WHY NOT</b> — ${s.why_not}</div>
-      ${struct}
-      <div class="qlevels">
-        <div class="lv entry"><div class="k">Premium</div><div class="v">${rf(s.econ.premium_inr)}</div></div>
-        <div class="lv stop"><div class="k">Max loss</div><div class="v">${rf(s.econ.max_loss_inr)}</div></div>
-        <div class="lv"><div class="k">Breakeven</div><div class="v">${Number(s.econ.breakeven).toLocaleString('en-IN',{maximumFractionDigits:0})}</div></div>
-        <div class="lv"><div class="k">Theta / day</div><div class="v" style="color:var(--sell)">${rf(s.econ.theta_day_inr)}</div></div>
-        <div class="lv"><div class="k">Move needed</div><div class="v">${s.econ.req_move_pct}%</div></div>
-        <div class="lv"><div class="k">Days left</div><div class="v">${s.econ.dte_days.toFixed(1)}</div></div>
+      <div class="qlevels" style="margin-top:2px">
+        <div class="lv ${p.credit_inr!=null?'':'entry'}"><div class="k">${p.credit_inr!=null?'You receive':'It costs you'}</div><div class="v">${rf(p.credit_inr!=null?p.credit_inr:p.cost_inr)}</div></div>
+        <div class="lv stop"><div class="k">Most you can lose</div><div class="v">${rf(p.max_loss_inr)}</div></div>
+        <div class="lv"><div class="k">Days left</div><div class="v">${p.days_left!=null?p.days_left.toFixed(0):'—'}</div></div>
       </div>
-      <div class="sub" style="margin-top:5px;font-size:11.5px">🇮🇳 VDA tax drag on the illustrated gain: <b>${rf(s.econ.tax_drag_inr)}</b> — ${s.econ.tax_note}. Losses cannot be offset, so a 50% hit rate is loss-making after tax.</div>
+      <div style="margin:7px 0;padding:8px 10px;border-radius:8px;background:rgba(52,211,153,.08);border:1px solid rgba(52,211,153,.3);font-size:12.5px;line-height:1.55">
+        ✅ <b>You win if</b> — ${p.win||''}</div>
+      <div style="margin:5px 0;padding:8px 10px;border-radius:8px;background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.3);font-size:12.5px;line-height:1.55">
+        ❌ <b>You lose if</b> — ${p.loss||''}</div>
+      ${p.decay?`<div class="sub" style="margin:5px 0;font-size:12px">⏳ ${p.decay}</div>`:''}
+      ${p.odds?`<div style="margin:6px 0;padding:7px 10px;border-radius:8px;background:rgba(129,140,248,.09);border:1px solid rgba(129,140,248,.3);font-size:12px;line-height:1.5">
+        🎲 <b>How often has this happened?</b> ${p.odds}</div>`:''}
+      ${rows?`<div style="margin-top:8px"><div class="sub" style="font-weight:700;margin-bottom:3px">If ${s.underlying} is here on expiry day, you end up with:</div>
+        <table class="bttable"><thead><tr><th>Move</th><th>Price</th><th style="text-align:right">Your P&amp;L</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`:''}
+      ${cautions?`<div style="margin-top:8px;padding:8px 10px;border-radius:8px;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.32);font-size:12px;line-height:1.5">
+        <b style="color:#fbbf24">⚠ Before you do this</b><ul style="margin:4px 0 0 16px;padding:0">${cautions}</ul></div>`:''}
+      <div class="sub" style="margin-top:7px;font-size:11.5px">🇮🇳 If this wins, tax takes roughly <b>${rf(s.econ.tax_drag_inr)}</b> of the gain. Losses cannot be set off, so you need to win clearly more than half the time to come out ahead.</div>
       ${badges?`<div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:6px">${badges}</div>`:''}
-      <div class="sub" style="margin-top:5px;font-size:11px">signals: ${Object.entries(s.z).filter(([,v])=>v!=null).map(([k,v])=>k+' '+v.toFixed(2)).join(' · ')||'—'}</div>
+      <details style="margin-top:8px"><summary class="sub" style="cursor:pointer;list-style:revert">🔬 The numbers behind it (for options traders)</summary>
+        <div class="sub" style="font-size:11.5px;margin-top:5px;line-height:1.6">
+          ${p.why_this_one||''}<br>
+          <b>Edge:</b> ${s.why}<br><b>Counter:</b> ${s.why_not}<br>
+          Strike ${rf(s.strike)} · ${s.kind} · IV ${(s.iv*100).toFixed(1)}%${s.rvol30?` vs 30d realized ${(s.rvol30*100).toFixed(0)}%`:''} · Δ${s.delta.toFixed(2)} ·
+          breakeven ${rf(s.econ.breakeven)} · theta ${rf(s.econ.theta_day_inr)}/day · mispricing ${s.score_10.toFixed(1)}/10<br>
+          ${s.structure?`Spread: short ${rf(s.structure.short_strike)} / long ${rf(s.structure.long_strike)}, width ${rf(s.structure.width)}<br>`:''}
+          signals: ${Object.entries(s.z).filter(([,v])=>v!=null).map(([k,v])=>k+' '+v.toFixed(2)).join(' · ')||'—'}
+        </div></details>
     </div></div>`;
 }
 function renderRadarExplain(){
@@ -1326,14 +1347,28 @@ function renderRadar(){
     if(!d)return '<div class="sub" style="padding:14px">—</div>';
     if(d.error)return `<div class="sub" style="padding:14px;color:var(--sell)">${d.error}</div>`;
     const nb=(d.buys||[]).length, ns=(d.sells||[]).length;
-    if(!nb&&!ns)return `<div class="empty">No contract currently clears the filters and scores as mispriced.${d.errors&&Object.keys(d.errors).length?`<br><span class="sub">Feed issues: ${Object.entries(d.errors).map(([k,v])=>k+' — '+v).join('; ')}</span>`:''}</div>`;
-    return `<h4 class="sec" style="font-size:13px;margin:10px 0 6px">📈 Top ${nb} BUY <span class="sub">— cheap vs fair value</span></h4>
-      <div class="cards">${(d.buys||[]).map(radarCard).join('')||'<div class="empty">None.</div>'}</div>
-      <h4 class="sec" style="font-size:13px;margin:12px 0 6px">📉 Top ${ns} SELL <span class="sub">— rich vs fair value, always as a defined-risk spread</span></h4>
-      <div class="cards">${(d.sells||[]).map(radarCard).join('')||'<div class="empty">None.</div>'}</div>`;
+    // What the app currently thinks each coin is doing — the thesis every card below rests on.
+    const views=Object.entries(d.views||{}).map(([u,v])=>{
+      const c=v.score==null?'var(--muted)':v.score>=12?'var(--buy)':v.score<=-12?'var(--sell)':'var(--muted)';
+      const tip=v.noView?'No clear trend, so no options trade is suggested on this coin.'
+        :'The same trend read the rest of the dashboard uses.';
+      return `<span class="btmini" style="border-color:${c};color:${c}" title="${tip}">${u}: ${v.label||'—'}</span>`;
+    }).join(' ');
+    const viewBar=views?`<div style="display:flex;gap:5px;flex-wrap:wrap;margin:6px 0 9px;align-items:center"><span class="sub">Current read:</span>${views}</div>`:'';
+    if(!nb&&!ns){
+      const sittingOut=Object.entries(d.views||{}).filter(([,v])=>v.noView).map(([u])=>u);
+      return viewBar+`<div class="empty">${sittingOut.length
+        ? `<b>No trade suggested right now.</b><br>${sittingOut.join(', ')} ${sittingOut.length>1?'have':'has'} no clear direction, and buying an option without a view on where the coin is going is a coin flip that also bleeds money every day. Waiting is a position.`
+        : 'No contract currently fits a clear view at an attractive price.'}${d.errors&&Object.keys(d.errors).length?`<br><span class="sub">Feed issues: ${Object.entries(d.errors).map(([k,v])=>k+' — '+v).join('; ')}</span>`:''}</div>`;
+    }
+    return viewBar+
+      `<h4 class="sec" style="font-size:13px;margin:10px 0 6px">🎯 Simple bets <span class="sub">— you pay a fixed amount, that is all you can lose</span></h4>
+      <div class="cards">${(d.buys||[]).map(radarCard).join('')||'<div class="empty">Nothing that fits the current view at a fair price.</div>'}</div>
+      <h4 class="sec" style="font-size:13px;margin:14px 0 6px">🛡 Income trades <span class="sub">— you get paid upfront and keep it if the coin behaves. More advanced: two legs, and you must place both.</span></h4>
+      <div class="cards">${(d.sells||[]).map(radarCard).join('')||'<div class="empty">None that can be made safely right now.</div>'}</div>`;
   })();
   el.innerHTML=`<div class="tradespanel" style="border-color:rgba(129,140,248,.45)">
-    <h3>🎯 Options Radar <span class="sub">— ranked by MISPRICING vs fair value, not by price forecast</span>
+    <h3>🎯 Options Radar <span class="sub">— what to bet on, what it costs, what you win</span>
       <button class="btn" style="padding:2px 9px;font-size:11px" onclick="loadRadar()">↻ rescan</button>
       ${d&&d.ts?`<span class="sub">· ${new Date(d.ts).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true})}</span>`:''}
       ${d&&d.state?`<span class="sub">· ${d.state.venue} · ${d.state.storeKind}</span>`:''}</h3>
@@ -1355,7 +1390,14 @@ function renderRadar(){
         <span class="sub" style="font-size:11px">fills at mark ± half-spread</span></div>
       <div id="radarBtOut"></div>
     </div>
-    <p class="small" style="color:var(--muted);margin-top:10px"><b>This is analysis, not investment advice.</b> Scores rank how far a contract sits from a fitted fair value — they are <b>not</b> a forecast of direction and not a probability of profit. Every SELL is shown only as a defined-risk vertical with a capped max loss; naked shorts are never surfaced. Figures are pre-fee and assume you can transact near the mark. Options can expire worthless — size accordingly.</p></div>`;
+    <details style="margin-top:10px"><summary class="sub" style="cursor:pointer;list-style:revert;font-weight:700">❓ New to options? Read this first</summary>
+      <div class="sub" style="font-size:12px;line-height:1.6;margin-top:6px">
+        An <b>option</b> is a fixed-price bet with a deadline. You pay a set amount up front — that amount is the <b>most you can lose</b>, no matter how badly the coin moves. In exchange you get to profit if the coin moves the way you bet, <b>before the expiry date</b>.<br><br>
+        A <b>CALL</b> pays off if the coin goes <b>up</b>. A <b>PUT</b> pays off if it goes <b>down</b>. Both expire completely worthless if the move does not happen in time — unlike buying the coin itself, where you can simply wait longer.<br><br>
+        <b>Two things beginners get caught by.</b> First, being right too slowly still loses: the option loses value every single day, which each card shows in rupees per day. Second, you usually need a <i>sizeable</i> move, not just any move — each card states the exact percentage required and how often that has actually happened historically.<br><br>
+        The <b>income trades</b> section is more advanced: you are paid up front and keep it if the coin stays out of a zone, but it is a two-leg trade and you must place both legs — the second one is what caps your loss.
+      </div></details>
+    <p class="small" style="color:var(--muted);margin-top:10px"><b>This is analysis, not investment advice.</b> Each card starts from the app's own read on where the coin is heading, then picks the contract that expresses that view at the best price — it is <b>not</b> a guarantee of direction, and the confidence label is not a probability of profit. Income trades are always shown as capped-loss spreads; a naked short is never surfaced. Figures are pre-fee and assume you can trade near the quoted price. <b>Options routinely expire worthless — only stake money you can afford to lose entirely.</b></p></div>`;
   renderRadarExplain(); renderRadarBt();
 }
 

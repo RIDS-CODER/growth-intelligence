@@ -146,11 +146,44 @@ Together these build a **forward record** — a measured, real-time hit rate of 
 themselves, distinct from the backtest. Statuses are sampled ~once a minute (state survives restarts via
 `setups.json`). API: `GET /api/setups` (`?tf=`, `?limit=`).
 
-## 🎯 Options Radar — mispricing screener
+## 🎯 Options Radar — what to bet on, what it costs, what you win
 
-Click **🎯 Options Radar** for the Top 3 BUYS and Top 3 SELLS across the options chain, ranked by
-**how far each contract sits from a fitted fair value** — this is a relative-value screen, **not** a
-forecast of direction.
+Click **🎯 Options Radar**. Every card answers five questions in plain English, with no options
+jargon anywhere in the user-facing text:
+
+> 📈 **BTC goes UP before 13 Aug**
+> Buy the BTC ₹88,40,000 CALL expiring 13 Aug
+> **It costs you** ₹1,52,252 · **Most you can lose** ₹1,52,252 · **Days left** 10
+> ✅ **You win if** BTC is above ₹89,92,252 on 13 Aug — a 5.8% move from here
+> ❌ **You lose if** it doesn't get there: the option expires worthless and you lose the whole ₹1,52,252
+> ⏳ Waiting costs about **₹13,057 a day** if BTC sits still
+> 🎲 Historically BTC has made that move in **3 of the last 190** 10-day stretches (2%) — a rare move
+
+Plus a payoff table showing exactly what you end up with at each price on expiry day, and a
+**⚠ Before you do this** block. Greeks, implied vol and the z-scores live behind a
+*"the numbers behind it"* toggle for anyone who wants them.
+
+### How a card is chosen — two steps, in this order
+
+1. **Direction first.** Each card starts from the app's **own trend read on the coin** — the same
+   engine that drives Quick Trades, so an options card can never contradict the rest of the
+   dashboard. **If there is no clear trend, no card is shown for that coin at all**: the panel says
+   so explicitly. Buying an option with no view is a coin flip that also bleeds money every day.
+2. **Then the cheapest way to express it.** Among the contracts that profit if that view is right,
+   the vol maths below picks the one priced most attractively versus the rest of the chain. Mispricing
+   decides *which contract*, never *whether to trade*.
+
+Set `optionsRadar.requireDirectionalView: false` for pure relative-value mode (expert use — it will
+surface cheap contracts with no thesis attached).
+
+**Simple bets** are single-leg buys: you pay a fixed amount and that is the entire risk.
+**Income trades** are two-leg credit spreads, clearly marked as more advanced, where you are paid
+upfront and keep it if the coin behaves — always with a capped, stated maximum loss.
+
+### The mispricing engine underneath
+
+Ranked by **how far each contract sits from a fitted fair value** — a relative-value measure, **not**
+a forecast.
 
 **Six signals**, z-scored and blended with weights from `config.json → optionsRadar.weights`
 (nothing hardcoded). A signal that lacks data **abstains** rather than counting as neutral:

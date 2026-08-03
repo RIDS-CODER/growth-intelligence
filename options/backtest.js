@@ -25,6 +25,23 @@ function fillPrice(q,dir){
 }
 const quoteById=(snap,id)=>snap.quotes.find(q=>q.id===id)||null;
 
+/* Fallback trend read for a self-contained replay: fast vs slow mean of the prices seen so
+   far. Deliberately crude and clearly labelled — a production backtest should pass the app's
+   real engine via opts.view so it measures the screener that actually ships. Never looks
+   beyond the prices already appended, so it stays point-in-time. */
+function trendView(spots){
+  if(!spots||spots.length<10)return null;      // below this there is no trend to read at all
+  // Adapt the windows to the tape: a short replay should still be gated, not silently ungated.
+  const slowN=Math.min(20,spots.length), fastN=Math.max(3,Math.floor(slowN/4));
+  const last=n=>{const a=spots.slice(-n);return a.reduce((s,x)=>s+x,0)/a.length;};
+  const fast=last(fastN), slow=last(slowN);
+  if(!(slow>0))return null;
+  const score=Math.max(-40,Math.min(40,Math.round(400*(fast-slow)/slow)));
+  return {score, label: score>=20?"clearly rising":score>=12?"leaning up"
+    : score<=-20?"clearly falling":score<=-12?"leaning down":"no clear direction",
+    approx:true};
+}
+
 /* Value a position at a later snapshot, or settle it intrinsically at expiry. */
 function exitValue(sig,snap,fwd){
   if(sig.structure){
@@ -72,15 +89,22 @@ function replay(snapshots,opts){
   const tape=(snapshots||[]).slice().sort((a,b)=>a.ts_ms-b.ts_ms);
   const trades=[],openBySig=new Map();
   const seen=new Set();                       // one trade per contract+side per signal episode
+  const spots=[];                             // the tape's own price history, for the view fallback
+  let viewSource=opts.view?"caller-supplied (live engine)":"derived from the tape's own price history";
 
   for(let i=0;i<tape.length;i++){
     const snap=tape[i];
+    if(snap.spot>0)spots.push(snap.spot);
     // Point-in-time history only — never data from after this timestamp.
     const histFn=opts.history?((u,t,b)=>opts.history(u,t,b,snap.ts_ms)):()=>null;
+    // The direction gate must apply here too, or the backtest measures a screener that
+    // does not exist. Prefer the caller's real engine; otherwise derive a trend read from
+    // the prices seen SO FAR in the tape (never later ones).
+    const view=opts.view?opts.view(snap.underlying,snap.ts_ms):trendView(spots);
     // A scoring failure must NOT skip the close pass below — expiry snapshots legitimately
     // carry no quotable contracts, and skipping them would strand every open position.
     let scored={buys:[],sells:[]};
-    try{ scored=S.scoreSnapshot(snap,{history:histFn,contractSize:opts.contractSize||1,toInr:opts.toInr},cfg); }
+    try{ scored=S.scoreSnapshot(snap,{history:histFn,view,contractSize:opts.contractSize||1,toInr:opts.toInr},cfg); }
     catch(e){ scored={buys:[],sells:[]}; }
 
     /* close anything now closable */
@@ -144,7 +168,9 @@ function replay(snapshots,opts){
   /* anything still open at the end of the tape is UNRESOLVED — excluded from the stats
      rather than marked-to-last-price, which would flatter a truncated sample. */
   const unresolved=openBySig.size;
-  return summarize(trades,unresolved,cfg);
+  const out=summarize(trades,unresolved,cfg);
+  out.assumptions.direction_view=viewSource;
+  return out;
 }
 
 function statsFor(rows){
@@ -221,4 +247,4 @@ function rollingPerformance(trades,windowDays){
   return out;
 }
 
-module.exports={replay,summarize,statsFor,wilson,fillPrice,settleIntrinsic,rollingPerformance};
+module.exports={replay,summarize,statsFor,wilson,fillPrice,settleIntrinsic,rollingPerformance,trendView};

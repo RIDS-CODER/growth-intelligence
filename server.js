@@ -1158,8 +1158,8 @@ const paper = require('./paper.js')({ scan, liveQuotes, dir:__dirname, rate:()=>
 /* ===== Options Radar — mispricing screener over the options chain. Analysis only; it never
    places orders and never surfaces a naked short. Inert unless enabled in config. ===== */
 const RADAR_CFG = CFG.optionsRadar || {};
-// declared before the radar closure that reads it, so the dependency is obvious
-const RVOL_CACHE={};
+// declared before the radar closures that read them, so the dependency is obvious
+const RVOL_CACHE={}, VIEW_CACHE={};
 let radar=null;
 if(RADAR_CFG.enabled!==false){
   try{
@@ -1172,7 +1172,12 @@ if(RADAR_CFG.enabled!==false){
       // Deribit quotes in USD; convert for the ₹ economics on the cards.
       toInr: v => (cryptoMode==='coindcx' && cdxUsdtInr()>0) ? v*cdxUsdtInr() : v*(fxRate||86),
       // 30d realized vol of the underlying, reused from the existing crypto candle feed.
-      realizedVol: (u)=>{ const c=RVOL_CACHE[u]; return (c&&Date.now()-c.at<3600e3)?c.v:null; }
+      realizedVol: (u)=>{ const c=RVOL_CACHE[u]; return (c&&Date.now()-c.at<3600e3)?c.v:null; },
+      // THE THESIS. Reuses the SAME engine that drives Quick Trades, so an options card can
+      // never contradict what the rest of the dashboard says about the coin.
+      view: (u)=>{ const c=VIEW_CACHE[u]; return (c&&Date.now()-c.at<3600e3)?c.v:null; },
+      // Daily closes, for the honest "how often has it actually moved this much?" base rate.
+      closes: (u)=>{ const c=RVOL_CACHE[u]; return c?c.closes:null; }
     });
   }catch(e){ console.log('  Options Radar disabled:', e.message); }
 }
@@ -1185,10 +1190,21 @@ async function refreshRvol(){
         ? {sym:u+'INR',pair:'I-'+u+'_INR',binance:u+'USDT',tk:u,name:u,cls:'Crypto',src:'cg'}
         : {sym:u+'USDT',binance:u+'USDT',tk:u,name:u,cls:'Crypto',src:'cg'};
       const d=await loadCrypto(asset,'daily');
-      const closes=(d.close||[]).slice(-31);
+      const closes=(d.close||[]);
       const V=require('./options/vol.js');
-      const rv=V.realizedVol(closes,365);
-      if(isFinite(rv)&&rv>0)RVOL_CACHE[u]={v:rv,at:Date.now()};
+      const rv=V.realizedVol(closes.slice(-31),365);
+      if(isFinite(rv)&&rv>0)RVOL_CACHE[u]={v:rv,at:Date.now(),closes:closes.slice(-400)};
+      // Directional view from the SAME engine the dashboard uses, on closed candles only.
+      if(closes.length>=42){
+        const cl=closes.slice(0,-1),hi=(d.high||[]).slice(0,-1),lo=(d.low||[]).slice(0,-1);
+        const sig=computeSignal(cl,hi,lo,20,(d.vol||[]).slice(0,-1));
+        VIEW_CACHE[u]={at:Date.now(),v:{
+          score:sig.score, verdict:sig.verdict,
+          label: sig.score>=20?'clearly rising':sig.score>=12?'leaning up'
+               : sig.score<=-20?'clearly falling':sig.score<=-12?'leaning down':'no clear direction',
+          regimeUp:sig.regimeUp, adx:sig.adx
+        }};
+      }
     }catch(e){}
   }
 }

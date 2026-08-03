@@ -9,6 +9,7 @@ const S=require("./score.js");
 const A=require("./adapters.js");
 const B=require("./backtest.js");
 const V=require("./vol.js");
+const P=require("./plain.js");
 const Store=require("./store.js");
 
 const DAY=86400000;
@@ -38,7 +39,18 @@ function create(opts){
     const snap=A.buildSnapshot(Object.assign(raw,{
       rvol30:opts.realizedVol?opts.realizedVol(underlying):raw.rvol30
     }));
-    const res=S.scoreSnapshot(snap,{history,contractSize:opts.contractSize||1,toInr},cfg);
+    // The THESIS: the app's own directional read on the underlying, reused rather than
+    // reinvented, so an options card agrees with what the rest of the dashboard says.
+    const view=opts.view?opts.view(underlying):null;
+    const closes=opts.closes?opts.closes(underlying):null;
+    const res=S.scoreSnapshot(snap,{history,view,contractSize:opts.contractSize||1,toInr},cfg);
+    // Translate every surfaced card into plain English for someone who has never traded an option.
+    for(const sig of [...res.buys,...res.sells]){
+      try{
+        sig.plain=P.explainSignal(sig,{spot:snap.spot,contractSize:opts.contractSize||1,
+          closes,view,candidates:res.candidates||0});
+      }catch(e){}
+    }
 
     // persist: the tape for backtesting, the bucket points for the 90d baseline,
     // the signals for the forward record, and the rejections for the lookup.
@@ -72,6 +84,12 @@ function create(opts){
       out.buys=all.filter(s=>s.side==="buy").sort((a,b)=>b.score_10-a.score_10).slice(0,cfg.topN);
       out.sells=all.filter(s=>s.side==="sell").sort((a,b)=>b.score_10-a.score_10).slice(0,cfg.topN);
       out.backfilled=[...out.buys,...out.sells].some(s=>s.quality&&s.quality.backfilled);
+      // Per-underlying view summary, so the panel can say "no clear direction on SOL — sitting
+      // this one out" rather than silently showing nothing.
+      out.views={};
+      for(const [u,r] of Object.entries(out.underlyings))
+        out.views[u]={score:r.view?r.view.score:null,label:r.view?r.view.label:null,
+                      noView:!!r.noView,candidates:r.counts?r.counts.scored:0};
       state.lastScan=out.ts; state.cache=out;
       return out;
     },

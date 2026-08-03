@@ -309,3 +309,55 @@ test asserting no signal can serialize with a blank `why_not`.
    spread structures, and reports gross and post-VDA-tax.
 4. **Signal card UI** — new panel, consistent with the existing Quick Trades / Volume Movers components,
    with the persistent performance strip and the "why isn't X here?" lookup.
+
+---
+
+## Addendum — direction is the thesis, mispricing is the selector
+
+**Revision after review.** The original brief specified ranking by mispricing and explicitly *not*
+forecasting direction, which is what §1–§4 above describe and what was built. Reviewing the result
+against the actual user — someone who does not know how options work — exposed the gap: a mispricing
+score is a true statement that **cannot be acted on**. "This call is 2.1σ cheap on the smile" never
+tells you what you are betting on, so it cannot function as a guiding star.
+
+The two questions are different and both are needed:
+
+| Question | Answered by |
+|---|---|
+| *What am I betting on?* | The app's existing directional engine on the underlying |
+| *Which contract expresses that best?* | The mispricing maths in §2 |
+
+So the pipeline gained a **direction gate** between scoring and output:
+
+- The thesis comes from the **same signal engine that drives Quick Trades**, so an options card can
+  never contradict the rest of the dashboard.
+- **No clear trend ⇒ no cards for that underlying**, with the reason stated on screen. Surfacing a
+  cheap contract with no thesis is how a beginner ends up holding a lottery ticket they cannot explain.
+- Only positions that profit if the view is right survive: bullish → long calls / short put spreads;
+  bearish → long puts / short call spreads. Anything betting the other way is rejected with a plain
+  reason, visible through the "why isn't X here?" lookup.
+- `requireDirectionalView: false` restores pure relative-value mode for expert use.
+
+The mispricing engine is unchanged — it simply moved from being the *reason to trade* to being the
+*contract selector*, which is what it is actually good at.
+
+### Plain-English layer (`options/plain.js`)
+
+Every surfaced card is translated into: the bet, the literal instruction, the cost, the win condition,
+the loss condition, the daily time cost, and a payoff table at expiry. Two deliberate choices:
+
+- **Payoffs are quoted at expiry**, because at-expiry value is arithmetic a beginner can verify by
+  eye (price minus strike). A mid-life mark depends on vol and time decay and cannot be checked.
+- **An honest base rate, not a probability.** Each card states how often the underlying has *actually*
+  made the required move over the required window, measured from real history, and labels it as a
+  past base rate rather than a prediction. This is the single most useful reality check available: a
+  card asking for a 6% move in 10 days that has happened 2% of the time should say so.
+
+A test asserts that no user-facing string contains "theta", "vega", "delta", "implied vol", "skew",
+"smile", "σ" or "IV".
+
+### Backtest consequence
+
+The direction gate applies during replay too, or the backtest would measure a screener that does not
+exist. `replay()` prefers a caller-supplied view (the real engine) and otherwise derives a point-in-time
+trend from the tape's own prices; either way the source is reported in `assumptions.direction_view`.

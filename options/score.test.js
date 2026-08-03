@@ -36,6 +36,9 @@ function chain(opts){
     funding_rate:opts.funding||0,basis_bps:opts.basis||0,quotes});
 }
 const noHistory=()=>null;
+// These predate the direction gate and exercise the scoring maths in isolation, so they run
+// with the gate off. The gate itself is covered in plain.test.js.
+const NOGATE={requireDirectionalView:false};
 
 /* ---------------- adapter normalization ---------------- */
 test("adapter solves IV when the venue does not publish it",()=>{
@@ -81,7 +84,7 @@ test("each hard filter rejects with the measured value and the limit",()=>{
   assert.match(S.applyFilters({...base,spread_pct:null},f,now).reason,/two-sided/);
 });
 test("filtered-out contracts are answerable by the why-isn't-X lookup",()=>{
-  const r=S.scoreSnapshot(chain({spreadPct:30}),{history:noHistory},{});
+  const r=S.scoreSnapshot(chain({spreadPct:30}),{history:noHistory},NOGATE);
   assert.strictEqual(r.counts.passed,0,"all rejected on spread");
   assert.ok(r.rejections.length>0);
   const one=r.rejections.find(x=>x.stage==="filter");
@@ -90,7 +93,7 @@ test("filtered-out contracts are answerable by the why-isn't-X lookup",()=>{
 
 /* ---------------- GUARDRAIL: never a naked short ---------------- */
 test("every surfaced SELL is a defined-risk vertical with a capped max loss",()=>{
-  const r=S.scoreSnapshot(chain({rvol30:0.20}),{history:noHistory},{}); // IV >> RV → sell side
+  const r=S.scoreSnapshot(chain({rvol30:0.20}),{history:noHistory},NOGATE); // IV >> RV → sell side
   assert.ok(r.sells.length>0,"produced sell signals");
   for(const s of r.sells){
     assert.ok(s.structure,`${s.id} carries a spread structure`);
@@ -107,7 +110,7 @@ test("a SELL with no liquid protective wing is suppressed, not downgraded",()=>{
   const snap=A.buildSnapshot({venue:"coindcx",underlying:"BTC",ts_ms:now,spot:F,
     forwards:[{expiry_ms:expiry,F}],rvol30:0.10,   // very rich vs RV → strong sell
     quotes:[mk(95,"call"),mk(105,"call"),mk(95,"put"),mk(105,"put")]});
-  const r=S.scoreSnapshot(snap,{history:noHistory},{});
+  const r=S.scoreSnapshot(snap,{history:noHistory},NOGATE);
   for(const s of r.sells)assert.ok(s.structure,"anything surfaced has a structure");
   const suppressed=r.rejections.filter(x=>x.stage==="structure");
   assert.ok(suppressed.length>0,"the unhedgeable short was suppressed");
@@ -117,7 +120,7 @@ test("a SELL with no liquid protective wing is suppressed, not downgraded",()=>{
 /* ---------------- GUARDRAIL: why_not is never blank ---------------- */
 test("every signal carries a non-empty WHY and WHY NOT",()=>{
   for(const opts of [{rvol30:0.20},{rvol30:0.95},{},{publishIv:false},{oi:60}]){
-    const r=S.scoreSnapshot(chain(opts),{history:noHistory},{});
+    const r=S.scoreSnapshot(chain(opts),{history:noHistory},NOGATE);
     for(const s of [...r.buys,...r.sells]){
       assert.ok(s.why&&s.why.trim().length>10,`why present for ${s.id}`);
       assert.ok(s.why_not&&s.why_not.trim().length>10,`why_not present for ${s.id}`);
@@ -146,23 +149,23 @@ test("a cheap strike is ranked BUY and a rich one SELL",()=>{
   // 0.32-delta strike: enough headroom that a 12-vol-point bump in either direction keeps
   // the contract inside the 0.15–0.70 delta band rather than being filtered out by it.
   const F=8500000, K=Math.round(F*1.04);
-  const cheap=S.scoreSnapshot(chain({bump:{strike:K,kind:"call",dv:-0.12}}),{history:noHistory},{});
+  const cheap=S.scoreSnapshot(chain({bump:{strike:K,kind:"call",dv:-0.12}}),{history:noHistory},NOGATE);
   const c=cheap.all.find(s=>s.strike===K&&s.kind==="call");
   assert.ok(c,"contract scored"); assert.strictEqual(c.side,"buy");
   assert.ok(c.z.smile_resid<-1.5,`flagged by the smile residual, z=${c.z.smile_resid}`);
-  const rich=S.scoreSnapshot(chain({bump:{strike:K,kind:"call",dv:+0.12}}),{history:noHistory},{});
+  const rich=S.scoreSnapshot(chain({bump:{strike:K,kind:"call",dv:+0.12}}),{history:noHistory},NOGATE);
   const rr=rich.all.find(s=>s.strike===K&&s.kind==="call");
   assert.strictEqual(rr.side,"sell");
   assert.ok(rr.z.smile_resid>1.5);
 });
 test("IV vs realized vol drives the side when the smile is flat",()=>{
-  const rich=S.scoreSnapshot(chain({rvol30:0.20}),{history:noHistory},{});
+  const rich=S.scoreSnapshot(chain({rvol30:0.20}),{history:noHistory},NOGATE);
   assert.ok(rich.all.every(s=>s.z.iv_rv>0),"IV above RV reads rich everywhere");
-  const cheap=S.scoreSnapshot(chain({rvol30:0.95}),{history:noHistory},{});
+  const cheap=S.scoreSnapshot(chain({rvol30:0.95}),{history:noHistory},NOGATE);
   assert.ok(cheap.all.every(s=>s.z.iv_rv<0),"IV below RV reads cheap everywhere");
 });
 test("signals abstain rather than guess when data is missing",()=>{
-  const r=S.scoreSnapshot(chain({rvol30:null}),{history:noHistory},{});
+  const r=S.scoreSnapshot(chain({rvol30:null}),{history:noHistory},NOGATE);
   const s=r.all[0];
   assert.strictEqual(s.z.iv_rv,null,"no realized vol → signal abstains");
   assert.strictEqual(s.z.iv_pctile,null,"no history → abstains");
@@ -171,32 +174,31 @@ test("signals abstain rather than guess when data is missing",()=>{
   assert.ok(!('iv_rv' in s.contrib),"an abstaining signal contributes nothing");
 });
 test("funding tilt stays off unless explicitly enabled",()=>{
-  const off=S.scoreSnapshot(chain({funding:0.001}),{history:noHistory},{});
+  const off=S.scoreSnapshot(chain({funding:0.001}),{history:noHistory},NOGATE);
   assert.strictEqual(off.all[0].z.funding_tilt,null);
-  const on=S.scoreSnapshot(chain({funding:0.001}),{history:noHistory},
-    {fundingTiltEnabled:true,weights:{funding_tilt:0.2}});
+  const on=S.scoreSnapshot(chain({funding:0.001}),{history:noHistory},{...NOGATE,fundingTiltEnabled:true,weights:{funding_tilt:0.2}});
   assert.ok(on.all[0].z.funding_tilt!==null,"enabled → speaks");
 });
 test("weights are honoured from config, not hardcoded",()=>{
   const snap=chain({bump:{strike:Math.round(8500000*1.04),kind:"call",dv:-0.12}});
   const only=S.scoreSnapshot(snap,{history:noHistory},
-    {weights:{iv_rv:0,iv_pctile:0,smile_resid:1,term_slope:0,theta_eff:0,funding_tilt:0}});
+    {...NOGATE,weights:{iv_rv:0,iv_pctile:0,smile_resid:1,term_slope:0,theta_eff:0,funding_tilt:0}});
   const s=only.all.find(x=>x.kind==="call"&&x.strike===Math.round(8500000*1.04));
   assert.deepStrictEqual(Object.keys(s.contrib),["smile_resid"],"only the weighted signal contributes");
 });
 test("IV percentile uses bucket history and flags backfilled baselines",()=>{
   const hist=()=>({iv:Array.from({length:60},(_,i)=>0.40+i*0.002),backfilled:true,n:60,nativeN:0});
-  const r=S.scoreSnapshot(chain(),{history:hist},{});
+  const r=S.scoreSnapshot(chain(),{history:hist},NOGATE);
   const s=r.all[0];
   assert.ok(s.z.iv_pctile!==null,"percentile computed");
   assert.strictEqual(s.quality.backfilled,true,"flagged as scored on backfilled data");
-  const thin=S.scoreSnapshot(chain(),{history:()=>({iv:[0.5,0.51],backfilled:false,n:2,nativeN:2})},{});
+  const thin=S.scoreSnapshot(chain(),{history:()=>({iv:[0.5,0.51],backfilled:false,n:2,nativeN:2})},NOGATE);
   assert.strictEqual(thin.all[0].z.iv_pctile,null,"too little history → abstains");
 });
 
 /* ---------------- economics + tax ---------------- */
 test("economics are coherent and expressed in INR",()=>{
-  const r=S.scoreSnapshot(chain(),{history:noHistory,contractSize:0.01,toInr:v=>v},{});
+  const r=S.scoreSnapshot(chain(),{history:noHistory,contractSize:0.01,toInr:v=>v},NOGATE);
   for(const s of [...r.buys,...r.sells]){
     assert.ok(s.econ.premium_inr>0,"premium positive");
     assert.ok(s.econ.max_loss_inr>0,"max loss positive and finite");
@@ -214,7 +216,7 @@ test("VDA tax drag applies to gains only — losses get no offset",()=>{
   assert.strictEqual(S.taxDrag(0,tax),0);
 });
 test("the tax note travels with every card",()=>{
-  const r=S.scoreSnapshot(chain(),{history:noHistory},{});
+  const r=S.scoreSnapshot(chain(),{history:noHistory},NOGATE);
   for(const s of [...r.buys,...r.sells]){
     assert.ok(s.econ.tax_note&&/losses not offsettable/.test(s.econ.tax_note));
     assert.ok(s.econ.tax_drag_inr>=0);
@@ -223,14 +225,14 @@ test("the tax note travels with every card",()=>{
 
 /* ---------------- ranking + accountability ---------------- */
 test("top 3 per side, ranked by score",()=>{
-  const r=S.scoreSnapshot(chain(),{history:noHistory},{});
+  const r=S.scoreSnapshot(chain(),{history:noHistory},NOGATE);
   assert.ok(r.buys.length<=3&&r.sells.length<=3,"top 3 each way");
   for(const list of [r.buys,r.sells])
     for(let i=1;i<list.length;i++)
       assert.ok(list[i-1].score_10>=list[i].score_10,"descending by score");
 });
 test("scored-but-not-surfaced contracts still get an explanation",()=>{
-  const r=S.scoreSnapshot(chain(),{history:noHistory},{});
+  const r=S.scoreSnapshot(chain(),{history:noHistory},NOGATE);
   const ranked=r.rejections.filter(x=>x.stage==="rank");
   if(r.all.length>r.buys.length+r.sells.length)
     assert.ok(ranked.length>0,"rank-stage rejections recorded");
@@ -238,7 +240,7 @@ test("scored-but-not-surfaced contracts still get an explanation",()=>{
 });
 test("bucket points sample the fitted curve at fixed deltas",()=>{
   const snap=chain();
-  const r=S.scoreSnapshot(snap,{history:noHistory},{});
+  const r=S.scoreSnapshot(snap,{history:noHistory},NOGATE);
   const fits={}; r.fits.forEach(f=>{});
   // rebuild fits map the way the service does
   const byExp={}; snap.quotes.forEach(q=>{(byExp[q.expiry_ms]=byExp[q.expiry_ms]||[]).push(q);});

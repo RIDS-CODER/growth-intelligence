@@ -15,6 +15,13 @@ const DEFAULTS={
   fundingTiltEnabled:false,          // spec: default off, user-toggleable
   minScore:0,                        // cards below this are not surfaced
   topN:3,
+  // DIRECTION GATE. The screener's edge is knowing WHICH CONTRACT is cheap; it is not a
+  // forecast. But a contract on its own is not a trade a person can act on — they need to
+  // know what they are betting on first. So the app's own directional read on the underlying
+  // supplies the thesis, and mispricing then picks the cheapest way to express it.
+  // Set requireDirectionalView:false for pure relative-value mode (no thesis, expert use).
+  requireDirectionalView:true,
+  minViewScore:12,                   // |signal score| below this = no clear view = no cards
   tax:{ gainsRatePct:30, cessPct:4, tdsPct:0, applyTds:false },   // India VDA; see README caveat
   tenorBuckets:[{name:"0-2d",maxDays:2},{name:"3-9d",maxDays:9},{name:"10-30d",maxDays:30},{name:"31-90d",maxDays:1e9}],
   holdingDays:null                   // null → hold to expiry for the theta/move ratio
@@ -273,6 +280,43 @@ function scoreSnapshot(snap,ctx,cfgIn){
     cards.push({q,side,score,composite,z,contrib,quality,tenor,days,fit});
   }
 
+  /* 3b — DIRECTION GATE.
+     A contract is only surfaced if it EXPRESSES the app's current view on the underlying:
+       bullish  → buy calls          (or sell put spreads: profit while it holds up)
+       bearish  → buy puts           (or sell call spreads)
+     Without this the screener answers "which option is cheap?" — a true statement that a
+     non-options trader cannot act on, because it never says what they are betting on. */
+  const view=ctx&&ctx.view?ctx.view:null;
+  if(cfg.requireDirectionalView){
+    if(!view||!isFinite(view.score)||Math.abs(view.score)<cfg.minViewScore){
+      // No clear view = no trade. Surfacing "cheap" contracts with no thesis is how a
+      // beginner ends up holding a lottery ticket they cannot explain.
+      const why=!view?"no directional read available for this underlying"
+        :`the ${snap.underlying} trend read is ${view.score>0?'+':''}${view.score}, inside the ±${cfg.minViewScore} "no clear direction" band`;
+      cards.forEach(c=>rejections.push({ts_ms:now,id:c.q.id,stage:"direction",
+        reason:`No trade suggested — ${why}. Waiting for a clearer trend beats guessing.`,
+        detail:{view_score:view?view.score:null,threshold:cfg.minViewScore}}));
+      return {ts_ms:now,underlying:snap.underlying,venue:snap.venue,buys:[],sells:[],all:[],
+        rejections,view,noView:true,
+        fits:Object.values(fits).map(f=>({expiry_ms:f.expiry_ms,n:f.n,degraded:f.degraded})),
+        counts:{quotes:snap.quotes.length,passed:passed.length,scored:0}};
+    }
+    const bullish=view.score>0;
+    const kept=[];
+    for(const c of cards){
+      // long call = bullish · long put = bearish · call credit spread = bearish/neutral ·
+      // put credit spread = bullish/neutral
+      const expresses = c.side==="buy"
+        ? (bullish ? c.q.kind==="call" : c.q.kind==="put")
+        : (bullish ? c.q.kind==="put"  : c.q.kind==="call");
+      if(expresses)kept.push(c);
+      else rejections.push({ts_ms:now,id:c.q.id,stage:"direction",
+        reason:`Priced attractively, but it bets the wrong way: the ${snap.underlying} read is ${bullish?"bullish":"bearish"} and this position profits if it goes the other way.`,
+        detail:{view_score:view.score,kind:c.q.kind,side:c.side}});
+    }
+    cards.length=0; cards.push(...kept);
+  }
+
   /* 4 — economics, guardrails, WHY/WHY NOT */
   const out=[];
   for(const c of cards){
@@ -342,6 +386,7 @@ function scoreSnapshot(snap,ctx,cfgIn){
       detail:{score:s.score_10,side:s.side}});
   }
   return {ts_ms:now,underlying:snap.underlying,venue:snap.venue,buys,sells,all:out,rejections,
+          view, noView:false, candidates:out.length,
           fits:Object.values(fits).map(f=>({expiry_ms:f.expiry_ms,n:f.n,degraded:f.degraded,
             rmseVol:isFinite(f.rmseVol)?+f.rmseVol.toFixed(5):null,arb:f.arb})),
           counts:{quotes:snap.quotes.length,passed:passed.length,scored:out.length}};
