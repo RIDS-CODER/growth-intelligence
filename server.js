@@ -1329,8 +1329,10 @@ async function handler(req,res){
     if(p.startsWith("/api/options/")){   // 🎯 Options Radar — mispricing screener (analysis only)
       if(!radar)return sendJSON(res,{error:"Options Radar is disabled in config."},503);
       if(p==="/api/options/scan"){
-        const d=await radar.scan();
-        return sendJSON(res,{...d,state:radar.state()});
+        // Short-dated by default; the panel can widen it, never beyond a month.
+        const md=Math.min(30,Math.max(1,parseInt(u.searchParams.get("maxDays"))||14));
+        const d=await radar.scan(null,{filters:{maxDaysToExpiry:md}});
+        return sendJSON(res,{...d,maxDays:md,state:radar.state()});
       }
       if(p==="/api/options/explain"){    // "why isn't X here?"
         return sendJSON(res,radar.explain(u.searchParams.get("id")||""));

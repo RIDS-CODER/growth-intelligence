@@ -163,6 +163,33 @@ Plus a payoff table showing exactly what you end up with at each price on expiry
 **⚠ Before you do this** block. Greeks, implied vol and the z-scores live behind a
 *"the numbers behind it"* toggle for anyone who wants them.
 
+### Ranked by odds, not by how cheap the contract is
+
+Cards are sorted by **probability of paying off**, highest first, and anything below **55%** is
+pushed into a separate collapsed section. (Earlier versions ranked by mispricing, which meant a
+contract with a 0% historical hit rate could sit at the top purely for being cheap.)
+
+The headline percentage is the **lower** of two independent estimates, so it never oversells:
+
+- **Market-implied** — the odds baked into the option's own price.
+- **Historical** — this exact position replayed at every point in the coin's past.
+
+Two guardrails against the classic premium-selling trap, where a trade wins most of the time and
+still loses money:
+
+- Each card states the **break-even win rate** its payoff geometry demands. A trade that wins 70%
+  of the time but needs 73% to break even says exactly that.
+- If it has won often and *still* averaged a loss historically, the card leads with that.
+
+**Expiry is capped at two weeks by default** (selectable: 1 week / 2 weeks / 1 month). Anything
+longer is filtered out entirely — no capital tied up for months in a decaying asset. Configure via
+`optionsRadar.filters.maxDaysToExpiry`.
+
+> **An honest structural note.** High-probability and "buy a call" mostly do not coexist. Buying an
+> option is inherently a sub-50% bet with a large payoff; the reliable-odds trades are capped-loss
+> credit spreads. So the top section will usually be spreads, and the long-shot section is where
+> straightforward call/put buys land. That is the maths, not a limitation of the screener.
+
 ### How a card is chosen — two steps, in this order
 
 1. **Direction first.** Each card starts from the app's **own trend read on the coin** — the same

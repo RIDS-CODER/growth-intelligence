@@ -194,9 +194,11 @@ test("rolling performance keeps the summary shape for the on-screen strip",()=>{
 });
 test("point-in-time history only — the scorer never sees the future",()=>{
   const seen=[];
-  B.replay(tape({steps:5}),{history:(u,t,b,asOf)=>{seen.push(asOf);return null;}});
+  // Full-length tape: history is only consulted for contracts that clear the filters, and the
+  // 14-day expiry cap means the early snapshots (25 days out) have nothing eligible yet.
+  B.replay(tape(),{history:(u,t,b,asOf)=>{seen.push(asOf);return null;}});
   assert.ok(seen.length>0,"history was consulted");
   // Each call must carry the snapshot's own timestamp, never a later one.
-  const tapeTs=tape({steps:5}).map(s=>s.ts_ms);
-  for(const ts of seen)assert.ok(tapeTs.includes(ts),`asOf ${ts} is a real snapshot time`);
+  const tapeTs=new Set(tape().map(s=>s.ts_ms));
+  for(const ts of seen)assert.ok(tapeTs.has(ts),`asOf ${ts} is a real snapshot time`);
 });

@@ -224,12 +224,29 @@ test("the tax note travels with every card",()=>{
 });
 
 /* ---------------- ranking + accountability ---------------- */
-test("top 3 per side, ranked by score",()=>{
+test("top 3 per side, ranked by ODDS rather than by how cheap the contract is",()=>{
   const r=S.scoreSnapshot(chain(),{history:noHistory},NOGATE);
   assert.ok(r.buys.length<=3&&r.sells.length<=3,"top 3 each way");
   for(const list of [r.buys,r.sells])
-    for(let i=1;i<list.length;i++)
-      assert.ok(list[i-1].score_10>=list[i].score_10,"descending by score");
+    for(let i=1;i<list.length;i++){
+      const a=list[i-1].odds.win_prob, b=list[i].odds.win_prob;
+      // ties on probability fall through to price, which is the intended secondary sort
+      assert.ok(a>=b-0.011,`descending by win probability (${a} then ${b})`);
+    }
+});
+test("a likelier setup outranks a cheaper one — the whole point of the change",()=>{
+  const r=S.scoreSnapshot(chain(),{history:noHistory},NOGATE);
+  const all=[...r.buys,...r.sells];
+  if(all.length>1){
+    const top=all[0];
+    // Somewhere in the rejected/long-shot pile there should be a contract that is better
+    // PRICED but less likely — and it must not have taken the top slot.
+    const cheaperButUnlikelier=(r.longShots||[]).find(s=>s.score_10>top.score_10);
+    if(cheaperButUnlikelier)
+      assert.ok(cheaperButUnlikelier.odds.win_prob<top.odds.win_prob,
+        "the better-priced contract lost the top slot precisely because it is less likely to pay");
+  }
+  for(const s of all)assert.ok(s.odds.win_prob>=0.55-1e-9,"everything surfaced clears the bar");
 });
 test("scored-but-not-surfaced contracts still get an explanation",()=>{
   const r=S.scoreSnapshot(chain(),{history:noHistory},NOGATE);

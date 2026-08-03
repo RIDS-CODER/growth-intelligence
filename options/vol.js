@@ -414,6 +414,21 @@ function realizedVol(closes,periodsPerYear){
   return Math.sqrt(v*(periodsPerYear||365));
 }
 
+/* ---------- probability the market itself is implying ----------
+   Under Black-76 the forward price is the risk-neutral mean, so
+     S_T = F·exp(σ√T·Z − σ²T/2),  Z ~ N(0,1)
+   giving P(S_T > B) = N(d2) evaluated at B. This is the MARKET'S OWN ODDS implied by the
+   option's price — not a forecast, and not a real-world probability (the two differ by the
+   risk premium). It is the right number to quote as "what you are being offered", and it
+   should always be cross-checked against what the coin has actually done. */
+function probAbove(F,B,T,sigma){
+  if(!(F>0)||!(B>0))return NaN;
+  if(!(T>0)||!(sigma>0))return F>B?1:0;          // no time or no vol left: it is already decided
+  const v=sigma*Math.sqrt(T);
+  return NORM_CDF((Math.log(F/B)-0.5*v*v)/v);
+}
+const probBelow=(F,B,T,sigma)=>{const p=probAbove(F,B,T,sigma);return isFinite(p)?1-p:NaN;};
+
 /* Percentile of `value` within `history` (0..100). The IV-percentile signal. */
 function percentileOf(value,history){
   const h=(history||[]).filter(isFinite);
@@ -422,6 +437,6 @@ function percentileOf(value,history){
   return 100*below/h.length;
 }
 
-module.exports={erf,NORM_CDF,NORM_PDF,black76,greeks,impliedVol,
+module.exports={erf,NORM_CDF,NORM_PDF,black76,greeks,impliedVol,probAbove,probBelow,
   fitSmile,fitVariance,fitIV,kForDelta,realizedVol,percentileOf,
   madSigma,median,leverages,wlsQuadratic,wlsLinear,IV_LO,IV_HI};

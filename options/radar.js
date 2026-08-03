@@ -34,7 +34,11 @@ function create(opts){
     catch(e){ return null; }
   };
 
-  async function scanOne(underlying,fetchImpl){
+  // Per-scan config overrides (e.g. the panel's 7/14/30-day tenor selector) layered on the base.
+  const cfgWith=(o)=>o?S.withDefaults({...cfg,...o,
+    filters:{...cfg.filters,...(o.filters||{})}}):cfg;
+
+  async function scanOne(underlying,fetchImpl,over){
     const raw=await adapter.fetchRaw(underlying,fetchImpl);
     const snap=A.buildSnapshot(Object.assign(raw,{
       rvol30:opts.realizedVol?opts.realizedVol(underlying):raw.rvol30
@@ -43,9 +47,9 @@ function create(opts){
     // reinvented, so an options card agrees with what the rest of the dashboard says.
     const view=opts.view?opts.view(underlying):null;
     const closes=opts.closes?opts.closes(underlying):null;
-    const res=S.scoreSnapshot(snap,{history,view,contractSize:opts.contractSize||1,toInr},cfg);
+    const res=S.scoreSnapshot(snap,{history,view,closes,contractSize:opts.contractSize||1,toInr},cfgWith(over));
     // Translate every surfaced card into plain English for someone who has never traded an option.
-    for(const sig of [...res.buys,...res.sells]){
+    for(const sig of [...res.buys,...res.sells,...(res.longShots||[])]){
       try{
         sig.plain=P.explainSignal(sig,{spot:snap.spot,contractSize:opts.contractSize||1,
           closes,view,candidates:res.candidates||0});
@@ -73,16 +77,24 @@ function create(opts){
   return {
     config:cfg, store, venue,
     /** Scan every underlying. Failures are per-underlying, never fatal. */
-    async scan(fetchImpl){
+    async scan(fetchImpl,over){
       const out={ts:Date.now(),venue,underlyings:{},errors:{}};
       for(const u of (opts.underlyings||UNDERLYINGS)){
-        try{ out.underlyings[u]=await scanOne(u,fetchImpl); }
+        try{ out.underlyings[u]=await scanOne(u,fetchImpl,over); }
         catch(e){ out.errors[u]=String(e&&e.message||e); }
       }
       // Top 3 each way ACROSS underlyings, which is what the panel shows.
+      // Rank across underlyings by ODDS, matching the per-underlying ranking.
+      const byOdds=(a,b)=>{
+        const pa=a.odds&&a.odds.win_prob!=null?a.odds.win_prob:-1;
+        const pb=b.odds&&b.odds.win_prob!=null?b.odds.win_prob:-1;
+        return Math.abs(pa-pb)>0.01 ? pb-pa : b.score_10-a.score_10;
+      };
       const all=Object.values(out.underlyings).flatMap(r=>[...r.buys,...r.sells]);
-      out.buys=all.filter(s=>s.side==="buy").sort((a,b)=>b.score_10-a.score_10).slice(0,cfg.topN);
-      out.sells=all.filter(s=>s.side==="sell").sort((a,b)=>b.score_10-a.score_10).slice(0,cfg.topN);
+      out.buys=all.filter(s=>s.side==="buy").sort(byOdds).slice(0,cfg.topN);
+      out.sells=all.filter(s=>s.side==="sell").sort(byOdds).slice(0,cfg.topN);
+      out.longShots=Object.values(out.underlyings).flatMap(r=>r.longShots||[]).sort(byOdds).slice(0,cfg.topN);
+      out.minWinRate=cfg.minWinRate;
       out.backfilled=[...out.buys,...out.sells].some(s=>s.quality&&s.quality.backfilled);
       // Per-underlying view summary, so the panel can say "no clear direction on SOL — sitting
       // this one out" rather than silently showing nothing.

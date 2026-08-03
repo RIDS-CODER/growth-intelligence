@@ -7,11 +7,19 @@
    ============================================================ */
 "use strict";
 const V=require("./vol.js");
+const P=require("./plain.js");
 
 /* ---------- defaults (overridden by config.json → optionsRadar) ---------- */
 const DEFAULTS={
   weights:{ iv_rv:0.30, iv_pctile:0.20, smile_resid:0.25, term_slope:0.10, theta_eff:0.15, funding_tilt:0.00 },
-  filters:{ maxSpreadPct:8, minOI:50, minAbsDelta:0.15, maxAbsDelta:0.70, minHoursToExpiry:12 },
+  filters:{ maxSpreadPct:8, minOI:50, minAbsDelta:0.15, maxAbsDelta:0.70, minHoursToExpiry:12,
+            // SHORT-DATED ONLY. Nobody wants capital locked up for months in a decaying asset,
+            // and long-dated contracts are also the illiquid end of a crypto chain.
+            maxDaysToExpiry:14 },
+  // A setup must clear this to be called a setup at all. Below it, it is a lottery ticket and
+  // is either hidden or shown in a separate, clearly-labelled section.
+  minWinRate:0.55,
+  showLongShots:true,               // keep low-probability/high-payoff ideas visible but segregated
   fundingTiltEnabled:false,          // spec: default off, user-toggleable
   minScore:0,                        // cards below this are not surfaced
   topN:3,
@@ -48,9 +56,12 @@ const deltaBucketOf=q=>{
    value and the limit, so "why isn't X here?" answers from what actually ran.
    ============================================================ */
 function applyFilters(q,f,nowMs){
-  const hrs=(q.expiry_ms-nowMs)/3600000;
+  const hrs=(q.expiry_ms-nowMs)/3600000, days=hrs/24;
   if(!(hrs>f.minHoursToExpiry))
     return {reason:`expiry ${hrs.toFixed(1)}h away, needs > ${f.minHoursToExpiry}h`,detail:{hours:+hrs.toFixed(2),limit:f.minHoursToExpiry}};
+  if(f.maxDaysToExpiry!=null&&days>f.maxDaysToExpiry)
+    return {reason:`expires in ${days.toFixed(0)} days — longer than the ${f.maxDaysToExpiry}-day limit, so your money would be tied up too long`,
+            detail:{days:+days.toFixed(1),limit:f.maxDaysToExpiry}};
   if(q.spread_pct==null)
     return {reason:"no two-sided quote — spread cannot be measured",detail:{bid:q.bid,ask:q.ask}};
   if(!(q.spread_pct<f.maxSpreadPct))
@@ -296,7 +307,7 @@ function scoreSnapshot(snap,ctx,cfgIn){
       cards.forEach(c=>rejections.push({ts_ms:now,id:c.q.id,stage:"direction",
         reason:`No trade suggested — ${why}. Waiting for a clearer trend beats guessing.`,
         detail:{view_score:view?view.score:null,threshold:cfg.minViewScore}}));
-      return {ts_ms:now,underlying:snap.underlying,venue:snap.venue,buys:[],sells:[],all:[],
+      return {ts_ms:now,underlying:snap.underlying,venue:snap.venue,buys:[],sells:[],longShots:[],all:[],
         rejections,view,noView:true,
         fits:Object.values(fits).map(f=>({expiry_ms:f.expiry_ms,n:f.n,degraded:f.degraded})),
         counts:{quotes:snap.quotes.length,passed:passed.length,scored:0}};
@@ -372,11 +383,59 @@ function scoreSnapshot(snap,ctx,cfgIn){
       delta:+q.greeks.delta.toFixed(4)
     };
     if(!sig.why_not)throw new Error("invariant: why_not must never be empty");
+
+    /* ---- ODDS. This, not mispricing, is what the card is ranked on. ----
+       Two independent estimates, deliberately kept separate:
+         market  — the odds implied by the option's own price (Black-76 at the breakeven)
+         history — how often this coin has ACTUALLY finished past that level
+       Rank on the LOWER of the two. When the market is offering better odds than history
+       supports, the conservative number is the honest one to lead with. */
+    const winsAbove = c.side==="buy" ? q.kind==="call" : q.kind==="put";
+    const marketProb = winsAbove
+      ? V.probAbove(q.F,breakeven,q.T,q.iv)
+      : V.probBelow(q.F,breakeven,q.T,q.iv);
+    const hist=(ctx&&ctx.closes)?P.historicalOutcome(sig,snap.spot,ctx.closes,c.days,contractSize):null;
+    const probs=[marketProb,hist?hist.win_rate:null].filter(x=>x!=null&&isFinite(x));
+    const winProb=probs.length?Math.min(...probs):null;
+    sig.odds={
+      win_prob:winProb!=null?+winProb.toFixed(4):null,
+      market:isFinite(marketProb)?+marketProb.toFixed(4):null,
+      historical:hist?+hist.win_rate.toFixed(4):null,
+      history_n:hist?hist.n:0,
+      // What the trade actually RETURNED historically. A high win rate with a negative average
+      // return is the classic premium-selling trap, and this is what exposes it.
+      hist_avg_return_pct:hist?hist.avg_return_pct:null,
+      hist_worst_inr:hist?+fx(hist.worst_pnl).toFixed(0):null
+    };
+    // Payoff geometry: how many times bigger a loss is than a win. Needed to judge whether the
+    // odds are actually good enough.
+    const maxWin=c.side==="buy"?null:(structure?structure.net_credit*contractSize:null);
+    sig.odds.loss_to_win = (maxWin>0)?+(maxLoss/maxWin).toFixed(2):null;
+    // The win rate this trade must clear just to break even on its own payoff geometry.
+    sig.odds.breakeven_win_rate = (maxWin>0)?+(maxLoss/(maxLoss+maxWin)).toFixed(4):null;
     out.push(sig);
   }
 
-  const buys=out.filter(s=>s.side==="buy").sort((a,b)=>b.score_10-a.score_10).slice(0,cfg.topN);
-  const sells=out.filter(s=>s.side==="sell").sort((a,b)=>b.score_10-a.score_10).slice(0,cfg.topN);
+  /* RANK BY ODDS, not by mispricing.
+     Mispricing answers "is this contract cheap?", which is not the question a trader is asking.
+     It stays on the card as a price-fairness check and breaks ties, but it no longer decides
+     what gets shown — a contract that is 2σ cheap and almost never pays is not a setup. */
+  const byOdds=(a,b)=>{
+    const pa=a.odds.win_prob==null?-1:a.odds.win_prob, pb=b.odds.win_prob==null?-1:b.odds.win_prob;
+    if(Math.abs(pa-pb)>0.01)return pb-pa;
+    return b.score_10-a.score_10;                       // equally likely → take the better price
+  };
+  const likely=out.filter(s=>s.odds.win_prob!=null&&s.odds.win_prob>=cfg.minWinRate);
+  const longShots=out.filter(s=>!(s.odds.win_prob!=null&&s.odds.win_prob>=cfg.minWinRate));
+  const buys=likely.filter(s=>s.side==="buy").sort(byOdds).slice(0,cfg.topN);
+  const sells=likely.filter(s=>s.side==="sell").sort(byOdds).slice(0,cfg.topN);
+  const shots=cfg.showLongShots?longShots.sort(byOdds).slice(0,cfg.topN):[];
+  for(const s of longShots){
+    if(shots.includes(s))continue;
+    rejections.push({ts_ms:now,id:s.id,stage:"odds",
+      reason:`Only about a ${Math.round((s.odds.win_prob||0)*100)}% chance of paying off — below the ${Math.round(cfg.minWinRate*100)}% bar for a setup.`,
+      detail:{win_prob:s.odds.win_prob,threshold:cfg.minWinRate}});
+  }
   // Anything scored but not surfaced still needs an answer for "why isn't X here?"
   const shown=new Set([...buys,...sells].map(s=>s.id));
   for(const s of out){
@@ -385,8 +444,8 @@ function scoreSnapshot(snap,ctx,cfgIn){
       reason:`scored ${s.score_10.toFixed(2)}/10 on the ${s.side} side — outside the top ${cfg.topN}`,
       detail:{score:s.score_10,side:s.side}});
   }
-  return {ts_ms:now,underlying:snap.underlying,venue:snap.venue,buys,sells,all:out,rejections,
-          view, noView:false, candidates:out.length,
+  return {ts_ms:now,underlying:snap.underlying,venue:snap.venue,buys,sells,longShots:shots,all:out,rejections,
+          view, noView:false, candidates:out.length, minWinRate:cfg.minWinRate,
           fits:Object.values(fits).map(f=>({expiry_ms:f.expiry_ms,n:f.n,degraded:f.degraded,
             rmseVol:isFinite(f.rmseVol)?+f.rmseVol.toFixed(5):null,arb:f.arb})),
           counts:{quotes:snap.quotes.length,passed:passed.length,scored:out.length}};

@@ -1204,7 +1204,8 @@ async function renderTracked(elId){
 }
 
 /* ================= 🎯 OPTIONS RADAR — mispricing screener (analysis, not advice) ================= */
-let radarState={open:false,data:null,perf:null,loading:false,explain:null,bt:null,btLoading:false};
+let radarState={open:false,data:null,perf:null,loading:false,explain:null,bt:null,btLoading:false,maxDays:14};
+function setRadarDays(d){radarState.maxDays=d;renderRadar();loadRadar();}
 let radarTimer=null;
 const rf=v=>v==null||!isFinite(v)?'—':'₹'+Number(v).toLocaleString('en-IN',{maximumFractionDigits:Math.abs(v)<100?2:0});
 function toggleRadar(){const el=document.getElementById('radarPanel');radarState.open=el.style.display==='none';
@@ -1216,7 +1217,7 @@ async function loadRadar(){
   radarState.loading=true;renderRadar();
   try{
     const [d,p]=await Promise.all([
-      fetch('/api/options/scan').then(r=>r.json()),
+      fetch('/api/options/scan?maxDays='+(radarState.maxDays||14)).then(r=>r.json()),
       fetch('/api/options/performance?days=90').then(r=>r.json()).catch(()=>null)
     ]);
     radarState.data=d;radarState.perf=p;
@@ -1273,15 +1274,21 @@ function radarCard(s){
     q.backfilled?`<span class="btmini" style="border-color:#fbbf24;color:#fbbf24" title="Part of the pricing check uses another exchange's history because this venue hasn't built up 90 days of its own yet.">reference data</span>`:'',
     q.degraded_fit?`<span class="btmini" style="border-color:var(--muted);color:var(--muted)" title="Few strikes listed for this expiry, so the pricing comparison is less reliable.">thin chain</span>`:''
   ].filter(Boolean).join(' ');
+  // ODDS lead the card. Everything else is supporting detail.
+  const o=p.odds_headline, pb=p.payoff_balance;
+  const oddsCol=!o?'var(--muted)':o.pct>=70?'var(--buy)':o.pct>=55?'#a3e635':o.pct>=45?'#fbbf24':'var(--sell)';
   return `<div class="tc ${isBuy?'':'sellcard'}">
     <div class="hd" onclick="this.parentNode.classList.toggle('open')" style="cursor:pointer">
       <div class="l">
-        <div class="name">${arrow} ${p.thesis||s.underlying}</div>
+        ${o?`<div style="font-size:26px;font-weight:800;line-height:1.1;color:${oddsCol}">${o.pct}%<span style="font-size:13px;font-weight:600;color:var(--muted)"> chance it pays</span></div>
+             <div class="sub" style="color:${oddsCol};font-weight:700;font-size:12px">${o.text}</div>`:''}
+        <div class="name" style="font-size:14px;margin-top:5px">${arrow} ${p.thesis||s.underlying}</div>
         <div class="sub" style="margin-top:3px;color:var(--txt);font-size:12.5px"><b>${p.action||''}</b></div>
-        <div class="sub">${p.days_left!=null?p.days_left.toFixed(0)+' days left':''} · <span style="color:var(--accent2)">▾ full plan &amp; payoff</span></div></div>
+        <div class="sub">${p.days_left!=null?'closes in '+p.days_left.toFixed(0)+' days':''} · <span style="color:var(--accent2)">▾ full plan &amp; payoff</span></div></div>
       <div class="r"><span class="verdict ${isBuy?'BUY':'SELL'}">${isBuy?'BUY':'SPREAD'}</span>
-        <div class="btmini" style="border-color:${confCol};color:${confCol};margin-top:6px" title="How good this setup looks overall. Not a probability of profit.">${p.confidence_word||''}</div></div></div>
+        <div class="btmini" style="border-color:${confCol};color:${confCol};margin-top:6px" title="Whether the price you pay is fair versus the rest of the chain. Separate from the odds.">price ${p.confidence_word||''}</div></div></div>
     <div class="bd">
+      ${pb?`<div style="margin:2px 0 7px;padding:8px 10px;border-radius:8px;font-size:12.5px;line-height:1.55;background:${pb.bad?'rgba(248,113,113,.1)':'rgba(129,140,248,.09)'};border:1px solid ${pb.bad?'rgba(248,113,113,.4)':'rgba(129,140,248,.3)'}">${pb.text}</div>`:''}
       <div class="qlevels" style="margin-top:2px">
         <div class="lv ${p.credit_inr!=null?'':'entry'}"><div class="k">${p.credit_inr!=null?'You receive':'It costs you'}</div><div class="v">${rf(p.credit_inr!=null?p.credit_inr:p.cost_inr)}</div></div>
         <div class="lv stop"><div class="k">Most you can lose</div><div class="v">${rf(p.max_loss_inr)}</div></div>
@@ -1306,6 +1313,7 @@ function radarCard(s){
           <b>Edge:</b> ${s.why}<br><b>Counter:</b> ${s.why_not}<br>
           Strike ${rf(s.strike)} · ${s.kind} · IV ${(s.iv*100).toFixed(1)}%${s.rvol30?` vs 30d realized ${(s.rvol30*100).toFixed(0)}%`:''} · Δ${s.delta.toFixed(2)} ·
           breakeven ${rf(s.econ.breakeven)} · theta ${rf(s.econ.theta_day_inr)}/day · mispricing ${s.score_10.toFixed(1)}/10<br>
+          ${s.odds?`Odds — market-implied ${s.odds.market!=null?(s.odds.market*100).toFixed(0)+'%':'—'} · historical ${s.odds.historical!=null?(s.odds.historical*100).toFixed(0)+'%':'—'} over ${s.odds.history_n} windows · shown = the lower of the two${s.odds.breakeven_win_rate!=null?` · break-even win rate ${(s.odds.breakeven_win_rate*100).toFixed(0)}%`:''}<br>`:''}
           ${s.structure?`Spread: short ${rf(s.structure.short_strike)} / long ${rf(s.structure.long_strike)}, width ${rf(s.structure.width)}<br>`:''}
           signals: ${Object.entries(s.z).filter(([,v])=>v!=null).map(([k,v])=>k+' '+v.toFixed(2)).join(' · ')||'—'}
         </div></details>
@@ -1361,17 +1369,27 @@ function renderRadar(){
         ? `<b>No trade suggested right now.</b><br>${sittingOut.join(', ')} ${sittingOut.length>1?'have':'has'} no clear direction, and buying an option without a view on where the coin is going is a coin flip that also bleeds money every day. Waiting is a position.`
         : 'No contract currently fits a clear view at an attractive price.'}${d.errors&&Object.keys(d.errors).length?`<br><span class="sub">Feed issues: ${Object.entries(d.errors).map(([k,v])=>k+' — '+v).join('; ')}</span>`:''}</div>`;
     }
+    const bar=Math.round((d.minWinRate||0.55)*100);
+    const shots=d.longShots||[];
+    const likely=[...(d.sells||[]),...(d.buys||[])].sort((a,b)=>
+      ((b.odds&&b.odds.win_prob)||0)-((a.odds&&a.odds.win_prob)||0));
     return viewBar+
-      `<h4 class="sec" style="font-size:13px;margin:10px 0 6px">🎯 Simple bets <span class="sub">— you pay a fixed amount, that is all you can lose</span></h4>
-      <div class="cards">${(d.buys||[]).map(radarCard).join('')||'<div class="empty">Nothing that fits the current view at a fair price.</div>'}</div>
-      <h4 class="sec" style="font-size:13px;margin:14px 0 6px">🛡 Income trades <span class="sub">— you get paid upfront and keep it if the coin behaves. More advanced: two legs, and you must place both.</span></h4>
-      <div class="cards">${(d.sells||[]).map(radarCard).join('')||'<div class="empty">None that can be made safely right now.</div>'}</div>`;
+      `<h4 class="sec" style="font-size:13px;margin:10px 0 6px">✅ Most likely to work <span class="sub">— at least a ${bar}% chance of paying off, best odds first</span></h4>
+      <div class="cards">${likely.map(radarCard).join('')||
+        `<div class="empty"><b>Nothing clears the ${bar}% bar right now.</b><br>That is the screener doing its job — on most days there is no setup worth the risk. Check back, or widen the time window above.</div>`}</div>
+      ${shots.length?`<details style="margin-top:14px"><summary class="sec" style="font-size:13px;cursor:pointer;list-style:revert">🎲 Bigger payoff, worse odds <span class="sub">— under ${bar}%, so these usually expire worthless. Open only if you accept losing the stake most of the time.</span></summary>
+        <div class="cards" style="margin-top:8px">${shots.map(radarCard).join('')}</div></details>`:''}`;
   })();
   el.innerHTML=`<div class="tradespanel" style="border-color:rgba(129,140,248,.45)">
     <h3>🎯 Options Radar <span class="sub">— what to bet on, what it costs, what you win</span>
       <button class="btn" style="padding:2px 9px;font-size:11px" onclick="loadRadar()">↻ rescan</button>
       ${d&&d.ts?`<span class="sub">· ${new Date(d.ts).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true})}</span>`:''}
       ${d&&d.state?`<span class="sub">· ${d.state.venue} · ${d.state.storeKind}</span>`:''}</h3>
+    <div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center;margin:7px 0">
+      <span class="sub">Money tied up for at most:</span>
+      ${[[7,'1 week'],[14,'2 weeks'],[30,'1 month']].map(([n,lbl])=>
+        `<div class="rztab ${radarState.maxDays===n?'on':''}" onclick="setRadarDays(${n})">${lbl}</div>`).join('')}
+      <span class="sub" style="font-size:11px">— anything expiring later is filtered out entirely</span></div>
     <div style="margin:6px 0">${radarPerfStrip(radarState.perf)}</div>
     ${d&&d.backfilled?`<div class="sub" style="margin:6px 0;padding:6px 9px;border-radius:7px;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.3);color:#fbbf24">⚠ Some cards below are scored against a <b>Deribit backfilled</b> IV baseline — this venue has not yet accumulated 90 days of its own history.</div>`:''}
     ${body}

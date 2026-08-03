@@ -60,6 +60,42 @@ function moveFrequency(closes,needPct,days,dir){
   return {hit,total:tot,rate:hit/tot,days,need_pct:+needPct.toFixed(2)};
 }
 
+/* ---------- what this exact trade would have DONE, historically ----------
+   Replays the position's real payoff across every overlapping window of the same length in
+   the coin's own price history. This is the number that matters most, because it collapses
+   probability AND payoff into one honest figure.
+
+   Why both are needed: a credit spread can win 8 times out of 10 and still lose money, if the
+   two losses cost more than the eight wins. A win rate quoted on its own sells exactly that
+   trade as "high probability". The average return is what exposes it. */
+function historicalOutcome(sig,spot,closes,days,contractSize){
+  if(!Array.isArray(closes)||!(days>0)||!(spot>0))return null;
+  const d=Math.max(1,Math.round(days));
+  if(closes.length<d+10)return null;                 // too little history to say anything
+  const stake=sig.econ&&sig.econ.max_loss_inr>0?sig.econ.max_loss_inr:null;
+  if(!stake)return null;
+  let wins=0,n=0,sum=0,worst=Infinity,best=-Infinity;
+  const rets=[];
+  for(let i=0;i+d<closes.length;i++){
+    const a=closes[i],b=closes[i+d];
+    if(!(a>0)||!(b>0))continue;
+    const S_T=spot*(b/a);                            // apply the historical MOVE to today's price
+    const {pnl}=payoffAtExpiry(sig,S_T,contractSize||1);
+    n++; sum+=pnl; if(pnl>0)wins++;
+    worst=Math.min(worst,pnl); best=Math.max(best,pnl);
+    rets.push(100*pnl/stake);
+  }
+  if(!n)return null;
+  rets.sort((x,y)=>x-y);
+  return {
+    n, wins, win_rate:wins/n,
+    avg_pnl:sum/n,
+    avg_return_pct:+(100*(sum/n)/stake).toFixed(2),   // as a % of the money you put at risk
+    median_return_pct:+rets[rets.length>>1].toFixed(2),
+    worst_pnl:worst, best_pnl:best, days:d
+  };
+}
+
 /* ---------- the sentences ---------- */
 const MONTH=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 function dateLabel(ms){const d=new Date(ms);return `${d.getUTCDate()} ${MONTH[d.getUTCMonth()]}`;}
@@ -115,12 +151,26 @@ function decayLine(sig){
   return `Waiting costs money: about ${inr(perDay)} a day melts away if ${sig.underlying} sits still. This is not a position to hold and forget.`;
 }
 
-/** Difficulty framing from the real base rate. */
-function oddsLine(freq,sig){
-  if(!freq)return null;
-  const p=Math.round(freq.rate*100);
-  const verdict=p>=45?"a fairly ordinary move":p>=25?"a decent-sized move":p>=10?"a big move":"a rare move";
-  return `Historically, ${sig.underlying} has made that move in ${freq.hit} of the last ${freq.total} ${freq.days}-day stretches (${p}%) — ${verdict}. That is a base rate from the past, not a prediction.`;
+/** Difficulty framing from the real base rate.
+    Driven by the position's actual WIN CONDITION, not by "did it move X%". Those are the same
+    question for a long option but opposite ones for a credit spread, which wins precisely when
+    the move does NOT happen — quoting move frequency there produced a card reading "70% chance
+    it pays" directly above "has happened 0% of the time". */
+function oddsLine(hist,sig){
+  if(!hist||!hist.n)return null;
+  const p=Math.round(hist.win_rate*100);
+  const verdict=p>=70?"it has usually worked":p>=50?"it has worked slightly more often than not"
+    :p>=25?"it has usually not worked":"it has rarely worked";
+  let s=`Taking this exact trade at every point in ${sig.underlying}'s past, it would have made money in ${hist.wins} of ${hist.n} ${hist.days}-day stretches (${p}%) — ${verdict}. A base rate from the past, not a prediction.`;
+  // Reconcile with the headline when the two estimates disagree, or the card reads as if it
+  // contradicts itself ("70% chance it pays" above "worked 100% of the time").
+  const mkt=sig.odds&&sig.odds.market!=null?Math.round(sig.odds.market*100):null;
+  if(mkt!=null&&Math.abs(mkt-p)>=10){
+    s+= mkt<p
+      ? ` The market is pricing it nearer ${mkt}%; the headline shows that lower figure, because the past being kind is not a promise that it stays kind.`
+      : ` The market is pricing it nearer ${mkt}%, but the headline shows the lower ${p}% that history actually delivered.`;
+  }
+  return s;
 }
 
 /** How confident, said without a decimal score. */
@@ -128,13 +178,41 @@ function confidenceWord(score){
   return score>=7?"Strong":score>=5?"Moderate":score>=3?"Weak":"Marginal";
 }
 
+/** The headline: odds as "wins about X times in 10", which people reason about far better than %. */
+function oddsHeadline(odds){
+  if(!odds||odds.win_prob==null)return null;
+  const p=odds.win_prob, inTen=Math.round(p*10);
+  const word=p>=0.75?"Very likely":p>=0.6?"Likely":p>=0.45?"Roughly a coin flip":p>=0.25?"Unlikely":"Long shot";
+  return {pct:Math.round(p*100), in_ten:inTen, word,
+    text:`Wins about ${inTen} times in 10`};
+}
+
+/** The single most important sentence on a high-win-rate trade. */
+function payoffBalanceLine(odds){
+  if(!odds)return null;
+  const avg=odds.hist_avg_return_pct;
+  // A high win rate with a negative average return is the premium-selling trap: many small
+  // wins funding a few outsized losses. Say it before the win rate can mislead.
+  if(odds.win_prob>=0.6&&avg!=null&&avg<0)
+    return {bad:true,text:`⚠ It wins often, but it has still LOST money on average — about ${avg}% per trade across ${odds.history_n} similar past stretches. The occasional loss is bigger than all the small wins. A high win rate is not the same as a profitable trade.`};
+  if(odds.loss_to_win>1.5&&odds.breakeven_win_rate!=null)
+    return {bad:false,text:`A loss costs ${odds.loss_to_win}× what a win pays, so this needs to win more than ${Math.round(odds.breakeven_win_rate*100)}% of the time just to break even${odds.win_prob!=null?` — and it is running at about ${Math.round(odds.win_prob*100)}%`:''}.`};
+  if(avg!=null&&avg>0)
+    return {bad:false,text:`Across ${odds.history_n} similar past stretches this trade averaged ${avg>0?'+':''}${avg}% on the money at risk.`};
+  return null;
+}
+
 /** Beginner-appropriate warnings, strongest first. Always at least one. */
-function cautions(sig,freq,view){
+function cautions(sig,hist,view){
   const out=[];
   if(sig.structure)
     out.push("This is a two-leg trade. Place both legs — the second one is what caps your loss. Without it your downside is open-ended.");
-  if(freq&&freq.rate<0.2)
-    out.push(`The move this needs has only happened ${Math.round(freq.rate*100)}% of the time historically. Most of the time, this expires worthless.`);
+  if(hist&&hist.n&&hist.win_rate<0.25)
+    out.push(`Taken at every point in the past, this trade made money only ${Math.round(hist.win_rate*100)}% of the time. Most of the time it expires worthless.`);
+  // A trade that wins often but has still lost money historically is the trap this screener
+  // exists to catch — say it plainly and near the top.
+  if(hist&&hist.n&&hist.win_rate>=0.55&&hist.avg_return_pct<0)
+    out.push(`It wins most of the time but has still averaged ${hist.avg_return_pct}% per trade historically — the occasional loss is bigger than all the small wins put together.`);
   if(sig.econ.dte_days<3)
     out.push(`Only ${sig.econ.dte_days.toFixed(1)} days left — there is very little time for the move to happen, and the value drops fast now.`);
   const decayShare=Math.abs(sig.econ.theta_day_inr||0)/Math.max(sig.econ.premium_inr||1,1)*100;
@@ -158,10 +236,15 @@ function explainSignal(sig,opts){
   opts=opts||{};
   const spot=opts.spot||sig.econ.breakeven;
   const size=opts.contractSize||1;
-  const dir=sig.structure?(sig.kind==="call"?-1:1):(sig.kind==="call"?1:-1);
-  const freq=opts.closes?moveFrequency(opts.closes,Math.abs(sig.econ.req_move_pct||0),
-    Math.max(1,Math.round(sig.econ.dte_days||1)),dir):null;
+  // One source of truth for "has this worked before": the position's own payoff replayed over
+  // history. Everything that talks about odds on the card reads from this.
+  const hist=opts.hist||(opts.closes
+    ? historicalOutcome(sig,spot,opts.closes,Math.max(1,Math.round(sig.econ.dte_days||1)),size)
+    : null);
+  const odds=sig.odds||null;
   return {
+    odds_headline: oddsHeadline(odds),
+    payoff_balance: payoffBalanceLine(odds),
     thesis: thesisLine(sig,opts.view),
     action: actionLine(sig),
     cost_inr: sig.structure?null:sig.econ.premium_inr,
@@ -170,11 +253,11 @@ function explainSignal(sig,opts){
     win: winLine(sig),
     loss: lossLine(sig),
     decay: decayLine(sig),
-    odds: oddsLine(freq,sig),
-    odds_pct: freq?Math.round(freq.rate*100):null,
+    odds: oddsLine(hist,sig),
+    odds_pct: hist?Math.round(hist.win_rate*100):null,
     confidence_word: confidenceWord(sig.score_10),
     payoff: payoffTable(sig,spot,size),
-    cautions: cautions(sig,freq,opts.view),
+    cautions: cautions(sig,hist,opts.view),
     // The mispricing edge, said as a reason for choosing THIS contract rather than as the trade thesis.
     why_this_one: opts.candidates>1
       ? `Of the ${opts.candidates} contracts that fit this view, this one is priced most attractively versus what the rest of the chain implies it should cost.`
@@ -183,5 +266,6 @@ function explainSignal(sig,opts){
   };
 }
 
-module.exports={explainSignal,payoffAtExpiry,payoffTable,moveFrequency,thesisLine,actionLine,
-  winLine,lossLine,decayLine,oddsLine,cautions,confidenceWord,dateLabel,inr};
+module.exports={explainSignal,payoffAtExpiry,payoffTable,moveFrequency,historicalOutcome,
+  thesisLine,actionLine,winLine,lossLine,decayLine,oddsLine,oddsHeadline,payoffBalanceLine,
+  cautions,confidenceWord,dateLabel,inr};

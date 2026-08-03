@@ -58,11 +58,23 @@ test("move frequency counts real historical windows",()=>{
   assert.strictEqual(P.moveFrequency([1,2,3],10,10,1),null,"too little history → null, not a guess");
 });
 test("the odds line reports the base rate without predicting",()=>{
-  const flat=[]; for(let i=0;i<200;i++)flat.push(100+(i%2));
-  const f=P.moveFrequency(flat,6,10,1);
-  const line=P.oddsLine(f,longCall);
-  assert.match(line,/0 of the last/,"states the count");
+  const flat=[]; for(let i=0;i<200;i++)flat.push(8500000+(i%2));
+  const h=P.historicalOutcome(longCall,8500000,flat,10,1);
+  const line=P.oddsLine(h,longCall);
+  assert.match(line,/0 of \d+/,"states the count");
   assert.match(line,/not a prediction/i,"explicitly disclaims prediction");
+});
+test("the odds line is driven by the WIN CONDITION, not by 'did it move'",()=>{
+  // Regression: a credit spread wins when the move does NOT happen. Quoting move frequency
+  // produced a card reading "70% chance it pays" directly above "happened 0% of the time".
+  const flat=[]; for(let i=0;i<300;i++)flat.push(8500000*(1+0.004*Math.sin(i/6)));
+  const h=P.historicalOutcome(creditSpread,8500000,flat,10,1);
+  assert.ok(h.win_rate>0.9,"a spread far from the money wins in a quiet tape");
+  const line=P.oddsLine(h,creditSpread);
+  assert.match(line,/made money in/,"phrased as the trade working, not as a move occurring");
+  const pctInLine=parseInt(/\((\d+)%\)/.exec(line)[1],10);
+  assert.ok(Math.abs(pctInLine-Math.round(h.win_rate*100))<=1,
+    "the number in the sentence matches the headline odds instead of contradicting it");
 });
 
 /* ---------------- language: no jargon in user-facing strings ---------------- */
@@ -158,4 +170,111 @@ test("pure relative-value mode can still be enabled for expert use",()=>{
 test("the direction gate never lets a naked short through",()=>{
   const r=S.scoreSnapshot(chain({rvol30:0.20}),{history:()=>null,view:{score:25}},{});
   for(const s of r.sells)assert.ok(s.structure&&s.econ.max_loss_inr>0,"still defined-risk");
+});
+
+/* ---------------- ODDS: the thing the user actually asked for ---------------- */
+test("market-implied probability is the standard N(d2) and behaves sanely",()=>{
+  const F=100,T=0.25,s=0.5;
+  assert.ok(Math.abs(V.probAbove(F,F,T,s)-0.5)<0.06,"at the forward it is near a coin flip");
+  assert.ok(V.probAbove(F,150,T,s)<0.15,"far above is unlikely");
+  assert.ok(V.probAbove(F,60,T,s)>0.85,"far below is likely");
+  for(const B of [70,100,140])
+    assert.ok(Math.abs(V.probAbove(F,B,T,s)+V.probBelow(F,B,T,s)-1)<1e-12,"above + below = 1");
+  // higher vol pulls an out-of-the-money threshold toward a coin flip
+  assert.ok(V.probAbove(F,130,T,0.9)>V.probAbove(F,130,T,0.3),"more vol, more chance of a big move");
+  assert.strictEqual(V.probAbove(120,100,0,0.5),1,"already decided at expiry");
+});
+test("historical outcome replays the real payoff, not just the move",()=>{
+  const sig={kind:"call",strike:100,structure:null,
+    econ:{premium_inr:5,max_loss_inr:5,breakeven:105}};
+  // A series that reliably ends +10% over 5 steps → the 100 call finishes ~10 in the money
+  const up=[]; for(let i=0;i<120;i++)up.push(100*Math.pow(1.02,i));
+  const o=P.historicalOutcome(sig,100,up,5,1);
+  assert.ok(o.n>50,"used many windows");
+  assert.strictEqual(o.win_rate,1,"always profitable in a relentless uptrend");
+  assert.ok(o.avg_return_pct>0,"positive average return");
+  // A flat series → the same call always expires worthless
+  const flat=new Array(120).fill(100);
+  const f=P.historicalOutcome(sig,100,flat,5,1);
+  assert.strictEqual(f.win_rate,0,"never pays when nothing moves");
+  assert.ok(Math.abs(f.avg_return_pct+100)<1e-9,"loses the entire stake, on average");
+  assert.strictEqual(P.historicalOutcome(sig,100,[1,2,3],5,1),null,"too little history → null");
+});
+test("a high win rate with an oversized loss tail is called out, not sold",()=>{
+  // 8 wins of 1 and 2 losses of 10: wins 80% of the time and still loses money.
+  const odds={win_prob:0.8,history_n:100,hist_avg_return_pct:-4.2,loss_to_win:9,breakeven_win_rate:0.9};
+  const line=P.payoffBalanceLine(odds);
+  assert.ok(line.bad,"flagged as bad");
+  assert.match(line.text,/LOST money on average/);
+  assert.match(line.text,/high win rate is not the same as a profitable trade/i);
+});
+test("odds headline speaks in times-out-of-ten, not decimals",()=>{
+  const h=P.oddsHeadline({win_prob:0.72});
+  assert.strictEqual(h.pct,72); assert.strictEqual(h.in_ten,7);
+  assert.match(h.text,/7 times in 10/);
+  assert.strictEqual(P.oddsHeadline({win_prob:0.15}).word,"Long shot");
+  assert.strictEqual(P.oddsHeadline(null),null);
+});
+
+/* ---------------- SHORT-DATED ONLY ---------------- */
+test("anything expiring beyond the limit is filtered out with a plain reason",()=>{
+  const f={...S.DEFAULTS.filters}, now=Date.now();
+  const base={spread_pct:2,oi:500,greeks:{delta:0.4},bid:1,ask:1.04,mark:1};
+  assert.strictEqual(S.applyFilters({...base,expiry_ms:now+10*DAY},f,now),null,"10 days is fine");
+  const long=S.applyFilters({...base,expiry_ms:now+120*DAY},f,now);
+  assert.ok(long,"120 days rejected");
+  assert.match(long.reason,/tied up too long/);
+  assert.strictEqual(long.detail.limit,14);
+  const custom=S.applyFilters({...base,expiry_ms:now+20*DAY},{...f,maxDaysToExpiry:30},now);
+  assert.strictEqual(custom,null,"the limit is configurable");
+});
+test("the default really is short-dated",()=>{
+  assert.strictEqual(S.DEFAULTS.filters.maxDaysToExpiry,14,"two weeks, not a year");
+});
+test("a year-out contract never reaches a card",()=>{
+  const now=Date.now(),F=8500000,expiry=now+365*DAY,T=1;
+  const quotes=[];
+  for(const m of [0.9,0.95,1.0,1.05,1.1]){const K=Math.round(F*m),iv=0.55;
+    for(const kind of ["call","put"]){const mark=V.black76(kind,F,K,T,iv,1);
+      quotes.push({id:`Y-${K}-${kind}`,kind,strike:K,expiry_ms:expiry,
+        bid:mark*0.985,ask:mark*1.015,mark,oi:900,iv});}}
+  const snap=A.buildSnapshot({venue:"coindcx",underlying:"BTC",ts_ms:now,spot:F,
+    forwards:[{expiry_ms:expiry,F}],rvol30:0.5,quotes});
+  const r=S.scoreSnapshot(snap,{history:()=>null,view:{score:25}},{});
+  assert.strictEqual(r.buys.length+r.sells.length+(r.longShots||[]).length,0,"nothing surfaced");
+  assert.ok(r.rejections.some(x=>/tied up too long/.test(x.reason)),"and it says why");
+});
+
+/* ---------------- ranking gate ---------------- */
+test("low-probability contracts are segregated, not mixed into the setups",()=>{
+  const now=Date.now(),F=8500000,expiry=now+7*DAY,T=7/365;
+  const quotes=[];
+  for(const m of [0.94,0.96,0.98,1.00,1.02,1.04,1.06]){const K=Math.round(F*m),k=Math.log(K/F);
+    const iv=0.55+0.35*k*k;
+    for(const kind of ["call","put"]){const mark=V.black76(kind,F,K,T,iv,1),sp=0.03*mark;
+      quotes.push({id:`Z-${K}-${kind}`,kind,strike:K,expiry_ms:expiry,
+        bid:mark-sp/2,ask:mark+sp/2,mark,oi:600,iv});}}
+  const snap=A.buildSnapshot({venue:"coindcx",underlying:"BTC",ts_ms:now,spot:F,
+    forwards:[{expiry_ms:expiry,F}],rvol30:0.5,quotes});
+  const r=S.scoreSnapshot(snap,{history:()=>null,view:{score:25}},{});
+  for(const s of [...r.buys,...r.sells])
+    assert.ok(s.odds.win_prob>=0.55,`surfaced setups clear the bar (${s.id} at ${s.odds.win_prob})`);
+  for(const s of (r.longShots||[]))
+    assert.ok(s.odds.win_prob<0.55,"long shots are below it");
+  assert.ok([...r.buys,...r.sells,...(r.longShots||[])].every(s=>s.odds.market!=null),
+    "every card carries the market-implied odds");
+});
+test("the probability bar is configurable and actually bites",()=>{
+  const now=Date.now(),F=8500000,expiry=now+7*DAY,T=7/365;
+  const quotes=[];
+  for(const m of [0.94,0.97,1.00,1.03,1.06]){const K=Math.round(F*m),iv=0.55;
+    for(const kind of ["call","put"]){const mark=V.black76(kind,F,K,T,iv,1),sp=0.03*mark;
+      quotes.push({id:`W-${K}-${kind}`,kind,strike:K,expiry_ms:expiry,
+        bid:mark-sp/2,ask:mark+sp/2,mark,oi:600,iv});}}
+  const snap=A.buildSnapshot({venue:"coindcx",underlying:"BTC",ts_ms:now,spot:F,
+    forwards:[{expiry_ms:expiry,F}],rvol30:0.5,quotes});
+  const strict=S.scoreSnapshot(snap,{history:()=>null,view:{score:25}},{minWinRate:0.95});
+  assert.strictEqual(strict.buys.length+strict.sells.length,0,"a 95% bar surfaces nothing");
+  const loose=S.scoreSnapshot(snap,{history:()=>null,view:{score:25}},{minWinRate:0.10});
+  assert.ok(loose.buys.length+loose.sells.length>0,"a 10% bar surfaces plenty");
 });
