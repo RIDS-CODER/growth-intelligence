@@ -174,6 +174,7 @@
     <button class="btn" id="researchBtn" onclick="toggleResearch()" style="border-color:#a78bfa;background:rgba(167,139,250,.14);color:#ddd6fe">🔎 Research a coin</button>
     <button class="btn" id="quickBtn" onclick="toggleQuick()" style="border-color:#f59e0b;background:rgba(245,158,11,.15);color:#fde68a">⚡ Quick Trades</button>
     <button class="btn" id="moversBtn" onclick="toggleMovers()" style="border-color:#fb7185;background:rgba(251,113,133,.14);color:#fecdd3">🔥 Volume Movers</button>
+    <button class="btn" id="radarBtn" onclick="toggleRadar()" style="border-color:#818cf8;background:rgba(129,140,248,.15);color:#c7d2fe">🎯 Options Radar</button>
     <button class="btn" id="paperBtn" onclick="togglePaper()" style="border-color:#34d399;background:rgba(52,211,153,.14);color:#a7f3d0">🤖 Paper Bot</button>
     <span class="pstat" id="filterNote"></span>
   </div>
@@ -182,6 +183,7 @@
   <div id="btcNote" style="display:none"></div>
   <div id="quickPanel" style="display:none"></div>
   <div id="moversPanel" style="display:none"></div>
+  <div id="radarPanel" style="display:none"></div>
   <div id="researchPanel" style="display:none"></div>
   <div id="paperPanel" style="display:none"></div>
   <div id="tradesPanel" style="display:none"></div>
@@ -770,7 +772,9 @@ function renderBacktest(d){
 }
 
 function render(results){
-  lastResults=results;
+  // Guard: an error payload (or any response without `results`) would otherwise leave
+  // lastResults undefined and permanently break the quote poller until a page reload.
+  lastResults=Array.isArray(results)?results:[];
   const ms=getMinScore();
   // clean (actionable) setups first, "late" ones (price already at/through the stop) pushed to the bottom
   const mAgree=r=>r.mtf?r.mtf.agree:0;   // higher timeframe agreement count
@@ -1197,6 +1201,204 @@ async function renderTracked(elId){
           :'<div class="sub" style="margin-top:5px">No past recommendations yet — this fills in as tracked setups resolve.</div>'}
       </details>
     </div></details>`;
+}
+
+/* ================= 🎯 OPTIONS RADAR — mispricing screener (analysis, not advice) ================= */
+let radarState={open:false,data:null,perf:null,loading:false,explain:null,bt:null,btLoading:false};
+let radarTimer=null;
+const rf=v=>v==null||!isFinite(v)?'—':'₹'+Number(v).toLocaleString('en-IN',{maximumFractionDigits:Math.abs(v)<100?2:0});
+function toggleRadar(){const el=document.getElementById('radarPanel');radarState.open=el.style.display==='none';
+  el.style.display=radarState.open?'block':'none';
+  if(radarState.open){renderRadar();loadRadar();if(radarTimer)clearInterval(radarTimer);
+    radarTimer=setInterval(()=>{if(radarState.open)loadRadar();},120000);}
+  else if(radarTimer){clearInterval(radarTimer);radarTimer=null;}}
+async function loadRadar(){
+  radarState.loading=true;renderRadar();
+  try{
+    const [d,p]=await Promise.all([
+      fetch('/api/options/scan').then(r=>r.json()),
+      fetch('/api/options/performance?days=90').then(r=>r.json()).catch(()=>null)
+    ]);
+    radarState.data=d;radarState.perf=p;
+  }catch(e){radarState.data={error:String(e.message||e)};}
+  radarState.loading=false;renderRadar();
+}
+async function radarExplain(){
+  const inp=document.getElementById('radarWhy');if(!inp)return;
+  const id=(inp.value||'').trim();if(!id)return;
+  radarState.explain={loading:true,id};renderRadarExplain();
+  try{ radarState.explain=await fetch('/api/options/explain?id='+encodeURIComponent(id)).then(r=>r.json()); }
+  catch(e){ radarState.explain={found:false,message:'Lookup failed.'}; }
+  renderRadarExplain();
+}
+async function radarBacktest(){
+  radarState.btLoading=true;renderRadarBt();
+  try{
+    const u=(document.getElementById('radarBtU')||{}).value||'BTC';
+    radarState.bt=await fetch('/api/options/backtest?underlying='+u+'&days=30').then(r=>r.json());
+  }catch(e){radarState.bt={error:String(e.message||e)};}
+  radarState.btLoading=false;renderRadarBt();
+}
+/* The performance strip is deliberately always visible, including when the record is bad. */
+function radarPerfStrip(p){
+  if(!p||!p.overall||!p.n)
+    return `<div class="sub" style="padding:7px 10px;border-radius:8px;background:rgba(148,163,184,.08);border:1px dashed var(--line)">
+      📉 <b>Rolling 90d record: no completed signals yet.</b> The screener has not yet earned a hit rate — treat every card below as unvalidated.</div>`;
+  const hr=(p.overall.hit_rate*100), ret=p.overall.avg_ret_pct;
+  const good=hr>=50&&ret>0;
+  const ci=p.overall.ci&&p.overall.ci[0]!=null?` (95% CI ${(p.overall.ci[0]*100).toFixed(0)}–${(p.overall.ci[1]*100).toFixed(0)}%)`:'';
+  return `<div class="sub" style="padding:7px 10px;border-radius:8px;border:1px solid ${good?'rgba(52,211,153,.4)':'rgba(248,113,113,.45)'};background:${good?'rgba(52,211,153,.07)':'rgba(248,113,113,.07)'}">
+    📉 <b>Rolling ${p.window_days}d record:</b> <b style="color:${hr>=50?'var(--buy)':'var(--sell)'}">${hr.toFixed(0)}% hit rate</b>${ci} ·
+    avg <b style="color:${ret>=0?'var(--buy)':'var(--sell)'}">${ret>0?'+':''}${ret}%</b> per signal ·
+    <b>${p.n}</b> completed${p.postTax&&p.postTax.avg_ret_pct!=null?` · after VDA tax <b style="color:${p.postTax.avg_ret_pct>=0?'var(--buy)':'var(--sell)'}">${p.postTax.avg_ret_pct>0?'+':''}${p.postTax.avg_ret_pct}%</b>`:''}
+    ${p.lowSample?' · <span style="color:#fbbf24">too few trades to be meaningful</span>':''}</div>`;
+}
+/* The card is written for someone who has never traded an option: what to do, what it costs,
+   what you win, what you lose, by when. All the vol maths is demoted behind "the numbers". */
+function radarCard(s){
+  const p=s.plain||{}, isBuy=s.side==='buy', col=isBuy?'var(--buy)':'var(--sell)';
+  const q=s.quality||{};
+  const up=(s.kind==='call')===isBuy;                       // what the position wants the coin to do
+  const arrow=up?'📈':'📉';
+  const confCol=s.score_10>=7?'var(--buy)':s.score_10>=5?'#fbbf24':'var(--muted)';
+  const rows=(p.payoff||[]).map(r=>{
+    const good=r.pnl>0;
+    return `<tr>
+      <td style="font-family:var(--mono)">${r.move_pct>0?'+':''}${r.move_pct}%</td>
+      <td style="font-family:var(--mono);color:var(--muted)">${rf(r.price)}</td>
+      <td style="font-family:var(--mono);text-align:right;color:${good?'var(--buy)':'var(--sell)'};font-weight:700">${r.pnl>0?'+':''}${rf(r.pnl)}</td>
+      <td class="sub" style="font-size:11px">${r.pnl>0?'profit':(r.total_loss?'total loss':'loss')}</td></tr>`;}).join('');
+  const cautions=(p.cautions||[]).map(c=>`<li style="margin:2px 0">${c}</li>`).join('');
+  const badges=[
+    q.backfilled?`<span class="btmini" style="border-color:#fbbf24;color:#fbbf24" title="Part of the pricing check uses another exchange's history because this venue hasn't built up 90 days of its own yet.">reference data</span>`:'',
+    q.degraded_fit?`<span class="btmini" style="border-color:var(--muted);color:var(--muted)" title="Few strikes listed for this expiry, so the pricing comparison is less reliable.">thin chain</span>`:''
+  ].filter(Boolean).join(' ');
+  return `<div class="tc ${isBuy?'':'sellcard'}">
+    <div class="hd" onclick="this.parentNode.classList.toggle('open')" style="cursor:pointer">
+      <div class="l">
+        <div class="name">${arrow} ${p.thesis||s.underlying}</div>
+        <div class="sub" style="margin-top:3px;color:var(--txt);font-size:12.5px"><b>${p.action||''}</b></div>
+        <div class="sub">${p.days_left!=null?p.days_left.toFixed(0)+' days left':''} · <span style="color:var(--accent2)">▾ full plan &amp; payoff</span></div></div>
+      <div class="r"><span class="verdict ${isBuy?'BUY':'SELL'}">${isBuy?'BUY':'SPREAD'}</span>
+        <div class="btmini" style="border-color:${confCol};color:${confCol};margin-top:6px" title="How good this setup looks overall. Not a probability of profit.">${p.confidence_word||''}</div></div></div>
+    <div class="bd">
+      <div class="qlevels" style="margin-top:2px">
+        <div class="lv ${p.credit_inr!=null?'':'entry'}"><div class="k">${p.credit_inr!=null?'You receive':'It costs you'}</div><div class="v">${rf(p.credit_inr!=null?p.credit_inr:p.cost_inr)}</div></div>
+        <div class="lv stop"><div class="k">Most you can lose</div><div class="v">${rf(p.max_loss_inr)}</div></div>
+        <div class="lv"><div class="k">Days left</div><div class="v">${p.days_left!=null?p.days_left.toFixed(0):'—'}</div></div>
+      </div>
+      <div style="margin:7px 0;padding:8px 10px;border-radius:8px;background:rgba(52,211,153,.08);border:1px solid rgba(52,211,153,.3);font-size:12.5px;line-height:1.55">
+        ✅ <b>You win if</b> — ${p.win||''}</div>
+      <div style="margin:5px 0;padding:8px 10px;border-radius:8px;background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.3);font-size:12.5px;line-height:1.55">
+        ❌ <b>You lose if</b> — ${p.loss||''}</div>
+      ${p.decay?`<div class="sub" style="margin:5px 0;font-size:12px">⏳ ${p.decay}</div>`:''}
+      ${p.odds?`<div style="margin:6px 0;padding:7px 10px;border-radius:8px;background:rgba(129,140,248,.09);border:1px solid rgba(129,140,248,.3);font-size:12px;line-height:1.5">
+        🎲 <b>How often has this happened?</b> ${p.odds}</div>`:''}
+      ${rows?`<div style="margin-top:8px"><div class="sub" style="font-weight:700;margin-bottom:3px">If ${s.underlying} is here on expiry day, you end up with:</div>
+        <table class="bttable"><thead><tr><th>Move</th><th>Price</th><th style="text-align:right">Your P&amp;L</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`:''}
+      ${cautions?`<div style="margin-top:8px;padding:8px 10px;border-radius:8px;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.32);font-size:12px;line-height:1.5">
+        <b style="color:#fbbf24">⚠ Before you do this</b><ul style="margin:4px 0 0 16px;padding:0">${cautions}</ul></div>`:''}
+      <div class="sub" style="margin-top:7px;font-size:11.5px">🇮🇳 If this wins, tax takes roughly <b>${rf(s.econ.tax_drag_inr)}</b> of the gain. Losses cannot be set off, so you need to win clearly more than half the time to come out ahead.</div>
+      ${badges?`<div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:6px">${badges}</div>`:''}
+      <details style="margin-top:8px"><summary class="sub" style="cursor:pointer;list-style:revert">🔬 The numbers behind it (for options traders)</summary>
+        <div class="sub" style="font-size:11.5px;margin-top:5px;line-height:1.6">
+          ${p.why_this_one||''}<br>
+          <b>Edge:</b> ${s.why}<br><b>Counter:</b> ${s.why_not}<br>
+          Strike ${rf(s.strike)} · ${s.kind} · IV ${(s.iv*100).toFixed(1)}%${s.rvol30?` vs 30d realized ${(s.rvol30*100).toFixed(0)}%`:''} · Δ${s.delta.toFixed(2)} ·
+          breakeven ${rf(s.econ.breakeven)} · theta ${rf(s.econ.theta_day_inr)}/day · mispricing ${s.score_10.toFixed(1)}/10<br>
+          ${s.structure?`Spread: short ${rf(s.structure.short_strike)} / long ${rf(s.structure.long_strike)}, width ${rf(s.structure.width)}<br>`:''}
+          signals: ${Object.entries(s.z).filter(([,v])=>v!=null).map(([k,v])=>k+' '+v.toFixed(2)).join(' · ')||'—'}
+        </div></details>
+    </div></div>`;
+}
+function renderRadarExplain(){
+  const el=document.getElementById('radarWhyOut');if(!el)return;
+  const e=radarState.explain;
+  if(!e){el.innerHTML='';return;}
+  if(e.loading){el.innerHTML='<div class="sub" style="margin-top:6px">Looking up…</div>';return;}
+  if(!e.found){el.innerHTML=`<div class="sub" style="margin-top:6px;color:var(--muted)">${e.message}</div>`;return;}
+  if(e.surfaced){el.innerHTML=`<div class="sub" style="margin-top:6px;color:var(--buy)">✅ ${e.message}</div>`;return;}
+  el.innerHTML=`<div style="margin-top:6px;padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:var(--panel2);font-size:12px;line-height:1.5">
+    <b>${e.headline}</b><br>${e.message}
+    ${e.detail&&Object.keys(e.detail).length?`<br><span class="sub" style="font-family:var(--mono)">${Object.entries(e.detail).map(([k,v])=>k+'='+v).join('  ')}</span>`:''}</div>`;
+}
+function renderRadarBt(){
+  const el=document.getElementById('radarBtOut');if(!el)return;
+  if(radarState.btLoading){el.innerHTML='<div class="sub" style="margin-top:6px">⏳ Replaying the stored chain tape…</div>';return;}
+  const b=radarState.bt;if(!b){el.innerHTML='';return;}
+  if(b.error){el.innerHTML=`<div class="sub" style="margin-top:6px;color:var(--muted)">${b.error}</div>`;return;}
+  const o=b.overall||{};
+  const attrib=Object.entries(b.attribution||{}).map(([k,v])=>
+    `<tr><td>${k}</td><td>${v.n}</td><td>${v.hit_rate!=null?(v.hit_rate*100).toFixed(0)+'%':'—'}</td><td style="color:${v.avg_ret_pct>=0?'var(--buy)':'var(--sell)'}">${v.avg_ret_pct!=null?(v.avg_ret_pct>0?'+':'')+v.avg_ret_pct+'%':'—'}</td></tr>`).join('');
+  el.innerHTML=`<div style="margin-top:8px;padding:9px 11px;border-radius:8px;border:1px solid var(--line);background:var(--panel2);font-size:12px">
+    <b>${b.verdict}</b>
+    <div class="sub" style="margin-top:5px">${b.n} completed · ${b.unresolved} still open (excluded) ·
+      hit ${o.hit_rate!=null?(o.hit_rate*100).toFixed(0)+'%':'—'}${o.ci&&o.ci[0]!=null?` (CI ${(o.ci[0]*100).toFixed(0)}–${(o.ci[1]*100).toFixed(0)}%)`:''} ·
+      avg <b style="color:${o.avg_ret_pct>=0?'var(--buy)':'var(--sell)'}">${o.avg_ret_pct!=null?(o.avg_ret_pct>0?'+':'')+o.avg_ret_pct+'%':'—'}</b> ·
+      after tax <b style="color:${(b.postTax&&b.postTax.avg_ret_pct)>=0?'var(--buy)':'var(--sell)'}">${b.postTax&&b.postTax.avg_ret_pct!=null?(b.postTax.avg_ret_pct>0?'+':'')+b.postTax.avg_ret_pct+'%':'—'}</b></div>
+    ${attrib?`<table class="bttable" style="margin-top:6px"><thead><tr><th>Signal</th><th>Trades</th><th>Hit</th><th>Avg</th></tr></thead><tbody>${attrib}</tbody></table>`:''}
+    <div class="sub" style="margin-top:5px;font-size:11px">${b.assumptions?`Slippage: ${b.assumptions.slippage}. ${b.assumptions.tax}.`:''}</div></div>`;
+}
+function renderRadar(){
+  const el=document.getElementById('radarPanel');if(!el)return;
+  const d=radarState.data;
+  const body=(()=>{
+    if(radarState.loading&&!d)return '<div class="sub" style="padding:14px">⏳ Scanning the options chain…</div>';
+    if(!d)return '<div class="sub" style="padding:14px">—</div>';
+    if(d.error)return `<div class="sub" style="padding:14px;color:var(--sell)">${d.error}</div>`;
+    const nb=(d.buys||[]).length, ns=(d.sells||[]).length;
+    // What the app currently thinks each coin is doing — the thesis every card below rests on.
+    const views=Object.entries(d.views||{}).map(([u,v])=>{
+      const c=v.score==null?'var(--muted)':v.score>=12?'var(--buy)':v.score<=-12?'var(--sell)':'var(--muted)';
+      const tip=v.noView?'No clear trend, so no options trade is suggested on this coin.'
+        :'The same trend read the rest of the dashboard uses.';
+      return `<span class="btmini" style="border-color:${c};color:${c}" title="${tip}">${u}: ${v.label||'—'}</span>`;
+    }).join(' ');
+    const viewBar=views?`<div style="display:flex;gap:5px;flex-wrap:wrap;margin:6px 0 9px;align-items:center"><span class="sub">Current read:</span>${views}</div>`:'';
+    if(!nb&&!ns){
+      const sittingOut=Object.entries(d.views||{}).filter(([,v])=>v.noView).map(([u])=>u);
+      return viewBar+`<div class="empty">${sittingOut.length
+        ? `<b>No trade suggested right now.</b><br>${sittingOut.join(', ')} ${sittingOut.length>1?'have':'has'} no clear direction, and buying an option without a view on where the coin is going is a coin flip that also bleeds money every day. Waiting is a position.`
+        : 'No contract currently fits a clear view at an attractive price.'}${d.errors&&Object.keys(d.errors).length?`<br><span class="sub">Feed issues: ${Object.entries(d.errors).map(([k,v])=>k+' — '+v).join('; ')}</span>`:''}</div>`;
+    }
+    return viewBar+
+      `<h4 class="sec" style="font-size:13px;margin:10px 0 6px">🎯 Simple bets <span class="sub">— you pay a fixed amount, that is all you can lose</span></h4>
+      <div class="cards">${(d.buys||[]).map(radarCard).join('')||'<div class="empty">Nothing that fits the current view at a fair price.</div>'}</div>
+      <h4 class="sec" style="font-size:13px;margin:14px 0 6px">🛡 Income trades <span class="sub">— you get paid upfront and keep it if the coin behaves. More advanced: two legs, and you must place both.</span></h4>
+      <div class="cards">${(d.sells||[]).map(radarCard).join('')||'<div class="empty">None that can be made safely right now.</div>'}</div>`;
+  })();
+  el.innerHTML=`<div class="tradespanel" style="border-color:rgba(129,140,248,.45)">
+    <h3>🎯 Options Radar <span class="sub">— what to bet on, what it costs, what you win</span>
+      <button class="btn" style="padding:2px 9px;font-size:11px" onclick="loadRadar()">↻ rescan</button>
+      ${d&&d.ts?`<span class="sub">· ${new Date(d.ts).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true})}</span>`:''}
+      ${d&&d.state?`<span class="sub">· ${d.state.venue} · ${d.state.storeKind}</span>`:''}</h3>
+    <div style="margin:6px 0">${radarPerfStrip(radarState.perf)}</div>
+    ${d&&d.backfilled?`<div class="sub" style="margin:6px 0;padding:6px 9px;border-radius:7px;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.3);color:#fbbf24">⚠ Some cards below are scored against a <b>Deribit backfilled</b> IV baseline — this venue has not yet accumulated 90 days of its own history.</div>`:''}
+    ${body}
+    <div style="margin-top:12px;padding-top:9px;border-top:1px solid var(--line)">
+      <div style="font-size:12.5px;font-weight:700;margin-bottom:4px">🔍 Why isn't a contract here?</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+        <input id="radarWhy" placeholder="Paste a contract id, e.g. BTC-26DEC25-90000-C" style="flex:1;min-width:260px;padding:7px 11px;border-radius:8px;border:1px solid var(--line);background:var(--panel2);color:var(--txt);font-family:var(--mono);font-size:12px">
+        <button class="btn" style="padding:5px 12px;font-size:12px" onclick="radarExplain()">Look up</button></div>
+      <div id="radarWhyOut"></div>
+    </div>
+    <div style="margin-top:10px;padding-top:9px;border-top:1px solid var(--line)">
+      <div style="font-size:12.5px;font-weight:700;margin-bottom:4px">🧪 Backtest the screener</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+        <select id="radarBtU" style="padding:6px 10px;border-radius:8px;border:1px solid var(--line);background:var(--panel2);color:var(--txt);font-size:12px"><option>BTC</option><option>ETH</option><option>SOL</option></select>
+        <button class="btn" style="padding:5px 12px;font-size:12px" onclick="radarBacktest()">Replay last 30d of stored chains</button>
+        <span class="sub" style="font-size:11px">fills at mark ± half-spread</span></div>
+      <div id="radarBtOut"></div>
+    </div>
+    <details style="margin-top:10px"><summary class="sub" style="cursor:pointer;list-style:revert;font-weight:700">❓ New to options? Read this first</summary>
+      <div class="sub" style="font-size:12px;line-height:1.6;margin-top:6px">
+        An <b>option</b> is a fixed-price bet with a deadline. You pay a set amount up front — that amount is the <b>most you can lose</b>, no matter how badly the coin moves. In exchange you get to profit if the coin moves the way you bet, <b>before the expiry date</b>.<br><br>
+        A <b>CALL</b> pays off if the coin goes <b>up</b>. A <b>PUT</b> pays off if it goes <b>down</b>. Both expire completely worthless if the move does not happen in time — unlike buying the coin itself, where you can simply wait longer.<br><br>
+        <b>Two things beginners get caught by.</b> First, being right too slowly still loses: the option loses value every single day, which each card shows in rupees per day. Second, you usually need a <i>sizeable</i> move, not just any move — each card states the exact percentage required and how often that has actually happened historically.<br><br>
+        The <b>income trades</b> section is more advanced: you are paid up front and keep it if the coin stays out of a zone, but it is a two-leg trade and you must place both legs — the second one is what caps your loss.
+      </div></details>
+    <p class="small" style="color:var(--muted);margin-top:10px"><b>This is analysis, not investment advice.</b> Each card starts from the app's own read on where the coin is heading, then picks the contract that expresses that view at the best price — it is <b>not</b> a guarantee of direction, and the confidence label is not a probability of profit. Income trades are always shown as capped-loss spreads; a naked short is never surfaced. Figures are pre-fee and assume you can trade near the quoted price. <b>Options routinely expire worthless — only stake money you can afford to lose entirely.</b></p></div>`;
+  renderRadarExplain(); renderRadarBt();
 }
 
 function ladder(s){const v=[s.stop,s.entry,...s.targets],lo=Math.min(...v),hi=Math.max(...v),sp=hi-lo||1,pos=x=>((x-lo)/sp)*100;
