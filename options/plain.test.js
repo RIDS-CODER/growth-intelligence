@@ -278,3 +278,74 @@ test("the probability bar is configurable and actually bites",()=>{
   const loose=S.scoreSnapshot(snap,{history:()=>null,view:{score:25}},{minWinRate:0.10});
   assert.ok(loose.buys.length+loose.sells.length>0,"a 10% bar surfaces plenty");
 });
+
+/* ---------------- units: price levels vs money at risk ---------------- */
+const usdtCall={underlying:"BTC",kind:"call",strike:64000,expiry_ms:Date.UTC(2026,7,6,8),
+  side:"buy",score_10:6,structure:null,quote_ccy:"USDT",fx_rate:88,ask:510,bid:505,spot:63878,
+  econ:{premium_inr:44880,breakeven:64510,max_loss_inr:44880,theta_day_inr:-2000,
+        req_move_pct:1.0,dte_days:2,tax_drag_inr:0},quality:{}};
+
+test("a USDT-quoted payoff is not silently mixed with rupee amounts",()=>{
+  // Regression: the intrinsic is in USDT and the premium in rupees. Subtracting them directly
+  // only looked correct while the venue happened to quote in INR.
+  // BTC at 65,000 → the 64000 call is 1000 USDT in the money = ₹88,000 at 88/USDT.
+  const {value,pnl}=P.payoffAtExpiry(usdtCall,65000,1);
+  assert.strictEqual(value,88000,"intrinsic converted to rupees, not left in USDT");
+  assert.strictEqual(pnl,88000-44880,"…then the rupee premium subtracted");
+  // Below the strike it is worthless and the loss is exactly the premium, in rupees.
+  assert.strictEqual(P.payoffAtExpiry(usdtCall,63000,1).pnl,-44880);
+});
+test("without a conversion rate the payoff falls back to 1:1 rather than breaking",()=>{
+  const noFx={...usdtCall,fx_rate:null};
+  assert.strictEqual(P.payoffAtExpiry(noFx,65000,1).value,1000,"raw venue units");
+});
+test("price levels print in the venue currency, money in rupees",()=>{
+  const e=P.explainSignal(usdtCall,{spot:63878,contractSize:1});
+  assert.match(e.win,/\$64,510/,"breakeven shown in USDT, matching the exchange");
+  assert.ok(!/₹64,510|₹64510/.test(e.win),"and NOT with a rupee symbol");
+  assert.match(e.loss,/₹44,880/,"the money you lose is in rupees");
+  assert.strictEqual(e.price_ccy,"USDT");
+  assert.strictEqual(P.px(64000,"USDT"),"$64,000");
+  assert.strictEqual(P.px(8840000,"INR"),"₹88,40,000");
+});
+
+/* ---------------- the exchange locator ---------------- */
+test("a simple buy names the row exactly as the exchange lists it",()=>{
+  const L=P.locator(usdtCall);
+  assert.strictEqual(L.two_legs,false);
+  assert.strictEqual(L.expiry_tab,"06 Aug","matches the venue's expiry tab");
+  assert.strictEqual(L.quote_ccy,"USDT");
+  assert.match(L.side_label,/CALL side \(left/,"calls are left of the strike column");
+  assert.strictEqual(L.legs.length,1);
+  assert.deepStrictEqual({do:L.legs[0].do,strike:L.legs[0].strike,price:L.legs[0].price},
+    {do:"BUY",strike:64000,price:510},"the strike and the ask, as displayed");
+  assert.match(L.note,/Strike column reads 64,000/);
+  assert.match(L.note,/Buy at the Ask/);
+});
+test("a put points to the other side of the chain",()=>{
+  const L=P.locator({...usdtCall,kind:"put"});
+  assert.match(L.side_label,/PUT side \(right/);
+  assert.match(L.note,/PUT price on the RIGHT/);
+});
+test("a spread lists both legs with what each one does",()=>{
+  const spread={...usdtCall,kind:"put",structure:{short_strike:63000,long_strike:62000,
+    short_bid:400,long_ask:250,width:1000,net_credit_inr:13200,max_loss_inr:74800}};
+  const L=P.locator(spread);
+  assert.strictEqual(L.two_legs,true);
+  assert.deepStrictEqual(L.legs.map(g=>[g.do,g.strike,g.price]),
+    [["SELL",63000,400],["BUY",62000,250]],"sell the near strike, buy the far one");
+  assert.match(L.legs[0].price_label,/receive/);
+  assert.match(L.legs[1].price_label,/pay/);
+  assert.match(L.note,/Place them together/);
+});
+test("the action line uses exchange strike notation, not rupees",()=>{
+  assert.match(P.actionLine(usdtCall),/Buy the BTC 64,000 CALL, 06 Aug expiry/);
+  assert.ok(!/₹/.test(P.actionLine(usdtCall)),"no rupee symbol on a USDT strike");
+});
+test("every plain block carries a locator",()=>{
+  for(const sig of [usdtCall,{...usdtCall,kind:"put"}]){
+    const e=P.explainSignal(sig,{spot:63878,contractSize:1});
+    assert.ok(e.locator&&e.locator.legs.length>0,"locator present");
+    assert.ok(e.locator.expiry_tab,"names the expiry tab");
+  }
+});

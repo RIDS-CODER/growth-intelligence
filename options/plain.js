@@ -19,14 +19,20 @@ const pct=(a,b)=>b>0?100*(a-b)/b:0;
 /** Long option: value = intrinsic. Credit spread: we keep the credit minus what we owe. */
 function payoffAtExpiry(sig,S,contractSize){
   const size=contractSize||1;
+  // S and the strikes are in the VENUE's currency; premiums and credits are already in ₹.
+  // fx_rate converts the intrinsic across, so the two sides of every subtraction match. Without
+  // it a USDT intrinsic was being subtracted from a rupee credit — arithmetic that only looked
+  // right while the venue happened to quote in INR.
+  const fx=(sig.fx_rate!=null&&sig.fx_rate>0)?sig.fx_rate:1;
   const intr=(kind,K)=>kind==="call"?Math.max(0,S-K):Math.max(0,K-S);
   if(sig.structure){
     const shortK=sig.structure.short_strike, longK=sig.structure.long_strike;
     const owed=Math.max(0,intr(sig.kind,shortK)-intr(sig.kind,longK));   // capped by the width
-    const credit=(sig.structure.net_credit_inr||0);
-    return {value:credit-owed*size, pnl:credit-owed*size};              // credit already banked
+    const credit=(sig.structure.net_credit_inr||0);                       // ₹, already banked
+    const owedInr=owed*size*fx;
+    return {value:credit-owedInr, pnl:credit-owedInr};
   }
-  const value=intr(sig.kind,sig.strike)*size;
+  const value=intr(sig.kind,sig.strike)*size*fx;                          // → ₹
   return {value, pnl:value-(sig.econ.premium_inr||0)};
 }
 
@@ -99,15 +105,61 @@ function historicalOutcome(sig,spot,closes,days,contractSize){
 /* ---------- the sentences ---------- */
 const MONTH=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 function dateLabel(ms){const d=new Date(ms);return `${d.getUTCDate()} ${MONTH[d.getUTCMonth()]}`;}
+/** Exchange-style expiry label, matching the tab on the venue's own chain screen ("06 Aug"). */
+function expiryTab(ms){const d=new Date(ms);
+  return `${String(d.getUTCDate()).padStart(2,"0")} ${MONTH[d.getUTCMonth()]}`;}
+
+/* MONEY you put at risk — always your funding currency. */
 const inr=v=>"₹"+Math.round(v).toLocaleString("en-IN");
+
+/* PRICE LEVELS — strikes, breakevens, the coin's price — are quoted in the VENUE's currency.
+   CoinDCX lists BTC options against USDT, so its strikes read 64000, not ₹88,40,000. Printing a
+   rupee symbol on those made the numbers unfindable on the exchange's own screen. */
+const CCY_SYM={INR:"₹",USDT:"$",USD:"$"};
+function px(v,ccy){
+  if(v==null||!isFinite(v))return "—";
+  const sym=CCY_SYM[ccy]||"";
+  const dp=Math.abs(v)<100?2:0;
+  return sym+Number(v).toLocaleString(ccy==="INR"?"en-IN":"en-US",
+    {minimumFractionDigits:dp,maximumFractionDigits:dp});
+}
+/** Bare number in the venue's own formatting — for matching a row on the exchange screen. */
+const bare=v=>v==null||!isFinite(v)?"—":Number(v).toLocaleString("en-US",{maximumFractionDigits:2});
+
+/** Everything needed to FIND this trade on the exchange's chain screen and place it. */
+function locator(sig){
+  const ccy=sig.quote_ccy||"USD";
+  const tab=expiryTab(sig.expiry_ms);
+  if(sig.structure){
+    const isCall=sig.kind==="call";
+    return {
+      expiry_tab:tab, quote_ccy:ccy, two_legs:true,
+      side_label:isCall?"CALL side (left of the strike column)":"PUT side (right of the strike column)",
+      legs:[
+        {do:"SELL",strike:sig.structure.short_strike,kind:sig.kind,
+         price:sig.structure.short_bid,price_label:"you receive about"},
+        {do:"BUY",strike:sig.structure.long_strike,kind:sig.kind,
+         price:sig.structure.long_ask,price_label:"you pay about"}
+      ],
+      note:`Both legs are on the ${isCall?"CALL":"PUT"} side of the ${tab} chain. Place them together — the BUY leg is what caps your loss.`
+    };
+  }
+  const isCall=sig.kind==="call";
+  return {
+    expiry_tab:tab, quote_ccy:ccy, two_legs:false,
+    side_label:isCall?"CALL side (left of the strike column)":"PUT side (right of the strike column)",
+    legs:[{do:"BUY",strike:sig.strike,kind:sig.kind,price:sig.ask,price_label:"you pay about"}],
+    note:`On the ${tab} chain, find the row where the middle Strike column reads ${bare(sig.strike)}, then take the ${isCall?"CALL price on the LEFT":"PUT price on the RIGHT"}. Buy at the Ask.`
+  };
+}
 
 /** One line naming the bet in the user's terms. */
 function thesisLine(sig,view){
-  const u=sig.underlying;
+  const u=sig.underlying, ccy=sig.quote_ccy;
   if(sig.structure){
     // A credit spread is a "stays above/below" bet, not a "goes up" bet — say so.
     const dirn=sig.kind==="call"?"stays below":"stays above";
-    return `${u} ${dirn} ${inr(sig.structure.short_strike)} until ${dateLabel(sig.expiry_ms)}`;
+    return `${u} ${dirn} ${px(sig.structure.short_strike,ccy)} until ${dateLabel(sig.expiry_ms)}`;
   }
   return sig.kind==="call"
     ? `${u} goes UP before ${dateLabel(sig.expiry_ms)}`
@@ -116,28 +168,29 @@ function thesisLine(sig,view){
 
 /** The literal instruction. */
 function actionLine(sig){
+  // Strikes are named exactly as the exchange lists them, so the row is findable.
   if(sig.structure){
-    return `Sell the ${inr(sig.structure.short_strike)} ${sig.kind} and buy the ${inr(sig.structure.long_strike)} ${sig.kind}, both expiring ${dateLabel(sig.expiry_ms)} (one trade, two legs)`;
+    return `Sell the ${bare(sig.structure.short_strike)} ${sig.kind} and buy the ${bare(sig.structure.long_strike)} ${sig.kind}, both expiring ${expiryTab(sig.expiry_ms)} (one trade, two legs)`;
   }
-  return `Buy the ${sig.underlying} ${inr(sig.strike)} ${sig.kind.toUpperCase()} expiring ${dateLabel(sig.expiry_ms)}`;
+  return `Buy the ${sig.underlying} ${bare(sig.strike)} ${sig.kind.toUpperCase()}, ${expiryTab(sig.expiry_ms)} expiry`;
 }
 
 /** What has to happen for this to pay. */
 function winLine(sig){
-  const by=dateLabel(sig.expiry_ms);
+  const by=dateLabel(sig.expiry_ms), ccy=sig.quote_ccy;
   if(sig.structure){
     const side=sig.kind==="call"?"below":"above";
-    return `You keep the full ${inr(sig.structure.net_credit_inr)} if ${sig.underlying} is ${side} ${inr(sig.structure.short_strike)} on ${by}.`;
+    return `You keep the full ${inr(sig.structure.net_credit_inr)} if ${sig.underlying} is ${side} ${px(sig.structure.short_strike,ccy)} on ${by}.`;
   }
   const dirn=sig.kind==="call"?"above":"below";
-  return `You make money if ${sig.underlying} is ${dirn} ${inr(sig.econ.breakeven)} on ${by} — a ${sig.econ.req_move_pct}% move from here.`;
+  return `You make money if ${sig.underlying} is ${dirn} ${px(sig.econ.breakeven,ccy)} on ${by} — a ${sig.econ.req_move_pct}% move from here.`;
 }
 
 /** What losing looks like, stated without euphemism. */
 function lossLine(sig){
   if(sig.structure){
     const side=sig.kind==="call"?"above":"below";
-    return `If ${sig.underlying} finishes well ${side} ${inr(sig.structure.long_strike)} you lose the most you can lose: ${inr(sig.structure.max_loss_inr)}. That is capped — it cannot get worse than that.`;
+    return `If ${sig.underlying} finishes well ${side} ${px(sig.structure.long_strike,sig.quote_ccy)} you lose the most you can lose: ${inr(sig.structure.max_loss_inr)}. That is capped — it cannot get worse than that.`;
   }
   return `If ${sig.underlying} does not get there, the option expires worthless and you lose the whole ${inr(sig.econ.premium_inr)} you paid. That is the most you can lose.`;
 }
@@ -257,6 +310,8 @@ function explainSignal(sig,opts){
     odds_pct: hist?Math.round(hist.win_rate*100):null,
     confidence_word: confidenceWord(sig.score_10),
     payoff: payoffTable(sig,spot,size),
+    price_ccy: sig.quote_ccy||null,
+    locator: locator(sig),
     cautions: cautions(sig,hist,opts.view),
     // The mispricing edge, said as a reason for choosing THIS contract rather than as the trade thesis.
     why_this_one: opts.candidates>1
@@ -266,6 +321,6 @@ function explainSignal(sig,opts){
   };
 }
 
-module.exports={explainSignal,payoffAtExpiry,payoffTable,moveFrequency,historicalOutcome,
+module.exports={explainSignal,payoffAtExpiry,payoffTable,moveFrequency,historicalOutcome,locator,px,bare,expiryTab,
   thesisLine,actionLine,winLine,lossLine,decayLine,oddsLine,oddsHeadline,payoffBalanceLine,
   cautions,confidenceWord,dateLabel,inr};

@@ -154,6 +154,8 @@ function buildVertical(shortQ,chain,cfg,nowMs){
     const maxLoss=width-credit;
     if(!(maxLoss>0))continue;
     return {short_leg:shortQ.id,long_leg:wing.id,short_strike:shortQ.strike,long_strike:wing.strike,
+            // per-leg prices in venue units, so the card can say what to expect on each leg
+            short_bid:shortQ.bid,long_ask:wing.ask,
             width,net_credit:credit,max_loss:maxLoss,
             breakeven: shortQ.kind==="call"?shortQ.strike+credit:shortQ.strike-credit,
             ratio:+(credit/maxLoss).toFixed(3)};
@@ -375,10 +377,21 @@ function scoreSnapshot(snap,ctx,cfgIn){
         // strikes travel with the signal: the backtest needs them to settle the spread at
         // expiry, and the card needs them to show what is actually being traded
         short_strike:structure.short_strike, long_strike:structure.long_strike,
+        short_bid:structure.short_bid!=null?+structure.short_bid.toFixed(2):null,
+        long_ask:structure.long_ask!=null?+structure.long_ask.toFixed(2):null,
         width:structure.width, net_credit_inr:+fx(structure.net_credit*contractSize).toFixed(2),
         max_loss_inr:+fx(structure.max_loss*contractSize).toFixed(2)
       }:null,
       quality:c.quality,
+      // PRICE LEVELS (strike, breakeven, spot, the payoff table) are in the VENUE's quote
+      // currency — USDT on CoinDCX, USD on Deribit. MONEY AT RISK (*_inr) is converted to ₹.
+      // Conflating the two renders a ₹ symbol on a number the exchange shows in USDT, and the
+      // user cannot find the row on their own screen.
+      quote_ccy:snap.quote_ccy||"USD",
+      fx_rate:+(fx(1)||1),                         // venue currency → ₹, so payoffs can be reconciled
+      spot:snap.spot!=null?+snap.spot.toFixed(2):null,
+      ask:q.ask!=null?+q.ask.toFixed(2):null,      // what you actually pay, per contract, venue units
+      bid:q.bid!=null?+q.bid.toFixed(2):null,
       iv:+q.iv.toFixed(4), rvol30:snap.rvol30!=null?+snap.rvol30.toFixed(4):null,
       delta:+q.greeks.delta.toFixed(4)
     };

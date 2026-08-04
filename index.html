@@ -1262,11 +1262,14 @@ function radarCard(s){
   const up=(s.kind==='call')===isBuy;                       // what the position wants the coin to do
   const arrow=up?'📈':'📉';
   const confCol=s.score_10>=7?'var(--buy)':s.score_10>=5?'#fbbf24':'var(--muted)';
+  // Price levels print in the VENUE's currency (USDT on CoinDCX); only money at risk is ₹.
+  const cs={INR:'₹',USDT:'$',USD:'$'}[p.price_ccy]||'';
+  const pxf=v=>v==null||!isFinite(v)?'—':cs+Number(v).toLocaleString(p.price_ccy==='INR'?'en-IN':'en-US',{maximumFractionDigits:Math.abs(v)<100?2:0});
   const rows=(p.payoff||[]).map(r=>{
     const good=r.pnl>0;
     return `<tr>
       <td style="font-family:var(--mono)">${r.move_pct>0?'+':''}${r.move_pct}%</td>
-      <td style="font-family:var(--mono);color:var(--muted)">${rf(r.price)}</td>
+      <td style="font-family:var(--mono);color:var(--muted)">${pxf(r.price)}</td>
       <td style="font-family:var(--mono);text-align:right;color:${good?'var(--buy)':'var(--sell)'};font-weight:700">${r.pnl>0?'+':''}${rf(r.pnl)}</td>
       <td class="sub" style="font-size:11px">${r.pnl>0?'profit':(r.total_loss?'total loss':'loss')}</td></tr>`;}).join('');
   const cautions=(p.cautions||[]).map(c=>`<li style="margin:2px 0">${c}</li>`).join('');
@@ -1294,6 +1297,18 @@ function radarCard(s){
         <div class="lv stop"><div class="k">Most you can lose</div><div class="v">${rf(p.max_loss_inr)}</div></div>
         <div class="lv"><div class="k">Days left</div><div class="v">${p.days_left!=null?p.days_left.toFixed(0):'—'}</div></div>
       </div>
+      ${(()=>{const L=p.locator; if(!L)return '';
+        const legs=L.legs.map(g=>`<div style="display:flex;gap:8px;align-items:baseline;padding:4px 0;border-bottom:1px dashed var(--line)">
+            <b style="min-width:38px;color:${g.do==='BUY'?'var(--buy)':'var(--sell)'}">${g.do}</b>
+            <span style="font-family:var(--mono);font-size:14px;font-weight:800">${(g.strike||0).toLocaleString('en-US')}</span>
+            <span class="sub">${g.kind.toUpperCase()}</span>
+            <span class="sub" style="margin-left:auto">${g.price_label} <b style="color:var(--txt);font-family:var(--mono)">${g.price!=null?Number(g.price).toLocaleString('en-US',{maximumFractionDigits:2}):'—'}</b> ${L.quote_ccy}</span>
+          </div>`).join('');
+        return `<div style="margin:7px 0;padding:9px 11px;border-radius:8px;background:rgba(129,140,248,.10);border:1px solid rgba(129,140,248,.4)">
+          <div style="font-size:12.5px;font-weight:800;margin-bottom:5px">📱 Find it on your exchange</div>
+          <div class="sub" style="font-size:11.5px;margin-bottom:5px">Open the <b style="color:var(--txt)">${L.expiry_tab}</b> expiry tab · <b style="color:var(--txt)">${L.side_label}</b></div>
+          ${legs}
+          <div class="sub" style="font-size:11.5px;margin-top:6px">${L.note}</div></div>`;})()}
       <div style="margin:7px 0;padding:8px 10px;border-radius:8px;background:rgba(52,211,153,.08);border:1px solid rgba(52,211,153,.3);font-size:12.5px;line-height:1.55">
         ✅ <b>You win if</b> — ${p.win||''}</div>
       <div style="margin:5px 0;padding:8px 10px;border-radius:8px;background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.3);font-size:12.5px;line-height:1.55">
@@ -1311,10 +1326,10 @@ function radarCard(s){
         <div class="sub" style="font-size:11.5px;margin-top:5px;line-height:1.6">
           ${p.why_this_one||''}<br>
           <b>Edge:</b> ${s.why}<br><b>Counter:</b> ${s.why_not}<br>
-          Strike ${rf(s.strike)} · ${s.kind} · IV ${(s.iv*100).toFixed(1)}%${s.rvol30?` vs 30d realized ${(s.rvol30*100).toFixed(0)}%`:''} · Δ${s.delta.toFixed(2)} ·
-          breakeven ${rf(s.econ.breakeven)} · theta ${rf(s.econ.theta_day_inr)}/day · mispricing ${s.score_10.toFixed(1)}/10<br>
+          Strike ${pxf(s.strike)} · ${s.kind} · IV ${(s.iv*100).toFixed(1)}%${s.rvol30?` vs 30d realized ${(s.rvol30*100).toFixed(0)}%`:''} · Δ${s.delta.toFixed(2)} ·
+          breakeven ${pxf(s.econ.breakeven)} · theta ${rf(s.econ.theta_day_inr)}/day · mispricing ${s.score_10.toFixed(1)}/10<br>
           ${s.odds?`Odds — market-implied ${s.odds.market!=null?(s.odds.market*100).toFixed(0)+'%':'—'} · historical ${s.odds.historical!=null?(s.odds.historical*100).toFixed(0)+'%':'—'} over ${s.odds.history_n} windows · shown = the lower of the two${s.odds.breakeven_win_rate!=null?` · break-even win rate ${(s.odds.breakeven_win_rate*100).toFixed(0)}%`:''}<br>`:''}
-          ${s.structure?`Spread: short ${rf(s.structure.short_strike)} / long ${rf(s.structure.long_strike)}, width ${rf(s.structure.width)}<br>`:''}
+          ${s.structure?`Spread: short ${pxf(s.structure.short_strike)} / long ${pxf(s.structure.long_strike)}, width ${pxf(s.structure.width)}<br>`:''}
           signals: ${Object.entries(s.z).filter(([,v])=>v!=null).map(([k,v])=>k+' '+v.toFixed(2)).join(' · ')||'—'}
         </div></details>
     </div></div>`;
