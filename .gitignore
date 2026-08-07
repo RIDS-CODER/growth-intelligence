@@ -7,10 +7,6 @@ token.json
 instruments.json
 # tracked-setup snapshots + resolved outcomes
 setups.json
-# Options Radar store (IV history, chain tape) - regenerated, can be large
-options-radar.db*
-options-radar-data/
-
 # paper-trading bot state
 paper-state.json
 

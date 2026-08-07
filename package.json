@@ -2,8 +2,11 @@
   "name": "growth-intelligence-pro",
   "version": "1.0.0",
   "private": true,
-  "description": "Growth Intelligence Platform — real-time Upstox trade scanner",
-  "engines": { "node": ">=18" },
-  "//engines": "Node 22+ recommended: Options Radar uses node:sqlite for its 90d IV history and falls back to NDJSON below that.",
-  "scripts": { "start": "node server.js", "test": "node --test options/*.test.js" }
+  "description": "Growth Intelligence Platform \u2014 real-time Upstox trade scanner",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js"
+  }
 }

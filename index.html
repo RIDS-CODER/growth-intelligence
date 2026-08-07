@@ -174,7 +174,6 @@
     <button class="btn" id="researchBtn" onclick="toggleResearch()" style="border-color:#a78bfa;background:rgba(167,139,250,.14);color:#ddd6fe">🔎 Research a coin</button>
     <button class="btn" id="quickBtn" onclick="toggleQuick()" style="border-color:#f59e0b;background:rgba(245,158,11,.15);color:#fde68a">⚡ Quick Trades</button>
     <button class="btn" id="moversBtn" onclick="toggleMovers()" style="border-color:#fb7185;background:rgba(251,113,133,.14);color:#fecdd3">🔥 Volume Movers</button>
-    <button class="btn" id="radarBtn" onclick="toggleRadar()" style="border-color:#818cf8;background:rgba(129,140,248,.15);color:#c7d2fe">🎯 Options Radar</button>
     <button class="btn" id="paperBtn" onclick="togglePaper()" style="border-color:#34d399;background:rgba(52,211,153,.14);color:#a7f3d0">🤖 Paper Bot</button>
     <span class="pstat" id="filterNote"></span>
   </div>
@@ -183,7 +182,6 @@
   <div id="btcNote" style="display:none"></div>
   <div id="quickPanel" style="display:none"></div>
   <div id="moversPanel" style="display:none"></div>
-  <div id="radarPanel" style="display:none"></div>
   <div id="researchPanel" style="display:none"></div>
   <div id="paperPanel" style="display:none"></div>
   <div id="tradesPanel" style="display:none"></div>
@@ -858,16 +856,36 @@ function card(r,i,isBuy){const{asset,sig,setup,reasons,dec,action,scope,asof,isI
       <h4 class="inval">🛑 Invalidation</h4><ul>${reasons.inval.map(x=>`<li class="inval">${x}</li>`).join('')}</ul></div>
     </div></div>`;}
 
+/* Asset classes the scalp panels can screen. Crypto is 24x7; the rest need a broker session
+   and an open market, which the panels state rather than silently returning nothing. */
+const SCALP_TABS=[['Crypto','₿ Crypto'],['ETFs / Indices','📊 Index / ETF'],['Commodities','🛢 Commodities'],['Stocks','📈 Stocks']];
+const scalpTabRow=(cur,fn)=>SCALP_TABS.map(([k,lbl])=>
+  `<div class="rztab ${k===cur?'on':''}" onclick="${fn}('${k.replace(/'/g,"\\'")}')">${lbl}</div>`).join('');
+const isCryptoTab=t=>t==='Crypto';
+/* Non-crypto classes trade on NSE/MCX hours and need an Upstox session. Saying so beats an
+   empty list the user cannot explain. */
+function scalpMarketNote(tab,d){
+  if(isCryptoTab(tab))return '';
+  if(d&&d.needsLogin)
+    return `<div class="sub" style="margin:4px 0;padding:7px 10px;border-radius:8px;background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.4);color:#fbbf24">🔑 <b>Log in with Upstox to scan ${tab}.</b> Crypto works without it; stocks, indices and commodities need your broker session for live prices.</div>`;
+  if(!status.marketOpen)
+    return `<div class="sub" style="margin:4px 0;padding:7px 10px;border-radius:8px;background:rgba(148,163,184,.09);border:1px dashed var(--line)">🕐 <b>Market is closed.</b> These are built from the last session's candles — the levels stay valid for the next open, but nothing will fill until then. Intraday scalps here are for planning, not for right now.</div>`;
+  return '';
+}
+
 /* ================= ⚡ QUICK TRADES — scalp/quick setups across timeframes, split Long/Short (+ reverse dip-shorts) ================= */
 const QUICK_TFS=['5m','15m','30m','1h'];
-let quickState={open:false, tf:'15m', side:'long', data:{}, loading:false, q:'', highOnly:false, byVol:false};
+let quickState={open:false, tab:'Crypto', tf:'15m', side:'long', data:{}, loading:false, q:'', highOnly:false, byVol:false};
 let quickTimer=null;
 const qf=v=>v==null||!isFinite(v)?'—':(Math.abs(v)<5?(+v).toFixed(4):(+v).toFixed(2));
 // ₹/$ display toggle shared by Quick Trades + Volume Movers (scalpers usually think in USDT). Server values are always ₹.
 let scalpCcy='USDT', scalpRateSrc='';
-function scalpPrice(v){ if(v==null||!isFinite(v))return '—';
+function scalpPrice(v,cls){ if(v==null||!isFinite(v))return '—';
+  // Only crypto is dual-quoted. An index level or a commodity price divided by the USDT rate
+  // would be meaningless, so those always render in ₹ regardless of the toggle.
+  const dual = cls==null || cls==='Crypto';
   // Divides by the SAME rate the server used to build these ₹ values, so $ is the exact source price (no double conversion).
-  if(scalpCcy==='USDT'&&usdtInr>0){const u=v/usdtInr;return '$'+u.toLocaleString('en-US',{minimumFractionDigits:u<5?4:2,maximumFractionDigits:u<5?4:2});}
+  if(dual&&scalpCcy==='USDT'&&usdtInr>0){const u=v/usdtInr;return '$'+u.toLocaleString('en-US',{minimumFractionDigits:u<5?4:2,maximumFractionDigits:u<5?4:2});}
   return '₹'+Number(v).toLocaleString('en-IN',{minimumFractionDigits:Math.abs(v)<5?4:2,maximumFractionDigits:Math.abs(v)<5?4:2});}
 // Honest, compact statement of which currency is exact against your exchange right now.
 function scalpPriceNote(){
@@ -876,7 +894,7 @@ function scalpPriceNote(){
   return `<span class="sub" style="color:#fbbf24" title="This server can't reach CoinDCX, so ₹ is built from the global price × a plain USD/INR rate. CoinDCX charges an India premium over that, so its ₹ screen reads slightly higher. Every % — entry, stop, targets, R:R — is unaffected.">⚠ Global feed · <b>$ prices are exact</b>; ₹ runs ~1–4% under CoinDCX (India premium) — use the $ view to match your screen</span>`;
 }
 function setScalpCcy(c){scalpCcy=c;if(quickState.open)renderQuickShell();if(moversState.open)renderMoversShell();}
-const scalpCcyTabs=()=>`<span class="sub" style="margin-left:8px">Show in:</span>
+const scalpCcyTabs=(tab)=>!isCryptoTab(tab||'Crypto')?'':`<span class="sub" style="margin-left:8px">Show in:</span>
   <div class="rztab ${scalpCcy==='USDT'?'on':''}" onclick="setScalpCcy('USDT')">$ USDT</div>
   <div class="rztab ${scalpCcy==='INR'?'on':''}" onclick="setScalpCcy('INR')">₹ INR</div>`;
 // mini candlesticks from a compact OHLC window (open ≈ previous close for continuous crypto)
@@ -901,11 +919,12 @@ function volLine(v){ if(!v)return '<span class="sub">vol —</span>';
 function quickStartTimer(){ if(quickTimer)clearInterval(quickTimer); quickTimer=setInterval(()=>{ if(quickState.open)loadQuick(quickState.tf); }, 45000); }
 function toggleQuick(){const el=document.getElementById('quickPanel');quickState.open=el.style.display==='none';el.style.display=quickState.open?'block':'none';
   if(quickState.open){renderQuickShell();loadQuick(quickState.tf);quickStartTimer();}else if(quickTimer){clearInterval(quickTimer);quickTimer=null;}}
-function setQuickTf(tf){quickState.tf=tf;renderQuickShell();if(quickState.data[tf])renderQuickList();else loadQuick(tf);}
+function setQuickTf(tf){quickState.tf=tf;renderQuickShell();if(quickState.data[quickState.tab+'|'+tf])renderQuickList();else loadQuick(tf);}
+function setQuickTab(t){quickState.tab=t;quickState.data={};renderQuickShell();loadQuick(quickState.tf);}
 function setQuickSide(s){quickState.side=s;renderQuickShell();}
 function setQuickHigh(){quickState.highOnly=!quickState.highOnly;renderQuickShell();}
 function setQuickByVol(){quickState.byVol=!quickState.byVol;renderQuickShell();}
-function normQuick(x){const s=x.setup;return {sym:x.asset.sym,name:x.asset.name||x.asset.sym,tk:x.asset.tk||'',dir:s.dir,kind:x.action?x.action.kind:'',live:x.sig.price,vol:x.vol||null,entryLo:s.entryLo,entryHi:s.entryHi,target:s.targets[0],targetPct:Math.abs(s.ret[0]),stop:s.stop,stopPct:s.riskPct,rr:s.rrr,conf:x.confidence||{label:'—',pct:null},note:s.note,regime:s.regime,reverse:false,bars:x.bars,targets:(s.targets||[]).slice(0,3),rets:(s.ret||[]).map(Math.abs)};}
+function normQuick(x){const s=x.setup;return {sym:x.asset.sym,name:x.asset.name||x.asset.sym,tk:x.asset.tk||'',cls:x.asset.cls,dir:s.dir,kind:x.action?x.action.kind:'',live:x.sig.price,vol:x.vol||null,entryLo:s.entryLo,entryHi:s.entryHi,target:s.targets[0],targetPct:Math.abs(s.ret[0]),stop:s.stop,stopPct:s.riskPct,rr:s.rrr,conf:x.confidence||{label:'—',pct:null},note:s.note,regime:s.regime,reverse:false,bars:x.bars,targets:(s.targets||[]).slice(0,3),rets:(s.ret||[]).map(Math.abs)};}
 function reverseDipShort(x){const s=x.setup,live=x.sig.price,atr=s.atr;
   if(!(live>0)||!(atr>0))return null;
   const target=s.entryHi;                       // support/dip zone — first touch on the way down
@@ -914,12 +933,12 @@ function reverseDipShort(x){const s=x.setup,live=x.sig.price,atr=s.atr;
   if(!(rr>=1)||targetPct<0.4)return null;        // only worth it with ≥1:1 and real room to the dip
   const base=x.confidence||{pct:45}, pct=Math.max(3,Math.round((base.pct||45)*0.8));   // counter-trend → a notch lower
   return {sym:x.asset.sym,name:x.asset.name||x.asset.sym,tk:x.asset.tk||'',dir:-1,kind:'revshort',live,entryLo:live,entryHi:live,target,targetPct,stop,stopPct,rr,
-    conf:{label:pct>=68?'High':pct>=45?'Medium':'Low',pct},regime:'reversedip',reverse:true,bars:x.bars,targets:[target],rets:[targetPct],vol:x.vol||null,
+    conf:{label:pct>=68?'High':pct>=45?'Medium':'Low',pct},regime:'reversedip',reverse:true,cls:x.asset.cls,bars:x.bars,targets:[target],rets:[targetPct],vol:x.vol||null,
     note:'↔ Reverse of a dip-buy: short the drop into the support zone (Target 1) and cover there — that\'s where the long begins. Counter-trend — quick in-and-out, tight stop.'};}
 async function loadQuick(tf){
   quickState.loading=true; renderQuickList();
   try{
-    const d=await(await fetch('/api/scan?tab=Crypto&tf='+tf+'&_='+Date.now())).json();
+    const d=await(await fetch('/api/scan?tab='+encodeURIComponent(quickState.tab)+'&tf='+tf+'&_='+Date.now())).json();
     if(d.usdtInr>0){usdtInr=d.usdtInr;scalpRateSrc=d.rateSrc||'';}  // use the SAME rate the server priced with — never a substitute rate
     if(!(usdtInr>0))await ensureRate();
     const res=(d.results||[]);
@@ -927,39 +946,42 @@ async function loadQuick(tf){
     const longs=quick.filter(x=>x.setup.dir>0).map(normQuick);
     const shorts=quick.filter(x=>x.setup.dir<0).map(normQuick);
     res.forEach(x=>{ if(x.action&&x.action.kind==='waitdip'&&x.setup){const rv=reverseDipShort(x);if(rv)shorts.push(rv);} });   // dip-buy → reverse quick short
-    quickState.data[tf]={longs,shorts,btc:d.btc,ts:Date.now()};
-  }catch(e){ quickState.data[tf]={longs:[],shorts:[],err:String(e.message||e)}; }
+    quickState.data[quickState.tab+'|'+tf]={longs,shorts,btc:d.btc,ts:Date.now(),
+      loggedIn:d.loggedIn!==false,needsLogin:!isCryptoTab(quickState.tab)&&d.demo!==true&&d.loggedIn===false};
+  }catch(e){ quickState.data[quickState.tab+'|'+tf]={longs:[],shorts:[],err:String(e.message||e)}; }
   quickState.loading=false; renderQuickList();   // list-only refresh → never rebuilds/steals focus from the search box
   trackedAt=0; renderTracked('quickTracked');    // refresh tracked statuses alongside the list
 }
 function setQuickSearch(v){ quickState.q=v; renderQuickList(); }
 function updateQuickMeta(){
-  const d=quickState.data[quickState.tf]||{}, set=(id,t)=>{const e=document.getElementById(id);if(e)e.textContent=t;};
+  const d=quickState.data[quickState.tab+'|'+quickState.tf]||{}, set=(id,t)=>{const e=document.getElementById(id);if(e)e.textContent=t;};
   set('quickCntLong', (d.longs&&d.longs.length)?' ('+d.longs.length+')':'');
   set('quickCntShort',(d.shorts&&d.shorts.length)?' ('+d.shorts.length+')':'');
   set('quickUpd', d.ts?('· updated '+new Date(d.ts).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true})):'');
 }
 function renderQuickShell(){
   const el=document.getElementById('quickPanel'); if(!el)return;
-  const d=quickState.data[quickState.tf]||{}, nL=(d.longs||[]).length, nS=(d.shorts||[]).length;
+  const d=quickState.data[quickState.tab+'|'+quickState.tf]||{}, nL=(d.longs||[]).length, nS=(d.shorts||[]).length;
   const tfTabs=QUICK_TFS.map(tf=>`<div class="rztab ${tf===quickState.tf?'on':''}" onclick="setQuickTf('${tf}')">${tf}</div>`).join('');
   const sideTabs=`<div class="rztab ${quickState.side==='long'?'on':''}" onclick="setQuickSide('long')" style="${quickState.side==='long'?'border-color:var(--buy);color:var(--buy)':''}">🟢 Long<span id="quickCntLong">${nL?' ('+nL+')':''}</span></div>
                   <div class="rztab ${quickState.side==='short'?'on':''}" onclick="setQuickSide('short')" style="${quickState.side==='short'?'border-color:var(--sell);color:var(--sell)':''}">🔴 Short<span id="quickCntShort">${nS?' ('+nS+')':''}</span></div>`;
   el.innerHTML=`<div class="tradespanel" style="border-color:rgba(245,158,11,.45)">
-    <h3>⚡ Quick Trades <span class="sub">— scalp/quick setups only · crypto</span> <button class="btn" style="padding:2px 9px;font-size:11px" onclick="loadQuick(quickState.tf)">↻ refresh ${quickState.tf}</button> <span class="sub" id="quickUpd">${d.ts?'· updated '+new Date(d.ts).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true}):''}</span> <span class="sub">· auto ⟳ 45s</span></h3>
+    <h3>⚡ Quick Trades <span class="sub">— scalp/quick setups only · ${quickState.tab}</span> <button class="btn" style="padding:2px 9px;font-size:11px" onclick="loadQuick(quickState.tf)">↻ refresh ${quickState.tf}</button> <span class="sub" id="quickUpd">${d.ts?'· updated '+new Date(d.ts).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true}):''}</span> <span class="sub">· auto ⟳ 45s</span></h3>
     <input id="quickSearch" value="${(quickState.q||'').replace(/"/g,'&quot;')}" oninput="setQuickSearch(this.value)" placeholder="🔎 Search a coin in these setups — e.g. SOL, DOGE, BTC" style="width:100%;max-width:340px;padding:8px 12px;margin:3px 0 9px;border-radius:9px;border:1px solid var(--line);background:var(--panel2);color:var(--txt);font-family:var(--mono)">
+    <div style="display:flex;gap:5px;flex-wrap:wrap;margin:4px 0 7px">${scalpTabRow(quickState.tab,'setQuickTab')}</div>
+    ${scalpMarketNote(quickState.tab,d)}
     <div class="sub" style="margin:2px 0">Timeframe:</div>
     <div style="display:flex;gap:5px;flex-wrap:wrap;margin:3px 0 7px">${tfTabs}</div>
     <div style="display:flex;gap:5px;flex-wrap:wrap;margin:0 0 9px;align-items:center">${sideTabs}
       <button class="btn ${quickState.highOnly?'go':''}" style="padding:4px 12px;font-size:12px;margin-left:6px" onclick="setQuickHigh()" title="Show only High-confidence setups and sort by highest expected return first">🎯 High only · top returns${quickState.highOnly?' ✓':''}</button>
       <button class="btn ${quickState.byVol?'go':''}" style="padding:4px 12px;font-size:12px" onclick="setQuickByVol()" title="Sort these setups by the 🔥 volume score — the coins with the most volume-backed movement first, so a scalp reaches its target sooner">🔥 Sort by volume${quickState.byVol?' ✓':''}</button>
-      ${scalpCcyTabs()}</div>
-    <div style="margin:0 0 8px">${scalpPriceNote()}</div>
+      ${scalpCcyTabs(quickState.tab)}</div>
+    <div style="margin:0 0 8px">${isCryptoTab(quickState.tab)?scalpPriceNote():''}</div>
     <div id="quickTracked"></div>
     <div id="quickList"></div>
     <div id="quickAlerts" class="small" style="margin-top:10px;padding:8px 11px;border-radius:8px;border:1px dashed rgba(52,211,153,.4);background:rgba(52,211,153,.05)">📲 Telegram alerts: <span class="sub">checking…</span></div>
     <div id="quickAlertChats"></div>
-    <p class="small" style="color:var(--muted);margin-top:9px">Only <b>quick/scalp</b> plays — small targets, tight stops: range scalps, BTC-weak <b>correction shorts</b>, and <b>reverse dip-shorts</b> (a pending dip-buy means price is expected to fall to support — so short that drop and cover at the dip). Each timeframe loads live when you open its tab. Reverse shorts are <b>counter-trend</b> — quick in-and-out only. Not financial advice.</p></div>`;
+    <p class="small" style="color:var(--muted);margin-top:9px">Only <b>quick/scalp</b> plays — small targets, tight stops: range scalps, BTC-weak <b>correction shorts</b> (crypto only), and <b>reverse dip-shorts</b> (a pending dip-buy means price is expected to fall to support — so short that drop and cover at the dip). Each timeframe loads live when you open its tab. Reverse shorts are <b>counter-trend</b> — quick in-and-out only. Not financial advice.</p></div>`;
   renderQuickList(); renderTracked('quickTracked'); loadAlertStatus();
 }
 async function loadAlertStatus(){ try{ renderAlertBar(await(await fetch('/api/alert/status')).json()); }catch(e){} }
@@ -979,7 +1001,7 @@ async function alertTest(){ toast('Sending test…'); try{const r=await(await fe
 async function alertToggle(on){ try{await fetch('/api/alert/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({on:!!on})}); loadAlertStatus();}catch(e){} }
 function renderQuickList(){
   const el=document.getElementById('quickList'); if(!el)return;
-  const d=quickState.data[quickState.tf];
+  const d=quickState.data[quickState.tab+'|'+quickState.tf];
   updateQuickMeta();
   if(quickState.loading&&!d){el.innerHTML='<div class="sub" style="padding:14px">⏳ Scanning '+quickState.tf+' for quick setups…</div>';return;}
   if(!d){el.innerHTML='<div class="sub" style="padding:14px">—</div>';return;}
@@ -999,7 +1021,7 @@ function renderQuickList(){
   el.innerHTML='<div class="cards">'+sorted.map(quickCard).join('')+'</div>';
 }
 function quickCard(q){
-  const isBuy=q.dir>0, col=isBuy?'var(--buy)':'var(--sell)', P=scalpPrice;
+  const isBuy=q.dir>0, col=isBuy?'var(--buy)':'var(--sell)', P=v=>scalpPrice(v,q.cls);
   const confCol=q.conf.label==='High'?'var(--buy)':q.conf.label==='Medium'?'#fbbf24':'var(--muted)';
   const verb=q.reverse?'SHORT INTO DIP':(isBuy?(q.kind==='buynow'||q.kind==='buybreak'?'BUY NOW':'BUY DIP'):(q.kind==='sellnow'||q.kind==='sellbreak'?'SHORT NOW':'SHORT BOUNCE'));
   const tag=q.regime==='correction'?'<span style="color:#f87171">₿ fade</span>':q.reverse?'<span style="color:#f59e0b">↔ reverse</span>':'<span style="color:#fbbf24">⚡ scalp</span>';
@@ -1030,36 +1052,40 @@ const fmtQv=v=>!(v>0)?'—':v>=1e7?'₹'+(v/1e7).toFixed(1)+' Cr':v>=1e5?'₹'+(
 function moversStartTimer(){ if(moversTimer)clearInterval(moversTimer); moversTimer=setInterval(()=>{ if(moversState.open)loadMovers(moversState.tf); }, 45000); }
 function toggleMovers(){const el=document.getElementById('moversPanel');moversState.open=el.style.display==='none';el.style.display=moversState.open?'block':'none';
   if(moversState.open){renderMoversShell();loadMovers(moversState.tf);moversStartTimer();}else if(moversTimer){clearInterval(moversTimer);moversTimer=null;}}
-function setMoversTf(tf){moversState.tf=tf;renderMoversShell();if(moversState.data[tf])renderMoversList();else loadMovers(tf);}
+function setMoversTf(tf){moversState.tf=tf;renderMoversShell();if(moversState.data[moversState.tab+'|'+tf])renderMoversList();else loadMovers(tf);}
+function setMoversTab(t){moversState.tab=t;moversState.data={};renderMoversShell();loadMovers(moversState.tf);}
 function setMoversAction(){moversState.actionOnly=!moversState.actionOnly;renderMoversShell();}
 async function loadMovers(tf){
   moversState.loading=true; renderMoversList();
-  try{ const d=await(await fetch('/api/movers?tf='+tf+'&_='+Date.now())).json();
+  try{ const d=await(await fetch('/api/movers?tab='+encodeURIComponent(moversState.tab)+'&tf='+tf+'&_='+Date.now())).json();
     if(d.usdtInr>0){usdtInr=d.usdtInr;scalpRateSrc=d.rateSrc||'';}  // use the SAME rate the server priced with — never a substitute rate
     if(!(usdtInr>0))await ensureRate();
-    moversState.data[tf]={movers:d.movers||[],ts:d.ts||Date.now(),scanned:d.scanned}; }
-  catch(e){ moversState.data[tf]={movers:[],err:String(e.message||e)}; }
+    moversState.data[moversState.tab+'|'+tf]={movers:d.movers||[],ts:d.ts||Date.now(),scanned:d.scanned,
+      needsLogin:!!d.needsLogin,marketOpen:d.marketOpen!==false}; }
+  catch(e){ moversState.data[moversState.tab+'|'+tf]={movers:[],err:String(e.message||e)}; }
   moversState.loading=false; renderMoversList();   // list-only refresh → the shell (tabs/buttons) never rebuilds mid-click
   trackedAt=0; renderTracked('moversTracked');     // refresh tracked statuses alongside the list
 }
 function renderMoversShell(){
   const el=document.getElementById('moversPanel'); if(!el)return;
-  const d=moversState.data[moversState.tf]||{};
+  const d=moversState.data[moversState.tab+'|'+moversState.tf]||{};
   const tfTabs=MOVER_TFS.map(tf=>`<div class="rztab ${tf===moversState.tf?'on':''}" onclick="setMoversTf('${tf}')">${tf}</div>`).join('');
   el.innerHTML=`<div class="tradespanel" style="border-color:rgba(251,113,133,.45)">
-    <h3>🔥 Volume Movers <span class="sub">— biggest volume-backed moves right now · crypto</span> <button class="btn" style="padding:2px 9px;font-size:11px" onclick="loadMovers(moversState.tf)">↻ refresh ${moversState.tf}</button> <span class="sub" id="moversUpd">${d.ts?'· updated '+new Date(d.ts).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true}):''}</span> <span class="sub">· auto ⟳ 45s</span></h3>
+    <h3>🔥 Volume Movers <span class="sub">— biggest volume-backed moves right now · ${moversState.tab}</span> <button class="btn" style="padding:2px 9px;font-size:11px" onclick="loadMovers(moversState.tf)">↻ refresh ${moversState.tf}</button> <span class="sub" id="moversUpd">${d.ts?'· updated '+new Date(d.ts).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true}):''}</span> <span class="sub">· auto ⟳ 45s</span></h3>
+    <div style="display:flex;gap:5px;flex-wrap:wrap;margin:4px 0 7px">${scalpTabRow(moversState.tab,'setMoversTab')}</div>
+    ${scalpMarketNote(moversState.tab,d)}
     <div class="sub" style="margin:2px 0">Timeframe:</div>
     <div style="display:flex;gap:5px;flex-wrap:wrap;margin:3px 0 9px;align-items:center">${tfTabs}
       <button class="btn ${moversState.actionOnly?'go':''}" style="padding:4px 12px;font-size:12px;margin-left:6px" onclick="setMoversAction()" title="Hide movers where the engine sees no clean entry right now">🎯 Tradeable now only${moversState.actionOnly?' ✓':''}</button>
-      ${scalpCcyTabs()}</div>
-    <div style="margin:0 0 8px">${scalpPriceNote()}</div>
+      ${scalpCcyTabs(moversState.tab)}</div>
+    <div style="margin:0 0 8px">${isCryptoTab(moversState.tab)?scalpPriceNote():''}</div>
     <div id="moversTracked"></div>
     <div id="moversList"></div>
-    <p class="small" style="color:var(--muted);margin-top:9px">Ranked by <b>🔥 Mover Score</b> — 24h move (55%) + <b>volume surge vs the coin's own average</b> (30%) + bar range (15%). A high score means the coin is MOVING on real participation — it is <b>not</b> a buy signal by itself. The ⚡ plan on each card is the engine's actual scalp entry / stop / target for this timeframe, and <b>WATCH</b> means it's moving but there's no clean edge — stand aside rather than chase. Quick in-and-out only. Not financial advice.</p></div>`;
+    <p class="small" style="color:var(--muted);margin-top:9px">Ranked by <b>🔥 Mover Score</b> — 24h move (55%) + <b>volume surge vs its own average</b> (30%) + bar range (15%). A high score means it is MOVING on real participation — it is <b>not</b> a buy signal by itself. The ⚡ plan on each card is the engine's actual scalp entry / stop / target for this timeframe, and <b>WATCH</b> means it's moving but there's no clean edge — stand aside rather than chase. Quick in-and-out only. Not financial advice.</p></div>`;
   renderMoversList(); renderTracked('moversTracked');
 }
 function moverCard(m){
-  const s=m.setup||{}, isBuy=s.dir>0, P=scalpPrice;
+  const s=m.setup||{}, isBuy=s.dir>0, P=v=>scalpPrice(v,m.cls);
   const tradeable=m.verdict!=='HOLD'&&m.action&&MOVER_ACTIONABLE.includes(m.action.kind);
   const col=isBuy?'var(--buy)':'var(--sell)';
   const conf=m.conf||{label:'—',pct:null}, confCol=conf.label==='High'?'var(--buy)':conf.label==='Medium'?'#fbbf24':'var(--muted)';
@@ -1088,7 +1114,7 @@ function moverCard(m){
 }
 function renderMoversList(){
   const el=document.getElementById('moversList'); if(!el)return;
-  const d=moversState.data[moversState.tf];
+  const d=moversState.data[moversState.tab+'|'+moversState.tf];
   const upd=document.getElementById('moversUpd');
   if(upd&&d&&d.ts)upd.textContent='· updated '+new Date(d.ts).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true});
   if(moversState.loading&&!d){el.innerHTML='<div class="sub" style="padding:14px">⏳ Ranking the biggest volume movers on '+moversState.tf+'…</div>';return;}
@@ -1096,7 +1122,7 @@ function renderMoversList(){
   if(d.err){el.innerHTML='<div class="sub" style="padding:14px;color:var(--sell)">Couldn’t load '+moversState.tf+': '+d.err+'</div>';return;}
   let list=d.movers||[];
   if(moversState.actionOnly)list=list.filter(m=>m.verdict!=='HOLD'&&m.action&&MOVER_ACTIONABLE.includes(m.action.kind));
-  if(!list.length){el.innerHTML='<div class="empty">No big volume movers on '+moversState.tf+' right now'+(moversState.actionOnly?' with a tradeable setup — turn off “Tradeable now only” to watch the raw movers.':' — the market is quiet; check back in a few minutes.')+'</div>';return;}
+  if(!list.length){el.innerHTML='<div class="empty">No big volume movers in '+moversState.tab+' on '+moversState.tf+' right now'+(moversState.actionOnly?' with a tradeable setup — turn off “Tradeable now only” to watch the raw movers.':' — the market is quiet; check back in a few minutes.')+'</div>';return;}
   el.innerHTML='<div class="cards">'+list.map(moverCard).join('')+'</div>';
 }
 
@@ -1144,7 +1170,7 @@ const OUTCOME_MEANING={
 const FILLED_STATUS=new Set(['target','stopped','banked','timeout+','timeout-']);
 function historyRow(x){
   const t=RESOLVED_TAG[x.status]; if(!t)return '';
-  const P=scalpPrice, filled=FILLED_STATUS.has(x.status), pnl=x.pnlPct;
+  const P=v=>scalpPrice(v,x.cls), filled=FILLED_STATUS.has(x.status), pnl=x.pnlPct;
   const pc=pnl==null?'var(--muted)':pnl>0?'var(--buy)':pnl<0?'var(--sell)':'var(--muted)';
   return `<div style="padding:7px 9px;border-bottom:1px solid var(--line);font-size:12px">
     <div style="display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline">
@@ -1157,7 +1183,7 @@ function historyRow(x){
     <div class="sub" style="margin-top:2px;font-size:11.5px">${OUTCOME_MEANING[x.status]||''}</div></div>`;
 }
 function trackedRow(x){
-  const P=scalpPrice,st=trackedStatus(x),isL=x.dir>0;
+  const P=v=>scalpPrice(v,x.cls),st=trackedStatus(x),isL=x.dir>0;
   const nextT=x.status==='filled'&&x.hitT<3?x.targets[x.hitT]:x.targets[0];
   return `<div style="display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline;padding:6px 9px;border-bottom:1px solid var(--line);font-size:12px">
     <b style="min-width:70px">${x.tk||x.name}</b><span class="sub">${x.tf}</span>
@@ -1201,204 +1227,6 @@ async function renderTracked(elId){
           :'<div class="sub" style="margin-top:5px">No past recommendations yet — this fills in as tracked setups resolve.</div>'}
       </details>
     </div></details>`;
-}
-
-/* ================= 🎯 OPTIONS RADAR — mispricing screener (analysis, not advice) ================= */
-let radarState={open:false,data:null,perf:null,loading:false,explain:null,bt:null,btLoading:false};
-let radarTimer=null;
-const rf=v=>v==null||!isFinite(v)?'—':'₹'+Number(v).toLocaleString('en-IN',{maximumFractionDigits:Math.abs(v)<100?2:0});
-function toggleRadar(){const el=document.getElementById('radarPanel');radarState.open=el.style.display==='none';
-  el.style.display=radarState.open?'block':'none';
-  if(radarState.open){renderRadar();loadRadar();if(radarTimer)clearInterval(radarTimer);
-    radarTimer=setInterval(()=>{if(radarState.open)loadRadar();},120000);}
-  else if(radarTimer){clearInterval(radarTimer);radarTimer=null;}}
-async function loadRadar(){
-  radarState.loading=true;renderRadar();
-  try{
-    const [d,p]=await Promise.all([
-      fetch('/api/options/scan').then(r=>r.json()),
-      fetch('/api/options/performance?days=90').then(r=>r.json()).catch(()=>null)
-    ]);
-    radarState.data=d;radarState.perf=p;
-  }catch(e){radarState.data={error:String(e.message||e)};}
-  radarState.loading=false;renderRadar();
-}
-async function radarExplain(){
-  const inp=document.getElementById('radarWhy');if(!inp)return;
-  const id=(inp.value||'').trim();if(!id)return;
-  radarState.explain={loading:true,id};renderRadarExplain();
-  try{ radarState.explain=await fetch('/api/options/explain?id='+encodeURIComponent(id)).then(r=>r.json()); }
-  catch(e){ radarState.explain={found:false,message:'Lookup failed.'}; }
-  renderRadarExplain();
-}
-async function radarBacktest(){
-  radarState.btLoading=true;renderRadarBt();
-  try{
-    const u=(document.getElementById('radarBtU')||{}).value||'BTC';
-    radarState.bt=await fetch('/api/options/backtest?underlying='+u+'&days=30').then(r=>r.json());
-  }catch(e){radarState.bt={error:String(e.message||e)};}
-  radarState.btLoading=false;renderRadarBt();
-}
-/* The performance strip is deliberately always visible, including when the record is bad. */
-function radarPerfStrip(p){
-  if(!p||!p.overall||!p.n)
-    return `<div class="sub" style="padding:7px 10px;border-radius:8px;background:rgba(148,163,184,.08);border:1px dashed var(--line)">
-      📉 <b>Rolling 90d record: no completed signals yet.</b> The screener has not yet earned a hit rate — treat every card below as unvalidated.</div>`;
-  const hr=(p.overall.hit_rate*100), ret=p.overall.avg_ret_pct;
-  const good=hr>=50&&ret>0;
-  const ci=p.overall.ci&&p.overall.ci[0]!=null?` (95% CI ${(p.overall.ci[0]*100).toFixed(0)}–${(p.overall.ci[1]*100).toFixed(0)}%)`:'';
-  return `<div class="sub" style="padding:7px 10px;border-radius:8px;border:1px solid ${good?'rgba(52,211,153,.4)':'rgba(248,113,113,.45)'};background:${good?'rgba(52,211,153,.07)':'rgba(248,113,113,.07)'}">
-    📉 <b>Rolling ${p.window_days}d record:</b> <b style="color:${hr>=50?'var(--buy)':'var(--sell)'}">${hr.toFixed(0)}% hit rate</b>${ci} ·
-    avg <b style="color:${ret>=0?'var(--buy)':'var(--sell)'}">${ret>0?'+':''}${ret}%</b> per signal ·
-    <b>${p.n}</b> completed${p.postTax&&p.postTax.avg_ret_pct!=null?` · after VDA tax <b style="color:${p.postTax.avg_ret_pct>=0?'var(--buy)':'var(--sell)'}">${p.postTax.avg_ret_pct>0?'+':''}${p.postTax.avg_ret_pct}%</b>`:''}
-    ${p.lowSample?' · <span style="color:#fbbf24">too few trades to be meaningful</span>':''}</div>`;
-}
-/* The card is written for someone who has never traded an option: what to do, what it costs,
-   what you win, what you lose, by when. All the vol maths is demoted behind "the numbers". */
-function radarCard(s){
-  const p=s.plain||{}, isBuy=s.side==='buy', col=isBuy?'var(--buy)':'var(--sell)';
-  const q=s.quality||{};
-  const up=(s.kind==='call')===isBuy;                       // what the position wants the coin to do
-  const arrow=up?'📈':'📉';
-  const confCol=s.score_10>=7?'var(--buy)':s.score_10>=5?'#fbbf24':'var(--muted)';
-  const rows=(p.payoff||[]).map(r=>{
-    const good=r.pnl>0;
-    return `<tr>
-      <td style="font-family:var(--mono)">${r.move_pct>0?'+':''}${r.move_pct}%</td>
-      <td style="font-family:var(--mono);color:var(--muted)">${rf(r.price)}</td>
-      <td style="font-family:var(--mono);text-align:right;color:${good?'var(--buy)':'var(--sell)'};font-weight:700">${r.pnl>0?'+':''}${rf(r.pnl)}</td>
-      <td class="sub" style="font-size:11px">${r.pnl>0?'profit':(r.total_loss?'total loss':'loss')}</td></tr>`;}).join('');
-  const cautions=(p.cautions||[]).map(c=>`<li style="margin:2px 0">${c}</li>`).join('');
-  const badges=[
-    q.backfilled?`<span class="btmini" style="border-color:#fbbf24;color:#fbbf24" title="Part of the pricing check uses another exchange's history because this venue hasn't built up 90 days of its own yet.">reference data</span>`:'',
-    q.degraded_fit?`<span class="btmini" style="border-color:var(--muted);color:var(--muted)" title="Few strikes listed for this expiry, so the pricing comparison is less reliable.">thin chain</span>`:''
-  ].filter(Boolean).join(' ');
-  return `<div class="tc ${isBuy?'':'sellcard'}">
-    <div class="hd" onclick="this.parentNode.classList.toggle('open')" style="cursor:pointer">
-      <div class="l">
-        <div class="name">${arrow} ${p.thesis||s.underlying}</div>
-        <div class="sub" style="margin-top:3px;color:var(--txt);font-size:12.5px"><b>${p.action||''}</b></div>
-        <div class="sub">${p.days_left!=null?p.days_left.toFixed(0)+' days left':''} · <span style="color:var(--accent2)">▾ full plan &amp; payoff</span></div></div>
-      <div class="r"><span class="verdict ${isBuy?'BUY':'SELL'}">${isBuy?'BUY':'SPREAD'}</span>
-        <div class="btmini" style="border-color:${confCol};color:${confCol};margin-top:6px" title="How good this setup looks overall. Not a probability of profit.">${p.confidence_word||''}</div></div></div>
-    <div class="bd">
-      <div class="qlevels" style="margin-top:2px">
-        <div class="lv ${p.credit_inr!=null?'':'entry'}"><div class="k">${p.credit_inr!=null?'You receive':'It costs you'}</div><div class="v">${rf(p.credit_inr!=null?p.credit_inr:p.cost_inr)}</div></div>
-        <div class="lv stop"><div class="k">Most you can lose</div><div class="v">${rf(p.max_loss_inr)}</div></div>
-        <div class="lv"><div class="k">Days left</div><div class="v">${p.days_left!=null?p.days_left.toFixed(0):'—'}</div></div>
-      </div>
-      <div style="margin:7px 0;padding:8px 10px;border-radius:8px;background:rgba(52,211,153,.08);border:1px solid rgba(52,211,153,.3);font-size:12.5px;line-height:1.55">
-        ✅ <b>You win if</b> — ${p.win||''}</div>
-      <div style="margin:5px 0;padding:8px 10px;border-radius:8px;background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.3);font-size:12.5px;line-height:1.55">
-        ❌ <b>You lose if</b> — ${p.loss||''}</div>
-      ${p.decay?`<div class="sub" style="margin:5px 0;font-size:12px">⏳ ${p.decay}</div>`:''}
-      ${p.odds?`<div style="margin:6px 0;padding:7px 10px;border-radius:8px;background:rgba(129,140,248,.09);border:1px solid rgba(129,140,248,.3);font-size:12px;line-height:1.5">
-        🎲 <b>How often has this happened?</b> ${p.odds}</div>`:''}
-      ${rows?`<div style="margin-top:8px"><div class="sub" style="font-weight:700;margin-bottom:3px">If ${s.underlying} is here on expiry day, you end up with:</div>
-        <table class="bttable"><thead><tr><th>Move</th><th>Price</th><th style="text-align:right">Your P&amp;L</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`:''}
-      ${cautions?`<div style="margin-top:8px;padding:8px 10px;border-radius:8px;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.32);font-size:12px;line-height:1.5">
-        <b style="color:#fbbf24">⚠ Before you do this</b><ul style="margin:4px 0 0 16px;padding:0">${cautions}</ul></div>`:''}
-      <div class="sub" style="margin-top:7px;font-size:11.5px">🇮🇳 If this wins, tax takes roughly <b>${rf(s.econ.tax_drag_inr)}</b> of the gain. Losses cannot be set off, so you need to win clearly more than half the time to come out ahead.</div>
-      ${badges?`<div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:6px">${badges}</div>`:''}
-      <details style="margin-top:8px"><summary class="sub" style="cursor:pointer;list-style:revert">🔬 The numbers behind it (for options traders)</summary>
-        <div class="sub" style="font-size:11.5px;margin-top:5px;line-height:1.6">
-          ${p.why_this_one||''}<br>
-          <b>Edge:</b> ${s.why}<br><b>Counter:</b> ${s.why_not}<br>
-          Strike ${rf(s.strike)} · ${s.kind} · IV ${(s.iv*100).toFixed(1)}%${s.rvol30?` vs 30d realized ${(s.rvol30*100).toFixed(0)}%`:''} · Δ${s.delta.toFixed(2)} ·
-          breakeven ${rf(s.econ.breakeven)} · theta ${rf(s.econ.theta_day_inr)}/day · mispricing ${s.score_10.toFixed(1)}/10<br>
-          ${s.structure?`Spread: short ${rf(s.structure.short_strike)} / long ${rf(s.structure.long_strike)}, width ${rf(s.structure.width)}<br>`:''}
-          signals: ${Object.entries(s.z).filter(([,v])=>v!=null).map(([k,v])=>k+' '+v.toFixed(2)).join(' · ')||'—'}
-        </div></details>
-    </div></div>`;
-}
-function renderRadarExplain(){
-  const el=document.getElementById('radarWhyOut');if(!el)return;
-  const e=radarState.explain;
-  if(!e){el.innerHTML='';return;}
-  if(e.loading){el.innerHTML='<div class="sub" style="margin-top:6px">Looking up…</div>';return;}
-  if(!e.found){el.innerHTML=`<div class="sub" style="margin-top:6px;color:var(--muted)">${e.message}</div>`;return;}
-  if(e.surfaced){el.innerHTML=`<div class="sub" style="margin-top:6px;color:var(--buy)">✅ ${e.message}</div>`;return;}
-  el.innerHTML=`<div style="margin-top:6px;padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:var(--panel2);font-size:12px;line-height:1.5">
-    <b>${e.headline}</b><br>${e.message}
-    ${e.detail&&Object.keys(e.detail).length?`<br><span class="sub" style="font-family:var(--mono)">${Object.entries(e.detail).map(([k,v])=>k+'='+v).join('  ')}</span>`:''}</div>`;
-}
-function renderRadarBt(){
-  const el=document.getElementById('radarBtOut');if(!el)return;
-  if(radarState.btLoading){el.innerHTML='<div class="sub" style="margin-top:6px">⏳ Replaying the stored chain tape…</div>';return;}
-  const b=radarState.bt;if(!b){el.innerHTML='';return;}
-  if(b.error){el.innerHTML=`<div class="sub" style="margin-top:6px;color:var(--muted)">${b.error}</div>`;return;}
-  const o=b.overall||{};
-  const attrib=Object.entries(b.attribution||{}).map(([k,v])=>
-    `<tr><td>${k}</td><td>${v.n}</td><td>${v.hit_rate!=null?(v.hit_rate*100).toFixed(0)+'%':'—'}</td><td style="color:${v.avg_ret_pct>=0?'var(--buy)':'var(--sell)'}">${v.avg_ret_pct!=null?(v.avg_ret_pct>0?'+':'')+v.avg_ret_pct+'%':'—'}</td></tr>`).join('');
-  el.innerHTML=`<div style="margin-top:8px;padding:9px 11px;border-radius:8px;border:1px solid var(--line);background:var(--panel2);font-size:12px">
-    <b>${b.verdict}</b>
-    <div class="sub" style="margin-top:5px">${b.n} completed · ${b.unresolved} still open (excluded) ·
-      hit ${o.hit_rate!=null?(o.hit_rate*100).toFixed(0)+'%':'—'}${o.ci&&o.ci[0]!=null?` (CI ${(o.ci[0]*100).toFixed(0)}–${(o.ci[1]*100).toFixed(0)}%)`:''} ·
-      avg <b style="color:${o.avg_ret_pct>=0?'var(--buy)':'var(--sell)'}">${o.avg_ret_pct!=null?(o.avg_ret_pct>0?'+':'')+o.avg_ret_pct+'%':'—'}</b> ·
-      after tax <b style="color:${(b.postTax&&b.postTax.avg_ret_pct)>=0?'var(--buy)':'var(--sell)'}">${b.postTax&&b.postTax.avg_ret_pct!=null?(b.postTax.avg_ret_pct>0?'+':'')+b.postTax.avg_ret_pct+'%':'—'}</b></div>
-    ${attrib?`<table class="bttable" style="margin-top:6px"><thead><tr><th>Signal</th><th>Trades</th><th>Hit</th><th>Avg</th></tr></thead><tbody>${attrib}</tbody></table>`:''}
-    <div class="sub" style="margin-top:5px;font-size:11px">${b.assumptions?`Slippage: ${b.assumptions.slippage}. ${b.assumptions.tax}.`:''}</div></div>`;
-}
-function renderRadar(){
-  const el=document.getElementById('radarPanel');if(!el)return;
-  const d=radarState.data;
-  const body=(()=>{
-    if(radarState.loading&&!d)return '<div class="sub" style="padding:14px">⏳ Scanning the options chain…</div>';
-    if(!d)return '<div class="sub" style="padding:14px">—</div>';
-    if(d.error)return `<div class="sub" style="padding:14px;color:var(--sell)">${d.error}</div>`;
-    const nb=(d.buys||[]).length, ns=(d.sells||[]).length;
-    // What the app currently thinks each coin is doing — the thesis every card below rests on.
-    const views=Object.entries(d.views||{}).map(([u,v])=>{
-      const c=v.score==null?'var(--muted)':v.score>=12?'var(--buy)':v.score<=-12?'var(--sell)':'var(--muted)';
-      const tip=v.noView?'No clear trend, so no options trade is suggested on this coin.'
-        :'The same trend read the rest of the dashboard uses.';
-      return `<span class="btmini" style="border-color:${c};color:${c}" title="${tip}">${u}: ${v.label||'—'}</span>`;
-    }).join(' ');
-    const viewBar=views?`<div style="display:flex;gap:5px;flex-wrap:wrap;margin:6px 0 9px;align-items:center"><span class="sub">Current read:</span>${views}</div>`:'';
-    if(!nb&&!ns){
-      const sittingOut=Object.entries(d.views||{}).filter(([,v])=>v.noView).map(([u])=>u);
-      return viewBar+`<div class="empty">${sittingOut.length
-        ? `<b>No trade suggested right now.</b><br>${sittingOut.join(', ')} ${sittingOut.length>1?'have':'has'} no clear direction, and buying an option without a view on where the coin is going is a coin flip that also bleeds money every day. Waiting is a position.`
-        : 'No contract currently fits a clear view at an attractive price.'}${d.errors&&Object.keys(d.errors).length?`<br><span class="sub">Feed issues: ${Object.entries(d.errors).map(([k,v])=>k+' — '+v).join('; ')}</span>`:''}</div>`;
-    }
-    return viewBar+
-      `<h4 class="sec" style="font-size:13px;margin:10px 0 6px">🎯 Simple bets <span class="sub">— you pay a fixed amount, that is all you can lose</span></h4>
-      <div class="cards">${(d.buys||[]).map(radarCard).join('')||'<div class="empty">Nothing that fits the current view at a fair price.</div>'}</div>
-      <h4 class="sec" style="font-size:13px;margin:14px 0 6px">🛡 Income trades <span class="sub">— you get paid upfront and keep it if the coin behaves. More advanced: two legs, and you must place both.</span></h4>
-      <div class="cards">${(d.sells||[]).map(radarCard).join('')||'<div class="empty">None that can be made safely right now.</div>'}</div>`;
-  })();
-  el.innerHTML=`<div class="tradespanel" style="border-color:rgba(129,140,248,.45)">
-    <h3>🎯 Options Radar <span class="sub">— what to bet on, what it costs, what you win</span>
-      <button class="btn" style="padding:2px 9px;font-size:11px" onclick="loadRadar()">↻ rescan</button>
-      ${d&&d.ts?`<span class="sub">· ${new Date(d.ts).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true})}</span>`:''}
-      ${d&&d.state?`<span class="sub">· ${d.state.venue} · ${d.state.storeKind}</span>`:''}</h3>
-    <div style="margin:6px 0">${radarPerfStrip(radarState.perf)}</div>
-    ${d&&d.backfilled?`<div class="sub" style="margin:6px 0;padding:6px 9px;border-radius:7px;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.3);color:#fbbf24">⚠ Some cards below are scored against a <b>Deribit backfilled</b> IV baseline — this venue has not yet accumulated 90 days of its own history.</div>`:''}
-    ${body}
-    <div style="margin-top:12px;padding-top:9px;border-top:1px solid var(--line)">
-      <div style="font-size:12.5px;font-weight:700;margin-bottom:4px">🔍 Why isn't a contract here?</div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
-        <input id="radarWhy" placeholder="Paste a contract id, e.g. BTC-26DEC25-90000-C" style="flex:1;min-width:260px;padding:7px 11px;border-radius:8px;border:1px solid var(--line);background:var(--panel2);color:var(--txt);font-family:var(--mono);font-size:12px">
-        <button class="btn" style="padding:5px 12px;font-size:12px" onclick="radarExplain()">Look up</button></div>
-      <div id="radarWhyOut"></div>
-    </div>
-    <div style="margin-top:10px;padding-top:9px;border-top:1px solid var(--line)">
-      <div style="font-size:12.5px;font-weight:700;margin-bottom:4px">🧪 Backtest the screener</div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
-        <select id="radarBtU" style="padding:6px 10px;border-radius:8px;border:1px solid var(--line);background:var(--panel2);color:var(--txt);font-size:12px"><option>BTC</option><option>ETH</option><option>SOL</option></select>
-        <button class="btn" style="padding:5px 12px;font-size:12px" onclick="radarBacktest()">Replay last 30d of stored chains</button>
-        <span class="sub" style="font-size:11px">fills at mark ± half-spread</span></div>
-      <div id="radarBtOut"></div>
-    </div>
-    <details style="margin-top:10px"><summary class="sub" style="cursor:pointer;list-style:revert;font-weight:700">❓ New to options? Read this first</summary>
-      <div class="sub" style="font-size:12px;line-height:1.6;margin-top:6px">
-        An <b>option</b> is a fixed-price bet with a deadline. You pay a set amount up front — that amount is the <b>most you can lose</b>, no matter how badly the coin moves. In exchange you get to profit if the coin moves the way you bet, <b>before the expiry date</b>.<br><br>
-        A <b>CALL</b> pays off if the coin goes <b>up</b>. A <b>PUT</b> pays off if it goes <b>down</b>. Both expire completely worthless if the move does not happen in time — unlike buying the coin itself, where you can simply wait longer.<br><br>
-        <b>Two things beginners get caught by.</b> First, being right too slowly still loses: the option loses value every single day, which each card shows in rupees per day. Second, you usually need a <i>sizeable</i> move, not just any move — each card states the exact percentage required and how often that has actually happened historically.<br><br>
-        The <b>income trades</b> section is more advanced: you are paid up front and keep it if the coin stays out of a zone, but it is a two-leg trade and you must place both legs — the second one is what caps your loss.
-      </div></details>
-    <p class="small" style="color:var(--muted);margin-top:10px"><b>This is analysis, not investment advice.</b> Each card starts from the app's own read on where the coin is heading, then picks the contract that expresses that view at the best price — it is <b>not</b> a guarantee of direction, and the confidence label is not a probability of profit. Income trades are always shown as capped-loss spreads; a naked short is never surfaced. Figures are pre-fee and assume you can trade near the quoted price. <b>Options routinely expire worthless — only stake money you can afford to lose entirely.</b></p></div>`;
-  renderRadarExplain(); renderRadarBt();
 }
 
 function ladder(s){const v=[s.stop,s.entry,...s.targets],lo=Math.min(...v),hi=Math.max(...v),sp=hi-lo||1,pos=x=>((x-lo)/sp)*100;

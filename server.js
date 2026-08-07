@@ -195,7 +195,7 @@ function buildSetup(sig,tf){
   return {type,hold:P.hold,dir,entryLo:eLo,entryHi:eHi,entry,stop,targets,ret,rrr:(Math.abs(targets[0]-entry)/(Math.abs(entry-stop)||1)),atr,
     riskPct,entryGapPct:gap,support:dir>0?anchor:null,resistance:dir<0?anchor:null,suggestedLev,
     regime: corrShort?'correction':(scalp?'range':(isBreak?'breakout':'trend')),
-    note: corrShort?'₿ Bitcoin is weak — QUICK SHORT to fade the correction: small targets, tight stop, bank fast. Don’t hold for a trend.':(scalp?'Small targets — coin is ranging/choppy (weak trend), so scalp the swing and bank quick with a tight stop. Don’t hold for a big move.':null)};
+    note: corrShort?'₿ Bitcoin is weak — QUICK SHORT to fade the correction: small targets, tight stop, bank fast. Don’t hold for a trend.':(scalp?'Small targets — this is ranging/choppy (weak trend), so scalp the swing and bank quick with a tight stop. Don’t hold for a big move.':null)};
 }
 function actionNow(sig,setup,since,fmt){
   const dir=setup.dir,p=sig.price,t=fmt(since.sinceTime),ago=since.barsAgo;
@@ -644,7 +644,18 @@ function processAsset(asset,data,tf){
   const btSide = btRaw ? {long:{trades:btRaw.longs.trades,winRate:btRaw.longs.winRate,avgRet:btRaw.longs.avgRet},short:{trades:btRaw.shorts.trades,winRate:btRaw.shorts.winRate,avgRet:btRaw.shorts.avgRet}} : null;
   const mtf = multiTfConfirm(data,tf,sig.verdict);   // higher-timeframe agreement (resampled, no extra fetch)
   const confidence = confidenceOf(sig,mtf,bt,setup);
+  // Activity measured from the candles themselves, so EVERY asset class has it — crypto gets a
+  // more accurate override from the exchange's 24h ticker, but stocks, indices and commodities
+  // no longer depend on a crypto-only endpoint to be rankable by movement.
+  const nBack=BARS_24H[tf]||24;
+  const vv=data.vol||[]; let turnover=0,hasVol=false;
+  for(let i=Math.max(0,cl.length-nBack);i<cl.length;i++){
+    const q=+vv[i]||0; if(q>0)hasVol=true; turnover+=q*(cl[i]||0);
+  }
+  const iBack=Math.max(0,cl.length-1-nBack);
+  const chgWin=cl[iBack]>0?(live/cl[iBack]-1)*100:null;
   return {asset,sig,setup,since,action,reasons,scope,bt,btSide,mtf,confidence,dec,isIndex,tf,asof:fmtTime(asofMs),
+    turnover:hasVol?turnover:null, chgWin:chgWin!=null?+chgWin.toFixed(2):null,
     priceTag:asset.src==='cg'?(cryptoMode==='coindcx'?'live · CoinDCX ₹':'live · global ₹'):(marketOpen()?'LIVE (broker)':'prev close'),series:data.close.slice(-80),
     bars:{h:data.high.slice(-24),l:data.low.slice(-24),c:data.close.slice(-24)}};   // compact OHLC window for the Quick-tab mini candlesticks
 }
@@ -831,19 +842,22 @@ async function scan(tab,tf){
     try{const ltp=await upstoxLTP(keys);
       ok.forEach(r=>{if(r.asset.src==='upstox'){const k=keyOf[r.asset.sym];if(k&&ltp[k]){r.sig.price=ltp[k];/* refresh action vs live price */r.action=actionNow(r.sig,r.setup,r.since,fmtTime);}}});}catch(e){}
   }
-  // attach the 🔥 volume/activity metrics to every crypto result so BOTH panels show the same score
-  if(tab==='Crypto'||tab==='All'){try{
-    const t24=DEMO?{}:await ticker24();
-    ok.forEach(r=>{if(r.asset.src==='cg'){const v=volMetrics(r,t24,tf);if(v)r.vol=v;}});
-  }catch(e){}}
-  // setup tracker: register the scalps this scan surfaces + update statuses with these live prices
-  if(tab==='Crypto'||tab==='All'){try{
-    const cg=ok.filter(r=>r.asset.src==='cg');
-    trackSetups(cg,tf,'quick');
-    markReversals(cg,tf);        // flag filled trades whose signal has flipped against them
-    const pm={};cg.forEach(r=>{if(r.sig.price>0)pm[r.asset.sym]=r.sig.price;});
+  // attach the 🔥 volume/activity metrics to EVERY result, whatever the asset class, so both
+  // panels show the same score for stocks, indices and commodities as they do for coins
+  try{
+    const needT24=(tab==='Crypto'||tab==='All')&&!DEMO;
+    const t24=needT24?await ticker24():{};
+    ok.forEach(r=>{const v=volMetrics(r,r.asset.src==='cg'?t24:{},tf);if(v)r.vol=v;});
+  }catch(e){}
+  // setup tracker: register the scalps this scan surfaces + update statuses with these live prices.
+  // Runs for every asset class — an index or commodity setup deserves the same follow-through
+  // as a coin, so a trade you took never disappears without an outcome.
+  try{
+    trackSetups(ok,tf,'quick');
+    markReversals(ok,tf);        // flag filled trades whose signal has flipped against them
+    const pm={};ok.forEach(r=>{if(r.sig.price>0)pm[r.asset.sym]=r.sig.price;});
     sweepSetups(pm);
-  }catch(e){}}
+  }catch(e){}
   const cryptoAssets=uni.filter(a=>a.src==='cg');
   const cryptoFailed = cryptoAssets.length>0 && !DEMO && !ok.some(r=>r.asset.src==='cg');
   const out={tab,tf,analyzed:ok.length,total:uni.length,results:ok,ts:Date.now(),demo:DEMO,loggedIn:li,keyOf,cryptoMode,usdtInr:priceRate(),rateSrc:priceRateSrc(),
@@ -913,27 +927,43 @@ async function ticker24(){
 // Shared by Volume Movers and Quick Trades so both panels show the SAME score for the same coin.
 // The score is an ACTIVITY gauge (is this coin actually moving, with a real crowd?) — NOT trade quality;
 // setup quality stays the separate Confidence %.
+// Per-asset-class calibration. A 3% day is routine for crypto and remarkable for an index,
+// so one shared threshold would either flood the list with coins or never surface an index.
+const VOL_CAL={
+  Crypto:      {chgFull:12, hotChg:3.0, atrFull:3.0},
+  Commodity:   {chgFull:5,  hotChg:1.5, atrFull:1.5},
+  "ETF/Index": {chgFull:4,  hotChg:1.2, atrFull:1.2},
+  Stock:       {chgFull:6,  hotChg:2.0, atrFull:1.8}
+};
+const volCal=cls=>VOL_CAL[cls]||VOL_CAL.Stock;
+
 function volMetrics(r,stats,tf){
   if(!r||!r.sig)return null;
+  const cal=volCal(r.asset&&r.asset.cls);
   const st=(stats&&stats[r.asset.tk||""])||{};
-  let chg=st.chg;
-  if(chg==null&&Array.isArray(r.series)&&r.series.length>2){
-    const c=r.series, i=Math.max(0,c.length-1-(BARS_24H[tf]||24));   // exchange stat unavailable → measure from this scan's own candles
-    if(c[i]>0)chg=(c[c.length-1]/c[i]-1)*100;
-  }
-  const surge=r.sig.volRatio!=null?+r.sig.volRatio:null;             // latest closed bar vs the coin's own 20-bar average
+  // Exchange 24h stats when we have them (crypto); otherwise the value measured from this
+  // asset's own candles in processAsset.
+  let chg=st.chg; if(chg==null)chg=r.chgWin;
+  const qv=st.qv||r.turnover||0;
+  const surge=r.sig.volRatio!=null?+r.sig.volRatio:null;   // latest closed bar vs its own 20-bar average
   const atrPct=(r.sig.atr>0&&r.sig.price>0)?r.sig.atr/r.sig.price*100:0;
-  // 55% size of the 24h move · 30% volume surge vs the coin's normal · 15% per-bar range (scalp room)
-  const mChg=Math.min(1,Math.abs(chg||0)/12), mSurge=surge!=null?Math.min(1,surge/3):0.35, mAtr=Math.min(1,atrPct/3);
+  // 55% size of the move · 30% volume surge vs normal · 15% per-bar range (scalp room)
+  const mChg=Math.min(1,Math.abs(chg||0)/cal.chgFull);
+  const mSurge=surge!=null?Math.min(1,surge/3):0.35;
+  const mAtr=Math.min(1,atrPct/cal.atrFull);
   return {score:Math.round(100*(0.55*mChg+0.30*mSurge+0.15*mAtr)),
     chg24:chg!=null?+(+chg).toFixed(2):null, surge:surge!=null?+surge.toFixed(2):null,
-    qv:st.qv||0, atrPct:+atrPct.toFixed(2),
-    // "real participation" gate — the same bar Volume Movers requires to list a coin at all
-    hot:((surge!=null&&surge>=1.5)||(chg!=null&&Math.abs(chg)>=3))};
+    qv, atrPct:+atrPct.toFixed(2), cls:r.asset&&r.asset.cls,
+    // "real participation" gate, scaled to what a big move means for THIS asset class.
+    // Indices carry no volume in the candle feed, so they qualify on movement alone.
+    hot:((surge!=null&&surge>=1.5)||(chg!=null&&Math.abs(chg)>=cal.hotChg))};
 }
-async function topMovers(tf){
-  const ck="movers:"+tf; const hit=cGet(ck,TTL_CRYPTO); if(hit)return {...hit,cached:true};
-  const d=await scan("Crypto",tf);
+async function topMovers(tab,tf){
+  tab=tab||"Crypto";
+  const ck="movers:"+tab+":"+tf;
+  const ttl = tab==='Crypto' ? TTL_CRYPTO : (marketOpen()?TTL_INTRA:TTL_DAILY);
+  const hit=cGet(ck,ttl); if(hit)return {...hit,cached:true};
+  const d=await scan(tab,tf);
   const rows=[],trackable=[];
   (d.results||[]).forEach(r=>{
     if(!r||!r.sig||!r.setup)return;
@@ -943,7 +973,7 @@ async function topMovers(tf){
     const {score,chg24,surge,qv,atrPct}=v;
     if(r.sig.verdict!=='HOLD'&&r.action&&SETUP_ACTIONABLE.has(r.action.kind))trackable.push(r);
     const s=r.setup;
-    rows.push({sym:r.asset.sym,tk,name:r.asset.name||tk,score,chg24,surge,qv,atrPct,
+    rows.push({sym:r.asset.sym,tk,name:r.asset.name||tk,cls:r.asset.cls,score,chg24,surge,qv,atrPct,
       live:r.sig.price,dec:r.dec,verdict:r.sig.verdict,tradeScore:r.sig.score,
       setup:{dir:s.dir,type:s.type,regime:s.regime,entryLo:s.entryLo,entryHi:s.entryHi,entry:s.entry,stop:s.stop,riskPct:s.riskPct,
         targets:s.targets,ret:s.ret,rrr:s.rrr,suggestedLev:s.suggestedLev,hold:s.hold,note:s.note},
@@ -953,8 +983,12 @@ async function topMovers(tf){
   rows.length=Math.min(rows.length,MOVERS_TOP);
   rows.forEach((x,i)=>x.rank=i+1);
   try{const keep=new Set(rows.map(x=>x.sym));trackSetups(trackable.filter(r=>keep.has(r.asset.sym)),tf,'mover');}catch(e){}
-  const out={tf,movers:rows,scanned:(d.results||[]).length,ts:Date.now(),demo:DEMO,cryptoMode,
-    btc:d.btc||null,usdtInr:d.usdtInr||priceRate(),rateSrc:d.rateSrc||priceRateSrc()};
+  const out={tab,tf,movers:rows,scanned:(d.results||[]).length,ts:Date.now(),demo:DEMO,cryptoMode,
+    btc:d.btc||null,usdtInr:d.usdtInr||priceRate(),rateSrc:d.rateSrc||priceRateSrc(),
+    // Non-crypto needs a broker session and an open market to be actionable — say which is
+    // missing rather than returning a silently empty list.
+    loggedIn:d.loggedIn!==false, marketOpen:marketOpen(),
+    needsLogin: tab!=='Crypto' && !DEMO && d.loggedIn===false};
   if(rows.length)cSet(ck,out);
   return out;
 }
@@ -986,6 +1020,7 @@ function trackSetups(results,tf,src){
     const ex=SETUPS.active.find(x=>x.id===id);
     if(ex){ex.seen=now;if(r.sig.price>0)ex.live=r.sig.price;if(src&&ex.src.indexOf(src)<0){ex.src+='+'+src;setupsDirty=true;}continue;}
     SETUPS.active.push({id,sym:r.asset.sym,tk:r.asset.tk||'',name:r.asset.name||r.asset.tk||r.asset.sym,tf,dir:s.dir,src:src||'scan',
+      cls:r.asset.cls||'', tab:r.asset.src==='cg'?'Crypto':'All',   // which quote feed can price it later
       entryLo:Math.min(s.entryLo,s.entryHi),entryHi:Math.max(s.entryLo,s.entryHi),stop:s.stop,stop0:s.stop,
       targets:(s.targets||[]).slice(0,3),ret:(s.ret||[]).slice(0,3),rrr:s.rrr,regime:s.regime,dec:r.dec||2,
       conf:r.confidence?{label:r.confidence.label,pct:r.confidence.pct}:null,
@@ -1057,7 +1092,21 @@ function sweepSetups(prices,now){
   }
   saveSetups();
 }
-async function setupsSweep(){ try{ const q=await liveQuotes('Crypto'); sweepSetups(q); }catch(e){} }
+// Sweep across EVERY asset class the tracker holds positions in, not just crypto — otherwise an
+// index or commodity setup would sit at "waiting" forever because nothing ever priced it.
+// 'All' covers stocks, ETFs/indices, commodities and crypto in a single quote call.
+async function setupsSweep(){
+  try{
+    const tabs=new Set();
+    for(const x of SETUPS.active)tabs.add(x.tab||'All');
+    if(!tabs.size)return;
+    const px={};
+    for(const t of tabs){
+      try{ Object.assign(px,await liveQuotes(t==='Crypto'?'Crypto':'All')); }catch(e){}
+    }
+    sweepSetups(px);
+  }catch(e){}
+}
 // forward record: of the setups that actually FILLED and resolved, how many hit Target 1 before the stop?
 const SETUP_FILLED_STATUS=['target','stopped','banked','timeout+','timeout-'];
 function setupStats(){
@@ -1154,60 +1203,6 @@ async function researchCoin(rawSym,horizon){
 }
 // Paper-trading engine (simulation) — reuses this server's scan + live quotes. Never places real orders.
 const paper = require('./paper.js')({ scan, liveQuotes, dir:__dirname, rate:()=>cdxUsdtInr() });
-
-/* ===== Options Radar — mispricing screener over the options chain. Analysis only; it never
-   places orders and never surfaces a naked short. Inert unless enabled in config. ===== */
-const RADAR_CFG = CFG.optionsRadar || {};
-// declared before the radar closures that read them, so the dependency is obvious
-const RVOL_CACHE={}, VIEW_CACHE={};
-let radar=null;
-if(RADAR_CFG.enabled!==false){
-  try{
-    radar = require('./options/radar.js').create({
-      config: RADAR_CFG,
-      dir: __dirname,
-      venue: RADAR_CFG.venue || 'deribit',
-      underlyings: RADAR_CFG.underlyings,
-      coindcx: RADAR_CFG.coindcx || {},
-      // Deribit quotes in USD; convert for the ₹ economics on the cards.
-      toInr: v => (cryptoMode==='coindcx' && cdxUsdtInr()>0) ? v*cdxUsdtInr() : v*(fxRate||86),
-      // 30d realized vol of the underlying, reused from the existing crypto candle feed.
-      realizedVol: (u)=>{ const c=RVOL_CACHE[u]; return (c&&Date.now()-c.at<3600e3)?c.v:null; },
-      // THE THESIS. Reuses the SAME engine that drives Quick Trades, so an options card can
-      // never contradict what the rest of the dashboard says about the coin.
-      view: (u)=>{ const c=VIEW_CACHE[u]; return (c&&Date.now()-c.at<3600e3)?c.v:null; },
-      // Daily closes, for the honest "how often has it actually moved this much?" base rate.
-      closes: (u)=>{ const c=RVOL_CACHE[u]; return c?c.closes:null; }
-    });
-  }catch(e){ console.log('  Options Radar disabled:', e.message); }
-}
-// 30d realized vol per underlying, refreshed hourly off the daily candles we already fetch.
-async function refreshRvol(){
-  if(!radar)return;
-  for(const u of (RADAR_CFG.underlyings||['BTC','ETH','SOL'])){
-    try{
-      const asset = cryptoMode==='coindcx'
-        ? {sym:u+'INR',pair:'I-'+u+'_INR',binance:u+'USDT',tk:u,name:u,cls:'Crypto',src:'cg'}
-        : {sym:u+'USDT',binance:u+'USDT',tk:u,name:u,cls:'Crypto',src:'cg'};
-      const d=await loadCrypto(asset,'daily');
-      const closes=(d.close||[]);
-      const V=require('./options/vol.js');
-      const rv=V.realizedVol(closes.slice(-31),365);
-      if(isFinite(rv)&&rv>0)RVOL_CACHE[u]={v:rv,at:Date.now(),closes:closes.slice(-400)};
-      // Directional view from the SAME engine the dashboard uses, on closed candles only.
-      if(closes.length>=42){
-        const cl=closes.slice(0,-1),hi=(d.high||[]).slice(0,-1),lo=(d.low||[]).slice(0,-1);
-        const sig=computeSignal(cl,hi,lo,20,(d.vol||[]).slice(0,-1));
-        VIEW_CACHE[u]={at:Date.now(),v:{
-          score:sig.score, verdict:sig.verdict,
-          label: sig.score>=20?'clearly rising':sig.score>=12?'leaning up'
-               : sig.score<=-20?'clearly falling':sig.score<=-12?'leaning down':'no clear direction',
-          regimeUp:sig.regimeUp, adx:sig.adx
-        }};
-      }
-    }catch(e){}
-  }
-}
 
 /* ===== Telegram alerts — ping on a High-confidence quick scalp. Token lives ONLY on the server
    (env var or config.json); it is NEVER sent to the browser or committed to GitHub. Inert until set. ===== */
@@ -1324,28 +1319,8 @@ async function handler(req,res){
     if(p==="/api/crypto-signals" && req.method==="POST"){
       const body=await readBody(req);let payload;try{payload=JSON.parse(body);}catch(e){return sendJSON(res,{error:"bad json"},400);}
       return sendJSON(res,cryptoSignalsFrom(payload));}
-    if(p==="/api/movers"){   // 🔥 coins with the biggest volume-backed movement right now, scalp plan attached
-      return sendJSON(res,await topMovers(u.searchParams.get("tf")||"5m"));}
-    if(p.startsWith("/api/options/")){   // 🎯 Options Radar — mispricing screener (analysis only)
-      if(!radar)return sendJSON(res,{error:"Options Radar is disabled in config."},503);
-      if(p==="/api/options/scan"){
-        const d=await radar.scan();
-        return sendJSON(res,{...d,state:radar.state()});
-      }
-      if(p==="/api/options/explain"){    // "why isn't X here?"
-        return sendJSON(res,radar.explain(u.searchParams.get("id")||""));
-      }
-      if(p==="/api/options/performance"){
-        return sendJSON(res,radar.performance(parseInt(u.searchParams.get("days"))||90));
-      }
-      if(p==="/api/options/backtest"){
-        const und=u.searchParams.get("underlying")||"BTC";
-        const days=parseInt(u.searchParams.get("days"))||30;
-        const hold=u.searchParams.get("hold")?parseFloat(u.searchParams.get("hold")):null;
-        return sendJSON(res,await radar.backtest(und,Date.now()-days*864e5,Date.now(),{holdDays:hold}));
-      }
-      return sendJSON(res,{error:"unknown options route"},404);
-    }
+    if(p==="/api/movers"){   // 🔥 biggest volume-backed movement right now, scalp plan attached
+      return sendJSON(res,await topMovers(u.searchParams.get("tab")||"Crypto",u.searchParams.get("tf")||"5m"));}
     if(p==="/api/setups"){   // 📌 tracked setups: every recommendation followed to its outcome + forward hit-rate
       const tfq=u.searchParams.get("tf")||null, lim=Math.min(200,parseInt(u.searchParams.get("limit"))||40);
       const active=SETUPS.active.filter(x=>!tfq||x.tf===tfq).slice().sort((a,b)=>b.born-a.born).slice(0,60)
@@ -1402,12 +1377,6 @@ if(require.main===module){
   setInterval(()=>{ paper.tick().catch(()=>{}); }, 60000);
   // Setup-tracker sweep — follow every recommended scalp to its stop/target/expiry, once a minute.
   setInterval(()=>{ setupsSweep().catch(()=>{}); }, 60000);
-  // Options Radar — realized-vol refresh hourly; the chain is scanned on request.
-  if(radar){
-    console.log(`  Options Radar: ON (venue ${radar.venue}, store ${radar.state().storeKind})`);
-    refreshRvol().catch(()=>{});
-    setInterval(()=>{ refreshRvol().catch(()=>{}); }, 3600000);
-  }
   // Telegram alert loop — scan for High-confidence quick scalps every 3 min (inert until a bot token is configured).
   if(TG_TOKEN){ console.log('  Telegram alerts: ON (chat auto-detected from whoever messages the bot)'); setInterval(()=>{ alertScan().catch(()=>{}); }, 180000); setTimeout(()=>alertScan().catch(()=>{}),15000); }
   else console.log('  Telegram alerts: off (set TELEGRAM_BOT_TOKEN to enable — chat ID optional)');
