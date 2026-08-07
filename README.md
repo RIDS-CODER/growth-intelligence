@@ -65,14 +65,35 @@ That's it — live prices for the rest of the day.
 
 ---
 
-## 🔥 Volume Movers — scalp the coins that are actually moving
+## 🔥 Volume Movers — what is actually moving right now
 
-Click **🔥 Volume Movers** on the dashboard to see the crypto coins with the **biggest volume-backed
-movement right now**, ranked by a 0–100 **volume score** (shown as a 🔥 badge on **both** panels):
+Click **🔥 Volume Movers** on the dashboard to see what has the **biggest volume-backed movement right
+now**, ranked by a 0–100 **volume score** (shown as a 🔥 badge on **both** panels).
 
-- **55% — size of the 24h move** (from the exchange's own 24h stats),
-- **30% — volume surge** vs that coin's *own* 20-bar average (a real crowd, not a thin wick),
+**⚡ Quick Trades, 🔥 Volume Movers and 📌 Tracked setups all work across four asset classes** — pick
+one with the tabs at the top of either panel:
+
+| | Notes |
+|---|---|
+| **₿ Crypto** | 24×7, no login needed |
+| **📊 Index / ETF** | NIFTY, Bank NIFTY, SENSEX and the liquid ETFs |
+| **🛢 Commodities** | MCX near-month futures (auto-rolling) plus gold/silver ETF proxies |
+| **📈 Stocks** | the full NSE universe already in the scanner |
+
+The three non-crypto classes need an **Upstox login** and trade on **NSE/MCX hours** — the panel says
+which of the two is missing instead of showing an unexplained empty list. Everything is priced in ₹
+there, so the $ USDT toggle only appears on Crypto.
+
+The score is calibrated **per asset class**, because a 3% day is routine for a coin and remarkable for
+an index — one shared threshold would either flood the list with crypto or never surface an index:
+
+- **55% — size of the 24h move**, scaled to what a big move means for that class,
+- **30% — volume surge** vs that instrument's *own* 20-bar average (a real crowd, not a thin wick),
 - **15% — bar range** (enough room per bar to make a scalp worth taking).
+
+Crypto uses the exchange's own 24h ticker where available; every other class measures the same things
+from its candles, so nothing depends on a crypto-only endpoint. Indices carry no volume in the feed,
+so they qualify on movement alone.
 
 **What the score means:** it answers *"is this coin actually moving, with a real crowd behind it?"* — high score =
 the move is fast and well-funded, so a scalp reaches its target sooner and you can get filled without slippage.
@@ -81,7 +102,7 @@ It is an **activity gauge, not a buy signal and not trade quality**. Setup quali
 🔥 high + ◆ Low = lots of noise, no edge (stand aside); 🔥 low + ◆ High = a clean setup that may take a while
 to pay. The same score appears on Quick Trades cards, where **🔥 Sort by volume** ranks setups by it.
 
-A coin only qualifies as a mover with **real participation**: a volume surge ≥ 1.5× normal, or a 24h move ≥ 3%.
+An instrument only qualifies as a mover with **real participation**: a volume surge ≥ 1.5× normal, or a move past its class threshold (3% crypto · 2% stocks · 1.5% commodities · 1.2% index).
 Each mover card carries the engine's actual **quick-scalp plan** for that timeframe — a labeled entry zone,
 stop and three targets in their own boxes, plus R:R and confidence — or shows **WATCH** when the coin is moving
 but there's no clean entry (don't chase spikes). Timeframes 5m / 15m / 30m / 1h, auto-refreshing every 45s.
@@ -106,7 +127,7 @@ Small residual differences are normal even in CoinDCX mode: panels refresh on a 
 for a few seconds, so a fast-moving coin can read slightly stale; and an exchange screen shows bid/ask around the
 last trade. If ₹ is off by a *consistent* few percent rather than jittering, that's the premium above, not lag.
 
-API: `GET /api/movers?tf=5m` · settings: `moversTop` in `config.json` (or env `MOVERS_TOP`, default 20 coins).
+API: `GET /api/movers?tab=Crypto&tf=5m` · settings: `moversTop` in `config.json` (or env `MOVERS_TOP`, default 20 coins).
 
 ### 📌 Tracked setups — recommendations never just vanish
 
@@ -145,103 +166,6 @@ price, so a once-a-minute sampling gap doesn't overstate losses.
 Together these build a **forward record** — a measured, real-time hit rate of the recommendations
 themselves, distinct from the backtest. Statuses are sampled ~once a minute (state survives restarts via
 `setups.json`). API: `GET /api/setups` (`?tf=`, `?limit=`).
-
-## 🎯 Options Radar — what to bet on, what it costs, what you win
-
-Click **🎯 Options Radar**. Every card answers five questions in plain English, with no options
-jargon anywhere in the user-facing text:
-
-> 📈 **BTC goes UP before 13 Aug**
-> Buy the BTC ₹88,40,000 CALL expiring 13 Aug
-> **It costs you** ₹1,52,252 · **Most you can lose** ₹1,52,252 · **Days left** 10
-> ✅ **You win if** BTC is above ₹89,92,252 on 13 Aug — a 5.8% move from here
-> ❌ **You lose if** it doesn't get there: the option expires worthless and you lose the whole ₹1,52,252
-> ⏳ Waiting costs about **₹13,057 a day** if BTC sits still
-> 🎲 Historically BTC has made that move in **3 of the last 190** 10-day stretches (2%) — a rare move
-
-Plus a payoff table showing exactly what you end up with at each price on expiry day, and a
-**⚠ Before you do this** block. Greeks, implied vol and the z-scores live behind a
-*"the numbers behind it"* toggle for anyone who wants them.
-
-### How a card is chosen — two steps, in this order
-
-1. **Direction first.** Each card starts from the app's **own trend read on the coin** — the same
-   engine that drives Quick Trades, so an options card can never contradict the rest of the
-   dashboard. **If there is no clear trend, no card is shown for that coin at all**: the panel says
-   so explicitly. Buying an option with no view is a coin flip that also bleeds money every day.
-2. **Then the cheapest way to express it.** Among the contracts that profit if that view is right,
-   the vol maths below picks the one priced most attractively versus the rest of the chain. Mispricing
-   decides *which contract*, never *whether to trade*.
-
-Set `optionsRadar.requireDirectionalView: false` for pure relative-value mode (expert use — it will
-surface cheap contracts with no thesis attached).
-
-**Simple bets** are single-leg buys: you pay a fixed amount and that is the entire risk.
-**Income trades** are two-leg credit spreads, clearly marked as more advanced, where you are paid
-upfront and keep it if the coin behaves — always with a capped, stated maximum loss.
-
-### The mispricing engine underneath
-
-Ranked by **how far each contract sits from a fitted fair value** — a relative-value measure, **not**
-a forecast.
-
-**Six signals**, z-scored and blended with weights from `config.json → optionsRadar.weights`
-(nothing hardcoded). A signal that lacks data **abstains** rather than counting as neutral:
-
-| Signal | What it measures |
-|---|---|
-| IV − 30d realized vol | Is implied vol above or below what the coin actually does |
-| IV percentile | Where IV sits in its own 90-day range for that tenor/delta bucket |
-| Smile residual | Distance from its expiry's own fitted vol curve (leave-one-out) |
-| Term-structure slope | This expiry's ATM variance vs the expiries either side |
-| Theta efficiency | Daily bleed against the move the option can realistically make |
-| Funding + basis tilt | Directional overlay — **off by default**, user-toggleable |
-
-**Hard filters** run first: spread < 8% of premium, OI above a floor, |delta| 0.15–0.70, > 12h to expiry.
-
-### Guardrails
-
-- **Never a naked short.** Every SELL is converted to a defined-risk vertical with a capped max loss in ₹.
-  If no liquid protective wing exists, the signal is **suppressed entirely** rather than shown.
-- **The record is always on screen** — rolling 90d hit rate, 95% confidence interval and average return
-  per signal, including when it is bad, with an explicit "too few trades to be meaningful" label.
-- **"Why isn't X here?"** — paste any contract id and get the exact filter it failed with the measured
-  value and the limit, or the score that missed the top 3. Answers come from the recorded pipeline
-  result, not a re-derivation.
-- **Analysis, not investment advice** — stated on the panel, and no card offers one-tap execution.
-- **India VDA tax drag** on every P&L projection. Default 30% + 4% cess = 31.2% on gains with **no loss
-  offset**; that asymmetry means a 50%-hit-rate strategy is loss-making after tax, which the backtest
-  reports explicitly. Treatment of crypto derivatives in India is genuinely unsettled, so the model is
-  configurable and is an estimate, not tax advice.
-
-### Backtest
-
-**🧪 Replay last 30d of stored chains** re-scores the stored tape with the live scoring service, fills at
-**mark ± half the spread** on entry and exit (both legs of a spread), and reports hit rate and average
-return **attributed to whichever signal actually drove each trade** — with sample sizes and Wilson
-confidence intervals, so a 12-trade sample cannot pass as an edge. Positions still open at the end of the
-tape are excluded rather than marked to last price. Both gross and post-VDA-tax figures are shown.
-
-The tape builds as the radar scans, so backtests only cover history the screener has actually seen.
-
-### Data sources and the cold start
-
-CoinDCX publishes **no documented public options-chain endpoint**, so the radar runs behind a venue
-adapter: **Deribit is live** (documented public API, and the spec's backfill source anyway), and the
-CoinDCX adapter sits behind the same interface — swapping it in changes one function, `fetchRaw`.
-Set `optionsRadar.venue` to choose.
-
-The 90-day IV baseline is keyed by **bucket** (underlying × tenor × delta), not by contract, because a
-weekly option does not live 90 days. Bucket IV is the fitted smile sampled at a **fixed delta**, so the
-series stays continuous across strike and expiry rolls. Any card scored against Deribit backfill instead
-of native CoinDCX history carries a **⚠ backfilled baseline** badge until 90 days of local data exists.
-
-> **Persistence matters here.** History lives in SQLite (`node:sqlite`, Node 22+; falls back to NDJSON on
-> Node 18). Render/DigitalOcean filesystems are **ephemeral**, so point `OPTIONS_DB` at a persistent
-> volume — otherwise every redeploy resets the baseline and cards stay permanently "backfilled".
-
-Tests: `node --test options/*.test.js` (68 covering the vol math, guardrails and backtest accounting).
-Design notes: [`docs/options-radar-design.md`](docs/options-radar-design.md).
 
 ## How prices stay accurate
 
