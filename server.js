@@ -1986,19 +1986,31 @@ function fmtPosAlert(p,kind,px,verdict){
     const u=v/r; return "$"+u.toFixed(u<5?4:2)+" ("+inr+")"; };
   const pnl=posPnl(p,px), side=p.side>0?"LONG":"SHORT";
   const pl=pnl==null?"":`\nP&L <b>${pnl>=0?"+":""}${pnl}%</b> from your ${f(p.entry)} entry`;
-  if(kind==="watch")
+  if(kind==="watch"){
+    // Say up front if this trade is already fighting the signal. That is a normal, deliberate way
+    // to trade a bounce — but you should know it, and it explains why no alarm will follow.
+    const counter=p.counterAtEntry
+      ? `\n\n⚠️ <b>Heads up: the signal already says ${p.entryVerdict} on ${p.tf}</b>, so this is a counter-trend trade from the start. That is a choice, not a problem — but it does mean you have no signal behind you. You will NOT be pinged for this; only for a change.`
+      : "";
     return `👀 <b>Now watching your ${side} ${p.tk||p.sym}</b>\n`+
-      `Entry ${f(p.entry)} · ${p.tf} chart · live ${f(px)}\n`+
-      `You will get one message here if the signal turns against this trade, and one if it comes back. Nothing in between.`;
-  if(kind==="reversed")
+      `Entry ${f(p.entry)} · ${p.tf} chart · live ${f(px)}${p.entryVerdict?` · signal now <b>${p.entryVerdict}</b>`:""}\n`+
+      `You will get one message here if the signal turns against this trade, and one if it comes back. Nothing in between.${counter}`;
+  }
+  if(kind==="reversed"){
+    // Only ever sent on a real flip. If the trade began counter-trend, the signal must have come
+    // onside and gone again — so the wording has to hold in both cases without over-claiming.
+    const lost=p.counterAtEntry
+      ? `<b>The signal came onside and has now turned again.</b>`
+      : `<b>The reason you entered is gone.</b>`;
     return `⚠️ <b>YOUR TRADE REVERSED — ${p.tk||p.sym}</b>\n`+
       `Your <b>${side}</b> is now against the signal (<b>${verdict}</b> on ${p.tf}).${pl}\n`+
       `Live ${f(px)}\n\n`+
-      `<b>The reason you entered is gone.</b> Either close it, or move your stop to where you would admit you were wrong — do not widen it and hope.\n`+
+      `${lost} Either close it, or move your stop to where you would admit you were wrong — do not widen it and hope.\n`+
       `<i>Simulation / not financial advice — verify on your platform.</i>`;
+  }
   if(kind==="onside")
-    return `✅ <b>Back onside — ${p.tk||p.sym}</b>\n`+
-      `The signal agrees with your <b>${side}</b> again (<b>${verdict}</b> on ${p.tf}).${pl}\nLive ${f(px)}`;
+    return `✅ <b>Signal now agrees with you — ${p.tk||p.sym}</b>\n`+
+      `It reads <b>${verdict}</b> on ${p.tf}, which backs your <b>${side}</b>.${pl}\nLive ${f(px)}`;
   return "";
 }
 async function positionsSweep(){
@@ -2012,10 +2024,22 @@ async function positionsSweep(){
     // HOLD is not a reversal — it means the engine has no opinion, which is not the same as
     // disagreeing with you. Only an explicitly opposite verdict counts.
     const against = p.side>0 ? s.verdict==="SELL" : s.verdict==="BUY";
-    if(against&&!p.rev){
+    /* A REVERSAL IS A CHANGE, NOT A COMPARISON.
+       This used to be a stateless test — "does the signal disagree with you right now?" — with no
+       memory of what the signal said when you entered. So a deliberately counter-trend trade was
+       branded REVERSED the instant it was added, under a message reading "the reason you entered
+       is gone" when there had never been one. That is not an edge case for this app: 🎢 Dump &
+       Bounce exists to buy bounces in coins whose signal is still SELL, so its own recommendations
+       tripped it every time.
+       The baseline is now recorded at entry and only a TRANSITION is an event. Entering against
+       the signal is a choice; the signal turning on you afterwards is news. */
+    const was = p.against;
+    p.against = against;
+    if(was===undefined) posDirty=true;                 // first sight (or a pre-upgrade record): seed, never alert
+    else if(against&&!was){
       p.rev=Date.now(); p.alerts=(p.alerts||0)+1;
       if(TG_TOKEN&&p.chat){ const r=await tgSend(p.chat,fmtPosAlert(p,"reversed",s.price,s.verdict)); if(r.ok)sent++; }
-    }else if(!against&&p.rev){
+    }else if(!against&&was){
       delete p.rev; p.alerts=(p.alerts||0)+1;
       if(TG_TOKEN&&p.chat){ const r=await tgSend(p.chat,fmtPosAlert(p,"onside",s.price,s.verdict)); if(r.ok)sent++; }
     }
@@ -2036,7 +2060,13 @@ async function addPosition(b){
     created:Date.now(),status:"open",alerts:0,note:String(b.note||"").slice(0,120)};
   POSITIONS.push(p); posDirty=true;
   try{ const s=await positionSignal(p); p.price=s.price; p.verdict=s.verdict; p.pnlPct=posPnl(p,s.price);
-       if(p.side>0?s.verdict==="SELL":s.verdict==="BUY")p.rev=Date.now(); }catch(e){ p.err=String(e.message||e).slice(0,60); }
+       // Record the baseline instead of raising a flag. If the signal already disagrees, that is a
+       // COUNTER-TREND entry — a legitimate deliberate choice, not a reversal — and it is said
+       // plainly in the confirmation rather than dressed up as an alarm.
+       p.entryVerdict=s.verdict;
+       p.against = p.side>0 ? s.verdict==="SELL" : s.verdict==="BUY";
+       p.counterAtEntry = p.against;
+     }catch(e){ p.err=String(e.message||e).slice(0,60); }
   // Confirm to the chosen recipient immediately — it proves the alert route works before it matters.
   if(TG_TOKEN&&p.chat&&p.price>0){ try{ await tgSend(p.chat,fmtPosAlert(p,"watch",p.price)); }catch(e){} }
   savePositions();

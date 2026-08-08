@@ -361,8 +361,22 @@ reversed doesn't spam you.
   internally and converted on the way in, so a CoinDCX fill typed as `0.0067` is not silently read as
   ₹0.0067. Telegram messages quote crypto in **both** currencies, since an alert that says only
   "₹0.59" is unrecognisable on a phone.
+- **A reversal is a CHANGE, not a comparison.** The signal you entered against is recorded as the
+  baseline, and only a *transition* is an event. So four distinct states, not two:
+
+  | | |
+  |---|---|
+  | ✅ **signal agrees** | it backs your side |
+  | • **no clear signal** | HOLD — no opinion, which is not the same as disagreeing |
+  | ↩ **counter-trend** | it disagreed when you entered *and still does* — a deliberate choice, **no alert** |
+  | ⚠ **REVERSED** | it agreed (or was neutral) and has since **turned on you** — this is what pings you |
+
+  This matters because it is the *main* case here, not an edge case: 🎢 Dump & Bounce exists to buy
+  bounces in coins the engine still rates SELL, so a stateless "does the signal disagree right now?"
+  test branded the app's own recommendations REVERSED the instant you added them. The confirmation
+  message tells you when a trade starts counter-trend, so silence afterwards isn't mistaken for a fault.
 - **HOLD is not a reversal.** The engine having no opinion is not the same as it disagreeing with
-  you, so only an explicitly opposite verdict raises the flag.
+  you, so only an explicitly opposite verdict counts either way.
 - Checked **every 2 minutes** server-side; the panel refreshes every 30s while open.
 - It **never places or closes anything** on your exchange. It only tells you.
 - Works without Telegram too — you just get the panel instead of the pings.
