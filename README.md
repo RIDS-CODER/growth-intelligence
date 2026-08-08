@@ -225,6 +225,54 @@ size is a different animal and isn't counted. Each card shows this coin's median
 duration in hours, its live 4h state, and the volume on the current leg versus normal: a squeeze
 with a real crowd behind it is a squeeze; a spike on nothing is a wick.
 
+### 🧪 Did the plan actually work?
+
+Under the levels on every card is the number that decides whether to take the trade: **these exact
+levels, replayed on this coin's own tape.** Not "what did buying a dip return" — that's a generic
+question — but *"if you had taken this buy zone, with this stop, for these targets, every time it
+fired, what happened?"*
+
+It reports win rate, median return, average **R** per trade, how many stopped out, how many ran all
+three targets, and the best and worst result. Then it says in one sentence whether the expectancy was
+positive — **including when it wasn't**:
+
+> ⚠ **This exact plan has LOST money on this coin** — −0.53R per trade over 11 of them. The pattern is
+> real; trading it this way has not paid. Do not take it just because the card is here.
+
+Below 5 trades it refuses to quote a win rate at all and says the sample is too thin to judge.
+
+Three things keep the number honest:
+
+- **It cannot see the future.** Each decision is produced by calling the *same production
+  `tradePlan()`* on a strict prefix of the data, and fills are only ever checked on *later* bars. The
+  backtest can't drift from the live logic, and can't peek. There's a test that appends 120 bars to a
+  tape and asserts the earlier trades don't change.
+- **A stop and a target in the same bar counts as the stop.** Intrabar order is unknowable from OHLC,
+  and assuming the target would flatter every result.
+- **Long and short run as separate books.** Sharing one position slot let the long — whose zone sits
+  at the floor, where a bleeding coin lives — fire constantly and starve the short down to a
+  one-trade sample. That was an artifact of the simulation, not a fact about the strategy.
+
+The exit plan is the app's own (a third banked at each target, stop ratcheting), so these numbers are
+directly comparable to 📌 Tracked setups. Note the sample is small — 4h bars over ~50 days — which is
+exactly why the forward record below matters too.
+
+### 📌 Followed to an outcome, and 📣 pushed to Telegram
+
+Live plans are snapshotted into the **📌 Tracked setups** dropdown like every other recommendation the
+app makes, so a Dump & Bounce trade you take never vanishes off the panel mid-trade — and so the
+feature builds a **forward** record to set against the backtest. The tracked record carries the
+*backtested* win rate rather than an invented confidence score.
+
+Only plans that are **live now** are tracked. A waiting zone is deliberately left alone: the tracker
+expires unfilled setups after a fixed number of bars, and a buy zone can legitimately take days to be
+reached, so tracking those would manufacture a pile of fake "never filled" outcomes.
+
+When Telegram is configured, entering a buy or short zone **pings you** — a bump runs and dies inside
+24–72 hours, so a panel you have to be watching is a panel that misses the trade. It fires on the
+*transition* into a zone, so a coin parked in its buy zone pings once, not hourly, and the message
+carries the backtest line (including "not enough history to backtest").
+
 ### The part that keeps this honest
 
 **Every bump is measured for what happened *after* it**, over the same window it took to form: the
@@ -251,7 +299,7 @@ score means the coin closely matches "fell from an old high and never recovered"
 Crypto only — the pattern is about token unlock schedules, which have no equivalent in an index or an
 NSE stock. Cached 30 minutes (**↻ rescan** forces a refresh); the daily pass covers the whole universe
 and the 4h pass runs only on the coins that qualify.
-API: `GET /api/dumpbounce` · settings in `config.json`: `dumpBounceTop`, `dumpBounceMinDrawdown`,
+API: `GET /api/dumpbounce` (tracked plans appear in `GET /api/setups`) · settings in `config.json`: `dumpBounceTop`, `dumpBounceMinDrawdown`,
 `dumpBounceMinQv`, `dumpBounceZigzag`, `bumpZigzag`, `bumpMinPct`, `bumpMaxBars` (or env `NL_TOP`,
 `NL_MIN_DD`, `NL_MIN_QV`, `NL_ZIGZAG`, `BUMP_ZIGZAG`, `BUMP_MIN_PCT`, `BUMP_MAX_BARS`).
 ## How prices stay accurate

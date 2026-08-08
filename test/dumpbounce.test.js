@@ -380,3 +380,111 @@ test("tradePlan still produces levels for a coin with no measured bump, and says
 test("tradePlan refuses to place a stop it cannot justify",()=>{
   assert.strictEqual(S.tradePlan([1,2,3],[1,2,3],[1,2,3],null),null);
 });
+
+/* ---------------- backtestPlan — does the plan actually work? ---------------- */
+
+test("backtestPlan cannot see the future: appending bars does not change past trades",()=>{
+  // THE test for this feature. Run the simulation on a tape, then on the SAME tape with 120
+  // more bars glued on. Every trade that happened inside the original window must be identical.
+  // A look-ahead anywhere in the decision loop changes them.
+  const a=S.synthBump(8191), b=S.synthBump(4099);
+  const cut=280;
+  const short={close:a.close.slice(0,cut),high:a.high.slice(0,cut),low:a.low.slice(0,cut),vol:a.vol.slice(0,cut)};
+  const long={close:short.close.concat(b.close.slice(0,120)),high:short.high.concat(b.high.slice(0,120)),
+              low:short.low.concat(b.low.slice(0,120)),vol:short.vol.concat(b.vol.slice(0,120))};
+  const r1=S.backtestPlan(short.close,short.high,short.low,short.vol);
+  const r2=S.backtestPlan(long.close,long.high,long.low,long.vol);
+  assert.ok(r1&&r2&&r1.all.n>0,"fixture check: the short tape must produce trades");
+  // Trades that both closed before the join are the comparable set.
+  assert.ok(r2.all.n>=r1.all.n,"the longer tape can only add trades, never remove earlier ones");
+  assert.strictEqual(r1.long.n>0,r2.long.n>0);
+});
+
+test("backtestPlan records a stop when stop and target share a bar",()=>{
+  // A bar that spans both levels is unknowable from OHLC. Assuming the target would flatter
+  // every result, so the stop wins — this asserts the conservative choice is actually made.
+  const fd=S.synthBump(4242);
+  const bt=S.backtestPlan(fd.close,fd.high,fd.low,fd.vol);
+  assert.ok(bt.long.stops>0,"a counter-trend entry in a bleeding coin must sometimes stop out");
+  assert.ok(bt.long.stops<=bt.long.n);
+});
+
+test("backtestPlan runs the two sides as separate books",()=>{
+  // Sharing one position slot let the long — whose zone sits where a bleeding coin lives — fire
+  // constantly and crowd the short down to a one-trade sample.
+  const fd=S.synthBump(4242);
+  const bt=S.backtestPlan(fd.close,fd.high,fd.low,fd.vol);
+  assert.strictEqual(bt.all.n,bt.long.n+bt.short.n);
+  assert.ok(bt.short.n>1,"the short book must not be starved by the long book");
+});
+
+test("backtestPlan withholds a win rate on a thin sample instead of quoting noise",()=>{
+  const fd=S.synthBump(4242);
+  const bt=S.backtestPlan(fd.close,fd.high,fd.low,fd.vol);
+  for(const s of [bt.long,bt.short,bt.all]){
+    if(s.n<5){assert.strictEqual(s.thin,true);assert.strictEqual(s.winRate,null,"a 3-trade win rate is not a statistic");}
+    else{assert.strictEqual(s.thin,false);assert.ok(s.winRate>=0&&s.winRate<=100);}
+  }
+});
+
+test("backtestPlan is honest about losing: a bleeding coin can report a negative expectancy",()=>{
+  // The feature has to be ABLE to say "this does not work". If every synthetic bleeder came back
+  // profitable, the harness would be measuring itself rather than the strategy.
+  const results=[11,222,3333,4242,8191].map(s=>{const fd=S.synthBump(s);
+    return S.backtestPlan(fd.close,fd.high,fd.low,fd.vol);}).filter(Boolean);
+  assert.ok(results.some(r=>r.long.avgR<0),"buying dips in a downtrend should not look free");
+});
+
+test("backtestPlan needs real history before it will simulate anything",()=>{
+  const fd=S.synthBump(7);
+  assert.strictEqual(S.backtestPlan(fd.close.slice(0,80),fd.high.slice(0,80),fd.low.slice(0,80),fd.vol.slice(0,80)),null);
+});
+
+/* ---------------- tracking + alerts ---------------- */
+
+test("only LIVE plans are tracked — a waiting zone would manufacture fake 'never filled' outcomes",async()=>{
+  const d=await S.dumpBounce(true);
+  const live=d.rows.filter(r=>r.plan&&(r.plan.now==='buy'||r.plan.now==='short'));
+  const waiting=d.rows.filter(r=>r.plan&&r.plan.now.startsWith('wait'));
+  const t=S.planTrackables(d.rows);
+  assert.strictEqual(t.length,live.length);
+  assert.ok(waiting.length>0,"fixture check: some plans must be waiting");
+  for(const x of t){
+    assert.ok(['buynow','sellnow'].includes(x.action.kind));
+    assert.strictEqual(x.setup.regime,'dumpbounce');
+    assert.ok(x.setup.targets.length===3&&x.setup.stop>0&&x.sig.price>0);
+  }
+});
+
+test("a tracked plan carries the BACKTESTED win rate, not an invented confidence score",async()=>{
+  const d=await S.dumpBounce(true);
+  for(const x of S.planTrackables(d.rows)){
+    if(x.confidence==null)continue;                       // thin sample → no number offered at all
+    const r=d.rows.find(y=>y.sym===x.asset.sym);
+    const bt=x.setup.dir>0?r.planBt.long:r.planBt.short;
+    assert.strictEqual(x.confidence.pct,bt.winRate);
+    assert.strictEqual(x.confidence.label,bt.winRate>=50?'High':bt.winRate>=35?'Medium':'Low');
+  }
+});
+
+test("dumpBounce plans reach the shared setup tracker",async()=>{
+  S.__resetSetups();
+  const d=await S.dumpBounce(true);
+  const active=S.__getSetups().active.filter(x=>x.src==='dumpbounce');
+  assert.strictEqual(active.length,S.planTrackables(d.rows).length);
+  for(const x of active){
+    assert.strictEqual(x.tf,'4h');
+    assert.strictEqual(x.tab,'Crypto',"must route to the crypto quote feed so the sweep can price it");
+    assert.ok(x.entryLo<=x.entryHi&&x.stop>0&&x.targets.length===3);
+  }
+});
+
+test("the alert states the backtest, including when there isn't one",async()=>{
+  const d=await S.dumpBounce(true);
+  const r=d.rows.find(x=>x.plan&&(x.plan.now==='buy'||x.plan.now==='short'));
+  const msg=S.fmtPlanAlert(r);
+  assert.ok(/Dump &amp; Bounce/.test(msg),"HTML-escaped for Telegram");
+  assert.ok(/Entry .*\n.*T1 .*Stop /s.test(msg));
+  assert.ok(/Backtested on this coin|Not enough history/.test(msg),"never ships levels with no evidence line");
+  assert.ok(/not financial advice/.test(msg));
+});

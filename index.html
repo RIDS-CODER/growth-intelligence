@@ -1219,6 +1219,37 @@ function nlPlan(r){
       <div class="sub" style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--line)">Floor <b>${P(p.floor)}</b> · where bumps have died <b>${P(p.roof)}</b> · live <b>${P(p.price)}</b></div>
     </div>`;
 }
+/* THE VERDICT ON THE LEVELS THEMSELVES — not "what did buying a dip return" (generic) but
+   "what did THIS buy zone, THIS stop and THESE targets return, every time they fired". It is the
+   number that decides whether to take the trade, so it sits directly under the levels and is
+   allowed to say the trade loses money. */
+function nlBacktest(r){
+  const bt=r.planBt, p=r.plan;
+  if(!bt||!p)return '';
+  const side=(p.now==='short'||p.now==='wait_short')?bt.short:bt.long;
+  const other=(p.now==='short'||p.now==='wait_short')?bt.long:bt.short;
+  const isL=!(p.now==='short'||p.now==='wait_short');
+  const line=(s,lbl)=>{
+    if(!s||!s.n)return `<div class="sub">${lbl}: <b>never fired</b> in the last ${Math.round(bt.simBars*4/24)} days.</div>`;
+    if(s.thin)return `<div class="sub">${lbl}: only <b>${s.n}</b> trade${s.n===1?'':'s'} — <b>too few to quote a win rate</b>. Median ${nlPct(s.medPct)}, avg <b>${s.avgR}R</b>. Treat as unknown.</div>`;
+    const col=s.avgR>0.15?'var(--buy)':s.avgR<-0.05?'var(--sell)':'#fbbf24';
+    return `<div class="sub" style="color:${col}">${lbl}: <b>${s.winRate}%</b> win over <b>${s.n}</b> trades · median <b>${nlPct(s.medPct)}</b> · avg <b>${s.avgR}R</b>
+      <span style="color:var(--muted)">(${s.stops} stopped, ${s.full} ran all three targets, best ${nlPct(s.best)} / worst ${nlPct(s.worst)})</span></div>`;
+  };
+  // The one sentence that matters: is the expectancy positive or not?
+  const verdict=(!side||!side.n)?''
+    : side.thin?`<div class="sub" style="margin-top:4px;color:var(--muted)">Not enough of these to judge. That is a reason to size small, not a reason to assume it works.</div>`
+    : side.avgR>0.15?`<div class="sub" style="margin-top:4px;color:var(--buy)"><b>This has made money on this coin</b> — ${side.avgR}R per trade over ${side.n} of them. Small sample; it is evidence, not a promise.</div>`
+    : side.avgR<-0.05?`<div class="sub" style="margin-top:4px;color:var(--sell)"><b>⚠ This exact plan has LOST money on this coin</b> — ${side.avgR}R per trade over ${side.n} of them. The pattern is real; trading it this way has not paid. Do not take it just because the card is here.</div>`
+    : `<div class="sub" style="margin-top:4px;color:#fbbf24">Roughly breakeven on this coin (${side.avgR}R over ${side.n} trades) — the edge, if any, is inside the noise.</div>`;
+  return `<div style="margin:8px 0;padding:8px 10px;border-radius:9px;background:rgba(255,255,255,.03);border:1px solid var(--line)">
+      <div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);font-weight:700">🧪 These exact levels, replayed on this coin</div>
+      <div style="margin-top:4px">${line(side,isL?'Buying the bounce':'Shorting the failure')}</div>
+      <div style="margin-top:2px;opacity:.75">${line(other,isL?'Shorting the failure':'Buying the bounce')}</div>
+      ${verdict}
+      <div class="sub" style="margin-top:4px;color:var(--muted)">Replayed over ~${Math.round(bt.simBars*4/24)} days of ${bt.tf} bars, deciding only on bars available at the time. A stop and a target in the same bar counts as the stop. Exit plan is a third at each target with the stop ratcheting — so this is comparable to 📌 Tracked setups, which now follows these live too.</div>
+    </div>`;
+}
 /* The evidence behind the levels, in one strip rather than three paragraphs. */
 function nlEvidence(r){
   const b=r.bump, bi=r.bumpInfo||{}, bcol=NL_PCOL[bi.col]||'var(--muted)';
@@ -1247,6 +1278,7 @@ function nlCard(r,i){
         <div class="btmini" style="border-color:#c084fc;color:#e9d5ff;margin-top:6px" title="Pattern fit (0–100): how closely this matches 'fell from an old high and never recovered' — depth of the fall, age of the high, complete cycles, bounce size, lower lows. It RANKS the list; it does not gate it, and it is not a buy signal.">🎢 ${r.score}</div></div></div>
     <div class="bd">
       ${nlPlan(r)}
+      ${nlBacktest(r)}
       ${nlEvidence(r)}
       <div class="sub" style="margin:8px 0;padding:7px 9px;border-radius:8px;background:rgba(255,255,255,.03);border:1px solid var(--line);line-height:1.55;color:${ed.col}">
         📉 ${ed.txt}${f.n>=8?` <span style="color:var(--muted)">(${f.n} past dips, held ${f.horizon}d · median <b style="color:${(f.med||0)>=0?'var(--buy)':'var(--sell)'}">${nlPct(f.med)}</b> vs ${nlPct(f.baseMed)} on a random day)</span>`:''}
@@ -1277,6 +1309,8 @@ function renderListShell(){
       targets, and one line telling you which side is live right now. Levels come from the coin's own 4h floor, the level where
       its last bumps died, and its own median bump size. Only two things gate the list: at least
       <b>35% below a high set 20+ days ago</b>, plus a liquidity floor — everything else <i>ranks</i> the list instead of hiding coins.
+      Every card also <b>replays its own levels over the coin's history</b> and tells you what they returned — including when the answer is
+      that they lost money. Live plans are followed to an outcome in <b>📌 Tracked setups</b>, and ping Telegram when price enters a zone.
       Rescanned every 30 minutes.
     </div>
     <div style="display:flex;gap:5px;flex-wrap:wrap;margin:4px 0 8px;align-items:center">${tabs}${scalpCcyTabs('Crypto')}</div>
