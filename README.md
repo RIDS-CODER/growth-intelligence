@@ -167,64 +167,77 @@ Together these build a **forward record** — a measured, real-time hit rate of 
 themselves, distinct from the backtest. Statuses are sampled ~once a minute (state survives restarts via
 `setups.json`). API: `GET /api/setups` (`?tf=`, `?limit=`).
 
-## 🎢 New Listings — coins still inside the post-listing cycle
+## 🎢 Dump & Bounce — the fall / bump / fall pattern
 
-Click **🎢 New Listings** for the pattern behind coins like **COOKIE, XAI and VANA**: they list, sell off
-for months, rally hard, then sell off again.
+Click **🎢 Dump & Bounce** for the **XAI / COOKIE / VANA** shape: a coin peaks, falls and falls and
+falls, throws one sharp bump, then falls again.
 
 **That shape is not fraud, and the panel doesn't call it that.** These are real projects with a small
-**circulating float against a huge total supply**, so every unlock lands on a thin order book. Naming the
-mechanism is the useful part — "fake coin" would be an accusation this app can't support, and it would hide
-the thing you can actually trade.
+**circulating float against a huge total supply**, so every unlock lands on a thin order book — and a
+coin everyone is already short squeezes violently when it does turn. Naming the mechanism is the
+useful part; "fake coin" would be an accusation this app can't support and would hide the thing you
+can actually trade.
 
-The scanner reads the **full daily history** of every coin in the crypto universe and keeps the ones that are
-provably still in that phase:
+### Two timeframes, because the two halves run on different clocks
+
+**Daily bars decide which coins are in the regime.** Not listing age — the regime *outlives* the
+listing. XAI listed in early 2024 and was still trading this way years later, so a listing-age gate
+would reject the very coins the feature exists to find. What matters instead is that the high is
+**old** and price is far below it:
 
 | Filter | Why |
 |---|---|
-| History starts at the listing | An exchange serves candles only from listing day. If the series hits the 400-bar fetch cap we **can't prove** bar 0 is the listing, so the coin is dropped rather than guessed at. |
-| ≥ 21 days old | Below that there's nothing to measure. |
-| ≥ 40% off its listing high | A coin near its listing price isn't in this regime. |
-| Peaked in the first 60% of its life | Peaked late = a recent runner, a different (and less predictable) animal. |
-| ≥ 1 complete cycle, bounces ≥ 15% | Needs repeated behaviour, and bounces big enough to be worth trading. |
+| ≥ 40% below its high | A coin near its high isn't in this regime. |
+| High set ≥ 30 days ago | 40% off a high set last week is a *pullback*, not a bleed. |
+| ≥ 1 complete cycle, bounces ≥ 15% | Needs repeated behaviour, and bounces worth trading. |
+| Peaked in the first 60% of its life | **Only applied when the history provably starts at the listing.** Past 400 daily bars the feed is capped, so bar 0 is an arbitrary date and this test would be meaningless. |
 
-Each card then answers **where in the cycle it is right now**, from swing pivots (a leg only turns on a 15%
-reversal, so noise can't manufacture fake cycles):
+Cards say which case they're in: *"listed ~180d ago"* when the series starts at the listing, or
+*"400d of history (listing is older)"* when it hit the cap.
 
-- **👀 BOUNCE ZONE** — the fall has already run as deep or as long as this coin's own typical down-leg. Where past bounces *started*.
-- **🚀 RALLYING** — up off the last low but still short of its typical bounce. Past bounces from here had room left.
-- **⚠️ RALLY MATURE** — this bounce has matched its typical size or length. Where past bounces *ended*.
-- **🩸 STILL FALLING** — in a down-leg that hasn't run its usual course. Buying here has usually meant more downside first.
+**4h bars time the bump — that's the trade.** These moves run +50% and die inside 24–72 hours; on
+daily closes the whole event is one candle, so a daily-only view would quote *"bounces run ~20 days"*
+for something that was over in two. A **bump** is an up-leg that is both **big (≥20%)** and
+**fast (≤3 days)** — a slow grind of the same size is a different animal and isn't counted.
 
-alongside that coin's own measured cycle — median bounce and fall, in **% and in days**, with the number of
-legs each median is built from (fewer than 3 gets flagged as *an anecdote, not a pattern*).
+- **🔥 BUMP RUNNING** — a fast counter-trend move is underway, still short of this coin's typical size.
+- **⚠️ BUMP LATE** — it has already matched the typical bump in size or in hours. Past bumps rolled over here.
+- **📉 FADING** — rolling over off the last swing high. The give-back leg.
+- **🌱 BASING** — off the lows but not moving with force. Set an alert; don't chase.
+
+Each card carries **this coin's own** bump size and duration in hours, plus the volume on the current
+leg versus normal — a squeeze with a real crowd behind it is a squeeze; a spike on nothing is a wick.
 
 ### The part that keeps this honest
 
-These coins have a structural **downward drift** — unlock supply keeps arriving — and the rallies are
-counter-trend bounces inside it. So every card reports **what buying a dip like today's actually returned**:
+**Every bump is measured for what happened *after* it**, over the same window it took to form: the
+median % given back, and how many round-tripped completely. When that give-back is high the card says
+so in as many words — *"These do not hold. Take profit into strength or you give it all back."* That
+is the "then it falls again" half, and it's what makes this a trade with an exit instead of a hope.
+
+On the daily side, every card also reports **what buying a dip like today's actually returned**:
 
 - the win rate and median return after past dips of the same depth, held for as long as this coin's bounces usually run, **versus**
 - the same horizon bought on **any random day**.
 
-If those two numbers match, the dip told you nothing and the card says exactly that — you'd just be holding a
-volatile coin. Several rows will say it. The gap between them (`edge`) is withheld entirely below 8 samples,
-because a five-sample "edge" is noise dressed up as a statistic.
+If those two match, the dip told you nothing and the card says exactly that. Several rows will. The
+gap between them is withheld entirely below 8 samples, because a five-sample "edge" is noise dressed
+up as a statistic. Both are computed **causally** — each bar is compared to its *trailing* 20-day
+high, never a future one — and deliberately **not** from the swing pivots, because every pivot low is
+followed by a rally *by construction*, which would make any coin look like a money printer.
 
-Both numbers are computed **causally** — the dip test compares each bar to its *trailing* 20-day high, never a
-future one — and deliberately **not** from the swing pivots, because every pivot low is followed by a rally
-*by construction*, which would make any coin look like a money printer.
+**🎢 Pattern fit (0–100) is not a buy signal.** A high score means the coin closely matches "fell from
+an old high and never recovered", which is a description of a *falling* asset. Depth of the fall
+(25%), age of the high (15%), complete cycles (20%), bounce size (20%), lower lows (15%), plus a small
+bonus (5%) when the history provably starts at the listing.
 
-**🎢 Pattern fit (0–100) is not a buy signal.** A high score means the coin closely matches the
-listed-then-bled shape, which is a description of a *falling* asset. Depth off the listing high (25%), how
-early it peaked (20%), complete cycles (20%), bounce size (20%), and whether each low is lower (15%).
-
-Daily bars, cached 30 minutes (**↻ rescan** forces a refresh). Crypto only — the pattern is about token
-unlock schedules, which have no equivalent in an index or an NSE stock.
-API: `GET /api/newlistings` · settings: `newListingTop`, `newListingMinDrawdown`, `newListingMinRally`,
-`newListingMinQv`, `newListingZigzag` in `config.json` (or env `NL_TOP`, `NL_MIN_DD`, `NL_MIN_RALLY`,
-`NL_MIN_QV`, `NL_ZIGZAG`).
-
+Crypto only — the pattern is about token unlock schedules, which have no equivalent in an index or an
+NSE stock. Cached 30 minutes (**↻ rescan** forces a refresh); the daily pass covers the whole universe
+and the 4h pass runs only on the coins that qualify.
+API: `GET /api/dumpbounce` · settings in `config.json`: `dumpBounceTop`, `dumpBounceMinDrawdown`,
+`dumpBounceMinRally`, `dumpBounceMinQv`, `dumpBounceZigzag`, `bumpZigzag`, `bumpMinPct`, `bumpMaxBars`
+(or env `NL_TOP`, `NL_MIN_DD`, `NL_MIN_RALLY`, `NL_MIN_QV`, `NL_ZIGZAG`, `BUMP_ZIGZAG`,
+`BUMP_MIN_PCT`, `BUMP_MAX_BARS`).
 ## How prices stay accurate
 
 - **Stocks/ETFs/indices:** Upstox real-time last-traded price (LTP), refreshed every few seconds, plus

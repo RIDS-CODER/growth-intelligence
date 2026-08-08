@@ -1016,15 +1016,32 @@ async function topMovers(tab,tf){
    coin look like a money printer.
    ============================================================ */
 const NL_BAR_CAP=400;                                          // daily bars the crypto loaders request
-const NL_TRUNC=NL_BAR_CAP-20;                                  // at/above this, history may predate the first bar → can't call it new
+const NL_TRUNC=NL_BAR_CAP-20;                                  // at/above this the series hit the cap — the listing is OLDER than what we can see
 const NL_MIN_AGE=21;                                           // below this there is nothing measurable
-const NL_ZZ_PCT=parseFloat(process.env.NL_ZIGZAG)||parseFloat(CFG.newListingZigzag)||15;      // % reversal that defines one leg
-const NL_MIN_DD=parseFloat(process.env.NL_MIN_DD)||parseFloat(CFG.newListingMinDrawdown)||40; // % off the listing peak to qualify
-const NL_MIN_RALLY=parseFloat(process.env.NL_MIN_RALLY)||parseFloat(CFG.newListingMinRally)||15; // a bounce big enough to be worth trading
-const NL_MIN_QV=parseFloat(process.env.NL_MIN_QV)||parseFloat(CFG.newListingMinQv)||1e7;      // ₹1 Cr / 24h liquidity floor
-const NL_TOP=parseInt(process.env.NL_TOP)||parseInt(CFG.newListingTop)||12;
+const NL_MIN_PEAK_AGE=30;                                      // the high must be OLD — otherwise this is a pullback in an uptrend, not a bleed
+const NL_ZZ_PCT=parseFloat(process.env.NL_ZIGZAG)||parseFloat(CFG.dumpBounceZigzag)||15;      // % reversal that defines one daily leg
+const NL_MIN_DD=parseFloat(process.env.NL_MIN_DD)||parseFloat(CFG.dumpBounceMinDrawdown)||40; // % off the peak to qualify
+const NL_MIN_RALLY=parseFloat(process.env.NL_MIN_RALLY)||parseFloat(CFG.dumpBounceMinRally)||15; // a bounce big enough to be worth trading
+const NL_MIN_QV=parseFloat(process.env.NL_MIN_QV)||parseFloat(CFG.dumpBounceMinQv)||1e7;      // ₹1 Cr / 24h liquidity floor
+const NL_TOP=parseInt(process.env.NL_TOP)||parseInt(CFG.dumpBounceTop)||12;
 const NL_TTL=30*60*1000;                                       // daily bars — pointless to refetch on the 45s panel timer
+/* The BUMP pass runs on 4h bars. A squeeze in one of these coins runs and dies inside 24–72
+   hours; on daily closes that whole event is one or two candles, so a daily-only view would
+   quote "bounces run ~20 days" for a move that was over in two. 400 × 4h ≈ 66 days of history. */
+const BUMP_TF="4h", BUMP_BAR_H=4;
+const BUMP_ZZ=parseFloat(process.env.BUMP_ZIGZAG)||parseFloat(CFG.bumpZigzag)||12;   // % reversal on the fast series
+const BUMP_MIN_PCT=parseFloat(process.env.BUMP_MIN_PCT)||parseFloat(CFG.bumpMinPct)||20;  // a bump worth the name
+const BUMP_MAX_BARS=parseInt(process.env.BUMP_MAX_BARS)||parseInt(CFG.bumpMaxBars)||18;   // …and it has to be FAST (≤3 days)
 const med=a=>{if(!a||!a.length)return null;const s=a.slice().sort((x,y)=>x-y),m=s.length>>1;return s.length%2?s[m]:(s[m-1]+s[m])/2;};
+const avg=a=>a&&a.length?a.reduce((s,v)=>s+v,0)/a.length:0;
+// Drop bad bars from close and volume TOGETHER — filtering close alone silently misaligns the
+// volume series, which is what the bump's crowd-confirmation is read from.
+function cleanSeries(close,vol){
+  const c=[],v=[];
+  for(let i=0;i<(close||[]).length;i++){const x=+close[i];
+    if(x>0&&isFinite(x)){c.push(x);v.push(vol&&isFinite(+vol[i])?+vol[i]:0);}}
+  return {c,v};
+}
 
 // Alternating swing pivots. A leg only turns once price reverses `pct` from the running
 // extreme, so noise inside a trend cannot manufacture fake cycles. Returns CONFIRMED pivots
@@ -1049,9 +1066,13 @@ function sparkline(cl,m){
   const out=[]; for(let i=0;i<m;i++)out.push(+cl[Math.round(i*(cl.length-1)/(m-1))].toPrecision(6));
   return out;
 }
-// Shape of one coin's whole life on this exchange, from daily closes.
-// An exchange serves candles only from the listing date, so bar 0 IS the listing — unless the
-// fetch limit truncated the series, which is flagged (`truncated`) and rejected by the scanner.
+// Shape of one coin's recent life, from daily closes.
+// An exchange serves candles only from the listing date, so when the series is SHORTER than the
+// fetch cap, bar 0 really is the listing (`verifiedListing`). When it hits the cap we are looking
+// at a 400-day window of an older coin — which is not a reason to skip it. The regime that makes
+// these coins tradeable (deep below an OLD high, still bleeding, punctuated by sharp bumps) long
+// outlives the listing itself: XAI listed in early 2024 and was still trading that way years on.
+// An age gate would have thrown out the very coins this feature exists to find.
 function listingProfile(close,zzPct){
   const cl=(close||[]).filter(v=>v>0&&isFinite(v));
   const n=cl.length; if(n<NL_MIN_AGE)return null;
@@ -1081,15 +1102,20 @@ function listingProfile(close,zzPct){
   else if(leg)                                                  // falling from the last pivot high
     phase=((drop.medPct!=null&&leg.pct<=0.8*drop.medPct)||(drop.medDays!=null&&leg.days>=drop.medDays))?'bounce':'falling';
   const ddPct=peak>0?(1-price/peak)*100:0;
-  const peakPos=n>1?peakI/(n-1):0;                              // 0 = peaked on listing day
+  const peakPos=n>1?peakI/(n-1):0;                              // 0 = peaked on the first bar we can see
+  const peakAgeDays=(n-1)-peakI;                                // how long ago the high was set — the real regime test
+  const truncated=n>=NL_TRUNC;
   // How far above the RECENT floor price sits — the difference between "at the bottom of this
   // fall" and "already 20% into the bounce", which the leg % alone does not tell you.
   let lo30=cl[n-1]; for(let i=Math.max(0,n-30);i<n;i++) if(cl[i]<lo30)lo30=cl[i];
-  // How well this matches the listed-then-bled shape. Not a buy signal — a pattern-fit gauge.
-  const mEarly=peakPos<=0.15?1:Math.max(0,(0.5-peakPos)/0.35);
-  const score=Math.round(100*(0.25*Math.min(1,ddPct/70)+0.20*mEarly+0.20*Math.min(1,cycles/3)
-    +0.20*(rally.medPct!=null?Math.min(1,rally.medPct/40):0)+0.15*lowerLows));
-  return {ageDays:n,truncated:n>=NL_TRUNC,price,peak,peakI,peakPos:+peakPos.toFixed(2),trough,troughI,
+  // Pattern fit — how closely this matches "fell from an old high and never recovered".
+  // NOT a buy signal: a high score describes a FALLING asset. peakPos only carries weight when
+  // the series provably starts at the listing; on a truncated window it means nothing, because
+  // bar 0 is an arbitrary date, so age-of-peak does that work instead.
+  const score=Math.round(100*(0.25*Math.min(1,ddPct/70)+0.15*Math.min(1,peakAgeDays/120)
+    +0.20*Math.min(1,cycles/3)+0.20*(rally.medPct!=null?Math.min(1,rally.medPct/40):0)
+    +0.15*lowerLows+0.05*((!truncated&&peakPos<=0.35)?1:0)));
+  return {ageDays:n,truncated,verifiedListing:!truncated,peakAgeDays,price,peak,peakI,peakPos:+peakPos.toFixed(2),trough,troughI,
     ddPct:+ddPct.toFixed(1), fromLow:trough>0?+((price/trough-1)*100).toFixed(1):null,
     off30:lo30>0?+((price/lo30-1)*100).toFixed(1):null,          // % above the lowest close of the last 30 bars
     driftPct:cl[0]>0?+((price/cl[0]-1)*100).toFixed(1):null,     // total return since the first served bar
@@ -1116,6 +1142,74 @@ function forwardStats(close,dipPct,horizon,lookback){
     horizon:h,dipPct:+(+(dipPct||20)).toFixed(0),
     edge:(dip.length>=8&&win(dip)!=null&&win(all)!=null)?win(dip)-win(all):null};
 }
+/* ---- THE BUMP: the part you actually trade, measured on 4h bars ----
+   In these coins the counter-trend rally is fast and violent — often a short squeeze, since a
+   coin that has bled for months is heavily shorted — and it is usually given straight back. So a
+   bump is defined as an up-leg that is BOTH big (≥20%) and FAST (≤3 days); a slow 20% grind is a
+   different animal and is not counted. For every completed bump we then measure what happened
+   AFTER it, over the same number of bars it took to form. That retracement is the whole reason
+   this is a trade with an exit rather than a hope: if these moves round-trip, you take profit
+   into strength or you give it all back. */
+function bumpProfile(close,vol,opts){
+  const o=opts||{}, {c:cl,v:vv}=cleanSeries(close,vol);
+  const n=cl.length; if(n<40)return null;
+  const minPct=o.minPct||BUMP_MIN_PCT, maxBars=o.maxBars||BUMP_MAX_BARS, barH=o.barH||BUMP_BAR_H;
+  const piv=zigzag(cl,o.zz||BUMP_ZZ), bumps=[];
+  for(let k=1;k<piv.length;k++){
+    const a=piv[k-1],b=piv[k];
+    if(b.k!==1)continue;                                        // up-legs only: swing low → swing high
+    const pct=(b.px/a.px-1)*100, bars=b.i-a.i;
+    if(!(pct>=minPct)||!(bars>0)||bars>maxBars)continue;         // big AND fast, or it is not a bump
+    // Give-back over the same window it took to form. Only scored when that window has actually
+    // elapsed — measuring a half-finished retrace would flatter every recent bump.
+    const complete=b.i+bars<=n-1;
+    let retrace=null;
+    if(complete){
+      let lo=cl[b.i]; for(let j=b.i;j<=b.i+bars;j++) if(cl[j]<lo)lo=cl[j];
+      const span=b.px-a.px;
+      if(span>0)retrace=+Math.max(0,Math.min(100,(b.px-lo)/span*100)).toFixed(0);
+    }
+    bumps.push({i:a.i,peakI:b.i,pct:+pct.toFixed(1),bars,hours:bars*barH,retrace,complete});
+  }
+  const done=bumps.filter(b=>b.complete&&b.retrace!=null);
+  const medPct=med(bumps.map(b=>b.pct)), medBars=med(bumps.map(b=>b.bars));
+  // WHERE WE ARE NOW on the fast series.
+  const last=piv.length?piv[piv.length-1]:null, price=cl[n-1];
+  let state="quiet",legPct=0,legBars=0;
+  if(last){
+    legBars=(n-1)-last.i; legPct=+((price/last.px-1)*100).toFixed(1);
+    if(last.k===-1)                                             // rising off the last swing low
+      state=((medPct!=null&&legPct>=0.85*medPct)||(medBars!=null&&legBars>=medBars))?"late"
+           :(legPct>=minPct*0.4?"running":"building");
+    else state="fading";                                        // rolling over off the last swing high
+  }
+  // Crowd confirmation: volume on the current leg vs the 20 bars before it started. A squeeze
+  // with real volume behind it is a squeeze; a spike on nothing is a wick that gets given back.
+  let volX=null;
+  if(last&&n-last.i>=2){
+    const base=avg(vv.slice(Math.max(0,last.i-20),last.i));
+    if(base>0)volX=+(avg(vv.slice(last.i,n))/base).toFixed(2);
+  }
+  return {n:bumps.length,completed:done.length,
+    medPct:medPct!=null?+medPct.toFixed(1):null,
+    medHours:medBars!=null?Math.round(medBars*barH):null,
+    retraceMed:med(done.map(b=>b.retrace)),
+    fullRate:done.length?Math.round(100*done.filter(b=>b.retrace>=90).length/done.length):null,
+    state,legPct,legHours:legBars*barH,volX,windowDays:Math.round(n*barH/24),
+    bumps:bumps.slice(-6),tf:BUMP_TF};
+}
+const BUMP_STATE={
+  late:    {icon:'⚠️',label:'BUMP LATE',col:'sell',
+    what:"The move up has already matched this coin's typical bump in size or in hours. Past bumps rolled over here."},
+  running: {icon:'🔥',label:'BUMP RUNNING',col:'buy',
+    what:"A fast counter-trend move is underway and has not yet reached this coin's typical size. This is the part that pays — and it is measured in hours, not days."},
+  building:{icon:'🌱',label:'BASING',col:'muted',
+    what:"Off the lows but not yet moving with any force. Nothing to chase; this is where you set an alert."},
+  fading:  {icon:'📉',label:'FADING',col:'sell',
+    what:"Rolling over off the last swing high — the give-back leg. The bump, if there was one, is behind you."},
+  quiet:   {icon:'💤',label:'QUIET',col:'muted',
+    what:"No confirmed swing on the fast chart yet."}
+};
 const NL_PHASE={
   bounce:  {icon:'👀',label:'BOUNCE ZONE',col:'buy',
     what:"The fall has already run as deep or as long as this coin's own typical down-leg. This is WHERE past bounces started — it is not proof one starts now."},
@@ -1131,7 +1225,9 @@ const NL_PHASE={
 // DEMO only: a synthetic low-float listing — pump on day one, structural decay, periodic bounces.
 function synthListing(seed){
   let s=Math.abs(seed||1)%2147483647||1; const r=()=>{s=(s*16807)%2147483647;return s/2147483647;};
-  const n=45+Math.floor(r()*200),close=[],high=[],low=[],vol=[];
+  // A third of the demo coins run the full 400 bars, i.e. they hit the fetch cap — the
+  // "older coin, listing not verifiable" case that the age gate used to throw away.
+  const n=r()<0.35?NL_BAR_CAP:45+Math.floor(r()*220),close=[],high=[],low=[],vol=[];
   let x=40+r()*400,ph=r()*6.28,per=7+r()*10;
   for(let i=0;i<n;i++){
     const mv=(i<3?0.11:-0.013)+0.032*Math.sin(i/per+ph)+(r()-0.5)*0.05;
@@ -1141,9 +1237,26 @@ function synthListing(seed){
   const now=Date.now();
   return {close,high,low,vol,times:close.map((_,i)=>now-(n-1-i)*864e5),price:close[close.length-1],mtime:now};
 }
+// DEMO only: a 4h bleeder that squeezes. Spike hard, fade hard, grind down — the shape of a
+// short squeeze in a coin everyone is already short.
+function synthBump(seed){
+  let s=Math.abs(seed||1)%2147483647||1; const r=()=>{s=(s*16807)%2147483647;return s/2147483647;};
+  const n=400,close=[],high=[],low=[],vol=[];
+  let x=1+r()*4,sq=0,fade=0;
+  for(let i=0;i<n;i++){
+    let mv;
+    if(sq>0){mv=0.055+(r()-0.5)*0.04;sq--;if(!sq)fade=6+Math.floor(r()*9);}
+    else if(fade>0){mv=-0.042+(r()-0.5)*0.04;fade--;}
+    else{mv=-0.004+(r()-0.5)*0.03;if(r()<0.014)sq=4+Math.floor(r()*7);}
+    x=Math.max(1e-8,x*(1+mv));
+    close.push(x);high.push(x*1.02);low.push(x*0.98);vol.push(1e5*(1+(sq>0?7:0)+r()*2));
+  }
+  const now=Date.now();
+  return {close,high,low,vol,times:close.map((_,i)=>now-(n-1-i)*BUMP_BAR_H*36e5),price:close[n-1],mtime:now};
+}
 let nlInflight=null;
-async function freshListings(force){
-  const ck="newlistings";
+async function dumpBounce(force){
+  const ck="dumpbounce";
   if(!force){const hit=cGet(ck,NL_TTL);if(hit)return {...hit,cached:true};}
   if(nlInflight)return nlInflight;                              // one scan at a time — 120 daily-candle fetches is not cheap
   nlInflight=(async()=>{
@@ -1152,16 +1265,22 @@ async function freshListings(force){
       const uni=universeFor("Crypto");
       let t24={};try{if(!DEMO)t24=await ticker24();}catch(e){}
       const haveQv=Object.keys(t24).length>0;
+      // STAGE 1 — daily bars over the whole universe: which coins are in the regime at all.
       const res=await mapLimit(uni,6,async a=>({a,d:DEMO?synthListing(hashStr(a.sym)):await loadCrypto(a,"daily")}));
-      const rows=[],skip={err:0,short:0,truncated:0,shallow:0,shape:0,cycles:0,smallBounce:0,illiquid:0};
+      const rows=[],skip={err:0,short:0,shallow:0,freshPeak:0,shape:0,cycles:0,smallBounce:0,illiquid:0};
       for(const r of res){
         if(!r||r.__err||!r.d){skip.err++;continue;}
         const cl=(r.d.close||[]).filter(v=>v>0&&isFinite(v));
         const p=listingProfile(cl);
         if(!p){skip.short++;continue;}
-        if(p.truncated){skip.truncated++;continue;}              // series hit the fetch cap → can't prove it starts at the listing
         if(p.ddPct<NL_MIN_DD){skip.shallow++;continue;}
-        if(p.peakPos>0.6){skip.shape++;continue;}                // peaked late = a recent runner, not a listed-then-bled coin
+        // The high has to be OLD. A coin 40% off a high it set last week is in a pullback,
+        // not a bleed. This replaces the old listing-age gate, which rejected every coin
+        // whose history ran past the 400-bar fetch cap — including the archetypes.
+        if(p.peakAgeDays<NL_MIN_PEAK_AGE){skip.freshPeak++;continue;}
+        // peakPos is only meaningful when bar 0 really is the listing; on a truncated
+        // window bar 0 is an arbitrary date, so applying it there would be nonsense.
+        if(p.verifiedListing&&p.peakPos>0.6){skip.shape++;continue;}
         if(p.cycles<1){skip.cycles++;continue;}
         if(!(p.rally.medPct>=NL_MIN_RALLY)){skip.smallBounce++;continue;}
         const qv=(haveQv&&t24[r.a.tk]&&t24[r.a.tk].qv)||0;
@@ -1170,13 +1289,26 @@ async function freshListings(force){
         // horizon its bounces actually take — so the number answers THIS card's question.
         const dipTh=Math.min(35,Math.max(12,Math.abs(p.drop.medPct||20)*0.8));
         const fwd=forwardStats(cl,dipTh,Math.max(3,Math.min(30,p.rally.medDays||7)),20);
-        rows.push({sym:r.a.sym,tk:r.a.tk||"",name:r.a.name||r.a.tk||r.a.sym,cls:"Crypto",qv,
+        rows.push({a:r.a,sym:r.a.sym,tk:r.a.tk||"",name:r.a.name||r.a.tk||r.a.sym,cls:"Crypto",qv,
           ...p,fwd,spark:sparkline(cl),phaseInfo:NL_PHASE[p.phase]||NL_PHASE.unclear});
       }
       rows.sort((a,b)=>b.score-a.score);
-      const out={rows:rows.slice(0,NL_TOP),found:rows.length,scanned:res.length,skip,ts:Date.now(),demo:DEMO,cryptoMode,
+      const keep=rows.slice(0,NL_TOP);
+      // STAGE 2 — the fast pass, on the survivors only. Daily closes cannot time a move that
+      // runs and dies inside 48 hours, and that move IS the trade. Running this on the whole
+      // universe would double the fetch count to no purpose.
+      await mapLimit(keep,5,async r=>{
+        try{
+          const fd=DEMO?synthBump(hashStr(r.sym)):await loadCrypto(r.a,BUMP_TF);
+          const b=bumpProfile(fd.close,fd.vol);
+          if(b){r.bump=b;r.bumpInfo=BUMP_STATE[b.state]||BUMP_STATE.quiet;r.fastSpark=sparkline((fd.close||[]).filter(v=>v>0),80);}
+        }catch(e){r.bumpErr=String(e.message||e).slice(0,80);}
+      });
+      keep.forEach(r=>{delete r.a;});
+      const out={rows:keep,found:rows.length,scanned:res.length,skip,ts:Date.now(),demo:DEMO,cryptoMode,
         usdtInr:priceRate(),rateSrc:priceRateSrc(),
-        cfg:{minAgeDays:NL_MIN_AGE,maxAgeDays:NL_TRUNC,minDrawdown:NL_MIN_DD,minRally:NL_MIN_RALLY,zigzag:NL_ZZ_PCT,minQv:NL_MIN_QV}};
+        cfg:{minAgeDays:NL_MIN_AGE,minPeakAgeDays:NL_MIN_PEAK_AGE,minDrawdown:NL_MIN_DD,minRally:NL_MIN_RALLY,
+          zigzag:NL_ZZ_PCT,minQv:NL_MIN_QV,bumpTf:BUMP_TF,bumpMinPct:BUMP_MIN_PCT,bumpMaxHours:BUMP_MAX_BARS*BUMP_BAR_H}};
       if(res.length)cSet(ck,out);
       return out;
     }finally{nlInflight=null;}
@@ -1512,8 +1644,8 @@ async function handler(req,res){
       return sendJSON(res,cryptoSignalsFrom(payload));}
     if(p==="/api/movers"){   // 🔥 biggest volume-backed movement right now, scalp plan attached
       return sendJSON(res,await topMovers(u.searchParams.get("tab")||"Crypto",u.searchParams.get("tf")||"5m"));}
-    if(p==="/api/newlistings"){   // 🎢 coins inside the post-listing dump-and-bounce cycle, with their measured base rate
-      return sendJSON(res,await freshListings(u.searchParams.get("force")==="1"));}
+    if(p==="/api/dumpbounce"){   // 🎢 coins bleeding from an old high, with the 4h bump timed and its base rate
+      return sendJSON(res,await dumpBounce(u.searchParams.get("force")==="1"));}
     if(p==="/api/setups"){   // 📌 tracked setups: every recommendation followed to its outcome + forward hit-rate
       const tfq=u.searchParams.get("tf")||null, lim=Math.min(200,parseInt(u.searchParams.get("limit"))||40);
       const active=SETUPS.active.filter(x=>!tfq||x.tf===tfq).slice().sort((a,b)=>b.born-a.born).slice(0,60)
@@ -1578,7 +1710,7 @@ module.exports={IND,computeSignal,buildSetup,buildReasons,confidenceOf,alertElig
   loadBinance,loadCoinDCX,loadCrypto,ensureCryptoUniverse,usdInr,resampleSeries,tfCfg,getCRYPTO:()=>CRYPTO,getMode:()=>cryptoMode,
   backtestSeries,scoreSeriesArr,backtest,processAsset,blendResearch,assetBtScore,cdxLiveInr,cdxUsdtInr,topMovers,ticker24,
   trackSetups,sweepSetups,updateSetupWithPrice,setupStats,markReversals,realizedPct,volMetrics,priceRate,priceRateSrc,
-  zigzag,listingProfile,forwardStats,freshListings,sparkline,synthListing,
+  zigzag,listingProfile,bumpProfile,forwardStats,dumpBounce,sparkline,synthListing,synthBump,cleanSeries,
   __setFx:(r)=>{fxRate=r;fxAt=Date.now();},__setMode:(m)=>{cryptoMode=m;},
   __getSetups:()=>SETUPS,__resetSetups:()=>{SETUPS={active:[],resolved:[]};},
   btcStateFromSeries,__setBtc:(s)=>{BTC_STATE=s;},

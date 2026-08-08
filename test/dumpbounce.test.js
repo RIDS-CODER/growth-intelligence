@@ -1,4 +1,4 @@
-/* 🎢 New Listings — cycle detector.
+/* 🎢 Dump & Bounce — the fall/bump/fall detector.
    The load-bearing claim of this feature is the BASE RATE, so most of these tests exist to
    prove the base rate is honest: computed causally, not read off the zigzag pivots (every
    zigzag low is followed by a rally by construction), and not flattering by accident. */
@@ -55,11 +55,25 @@ test("listingProfile needs a minimum amount of history",()=>{
   assert.ok(S.listingProfile(listingSeries(60)));
 });
 
-test("listingProfile flags a series that hit the fetch cap — we cannot call that a new listing",()=>{
+test("listingProfile flags a capped series as an older coin, but does NOT disqualify it",()=>{
   const short=S.listingProfile(listingSeries(100));
-  assert.strictEqual(short.truncated,false);
+  assert.strictEqual(short.verifiedListing,true,"a short series provably starts at the listing");
   const long=S.listingProfile(listingSeries(420));
-  assert.strictEqual(long.truncated,true,"400 bars back could be a mid-life window, not the listing");
+  assert.strictEqual(long.truncated,true,"400 bars back is a mid-life window, not the listing");
+  assert.strictEqual(long.verifiedListing,false);
+  // The regime outlives the listing. XAI is years past its listing and still trades this shape,
+  // so a capped series must still score — an age gate would reject the archetypes.
+  assert.ok(long.score>0&&long.ddPct>40&&long.peakAgeDays>30);
+});
+
+test("listingProfile ages the PEAK, which is what separates a bleed from a pullback",()=>{
+  const bled=S.listingProfile(listingSeries(200));
+  assert.ok(bled.peakAgeDays>100,"the high was set long ago");
+  // A coin that ran up and is only now pulling back has a young peak, whatever its drawdown.
+  const fresh=[];for(let i=0;i<200;i++)fresh.push(100*Math.pow(1.02,i));
+  for(let i=0;i<12;i++)fresh.push(fresh[fresh.length-1]*0.94);
+  const p=S.listingProfile(fresh);
+  assert.ok(p.peakAgeDays<=12,"peak is days old, so this is a pullback and must be gated out");
 });
 
 test("listingProfile puts the peak early for a listed-then-bled coin, late for a recent runner",()=>{
@@ -163,16 +177,17 @@ test("forwardStats edge is dipWin minus baseWin, so a useless dip signal reads ~
 
 /* ---------------- scanner ---------------- */
 
-test("freshListings returns ranked rows with everything a card needs",async()=>{
-  const d=await S.freshListings(true);
+test("dumpBounce returns ranked rows with everything a card needs",async()=>{
+  const d=await S.dumpBounce(true);
   assert.ok(d.rows.length>0,"DEMO ships synthetic listings so the panel demonstrates itself");
   assert.ok(d.scanned>0);
   for(let i=1;i<d.rows.length;i++)assert.ok(d.rows[i-1].score>=d.rows[i].score,"ranked by pattern fit");
   for(const r of d.rows){
     assert.ok(r.tk&&r.name&&r.sym);
-    assert.ok(r.ageDays>=21&&!r.truncated,"only coins whose history provably starts at the listing");
-    assert.ok(r.ddPct>=40,"a coin still near its listing price is not in this regime");
-    assert.ok(r.peakPos<=0.6,"peaked late = a recent runner, not a listed-then-bled coin");
+    assert.ok(r.ageDays>=21);
+    assert.ok(r.ddPct>=40,"a coin still near its high is not in this regime");
+    assert.ok(r.peakAgeDays>=30,"the high must be old — otherwise it is a pullback, not a bleed");
+    if(r.verifiedListing)assert.ok(r.peakPos<=0.6,"peaked late = a recent runner, not a bled coin");
     assert.ok(r.cycles>=1&&r.rally.medPct>=15,"needs bounces big enough to be worth trading");
     assert.ok(r.phaseInfo&&r.phaseInfo.label&&r.phaseInfo.what);
     assert.ok(r.fwd&&r.fwd.baseN>0,"every row carries its own base rate");
@@ -180,8 +195,8 @@ test("freshListings returns ranked rows with everything a card needs",async()=>{
   }
 });
 
-test("freshListings caches, and every row's phase agrees with its own leg",async()=>{
-  const a=await S.freshListings(true), b=await S.freshListings();
+test("dumpBounce caches, and every row's phase agrees with its own leg",async()=>{
+  const a=await S.dumpBounce(true), b=await S.dumpBounce();
   assert.strictEqual(b.cached,true);
   assert.strictEqual(a.rows.length,b.rows.length);
   for(const r of a.rows){
@@ -189,4 +204,91 @@ test("freshListings caches, and every row's phase agrees with its own leg",async
     const up=r.leg.dir>0;
     assert.strictEqual(up,r.phase==="rallying"||r.phase==="mature","an up-leg cannot be 'falling'");
   }
+});
+
+/* ---------------- bumpProfile — the 4h layer that times the trade ---------------- */
+
+// The XAI shape from the user's chart: a long grind down, one sharp squeeze (+~58% over ~24h on
+// heavy volume), a fast fade, then more bleeding.
+function squeezeTape(opts){
+  const o=opts||{}, c=[], v=[]; let x=0.008;
+  for(let i=0;i<120;i++){c.push(x*=(1-0.004+0.004*Math.sin(i/7)));v.push(1e6);}
+  for(let i=0;i<(o.upBars||6);i++){c.push(x*=(1+(o.upRate==null?0.081:o.upRate)));v.push(9e6);}
+  for(let i=0;i<(o.fadeBars==null?7:o.fadeBars);i++){c.push(x*=0.955);v.push(3e6);}
+  for(let i=0;i<(o.tailBars==null?20:o.tailBars);i++){c.push(x*=(1-0.006));v.push(1e6);}
+  return {c,v};
+}
+
+test("bumpProfile finds the squeeze in the XAI shape and sizes it in HOURS, not days",()=>{
+  const t=squeezeTape(), b=S.bumpProfile(t.c,t.v);
+  assert.strictEqual(b.n,1);
+  assert.ok(b.medPct>50&&b.medPct<70,"a ~58% squeeze, got "+b.medPct);
+  assert.strictEqual(b.medHours,24,"6 bars x 4h — daily bars would have called this one candle");
+});
+
+test("bumpProfile measures the give-back, which is the 'then it falls again' half",()=>{
+  const t=squeezeTape(), b=S.bumpProfile(t.c,t.v);
+  assert.strictEqual(b.completed,1);
+  assert.ok(b.retraceMed>=50,"most of that move came straight back, got "+b.retraceMed);
+  assert.strictEqual(b.state,"fading","the tape ends well after the peak");
+});
+
+test("bumpProfile ignores a SLOW rally of the same size — a bump has to be fast",()=>{
+  // Same ~58% gain, spread over 40 bars instead of 6.
+  const fast=S.bumpProfile(squeezeTape().c,squeezeTape().v);
+  const slow=squeezeTape({upBars:40,upRate:0.0115});
+  assert.strictEqual(fast.n,1);
+  assert.strictEqual(S.bumpProfile(slow.c,slow.v).n,0,"a 40-bar grind is a different animal");
+});
+
+test("a bump is not counted until its top is confirmed by a real reversal",()=>{
+  // Two fade bars is only −8.8% off the peak, under the 12% reversal threshold. The top is not a
+  // pivot yet, so nothing is added to the bump history — the move is still reported as the LIVE
+  // leg instead. This is the honest cost of confirmation: a top is only known after the fact.
+  const t=squeezeTape({fadeBars:2,tailBars:0}), b=S.bumpProfile(t.c,t.v);
+  assert.strictEqual(b.n,0,"an unconfirmed top must not enter the statistics");
+  assert.strictEqual(b.state,"running","still measured as an up-leg off the last confirmed low");
+  assert.ok(b.legPct>20);
+});
+
+test("bumpProfile does not score a give-back that has not finished yet",()=>{
+  // Three fade bars confirms the top (−12.9%) but the 6-bar forward window has not elapsed.
+  const t=squeezeTape({fadeBars:3,tailBars:0}), b=S.bumpProfile(t.c,t.v);
+  assert.strictEqual(b.n,1);
+  assert.strictEqual(b.completed,0,"measuring a half-finished retrace would flatter every recent bump");
+  assert.strictEqual(b.retraceMed,null);
+});
+
+test("bumpProfile reads the live leg, so a running squeeze is caught while it runs",()=>{
+  const t=squeezeTape({fadeBars:0,tailBars:0}), b=S.bumpProfile(t.c,t.v);
+  assert.ok(["running","late"].includes(b.state),"tape ends at the peak, got "+b.state);
+  assert.ok(b.legPct>20&&b.legHours>0);
+  assert.ok(b.volX>1.5,"the squeeze bars carry 9x the volume of the grind, got "+b.volX);
+});
+
+test("bumpProfile keeps close and volume aligned when a bad bar is dropped",()=>{
+  const t=squeezeTape();
+  const c=t.c.slice(), v=t.v.slice();
+  c.splice(10,0,NaN); v.splice(10,0,999);          // one junk bar, mid-grind
+  const a=S.bumpProfile(t.c,t.v), b=S.bumpProfile(c,v);
+  assert.strictEqual(b.n,a.n);
+  assert.strictEqual(b.volX,a.volX,"filtering close alone would shift volume by one bar");
+});
+
+test("bumpProfile returns null rather than guessing from too little history",()=>{
+  assert.strictEqual(S.bumpProfile([1,2,3],[1,1,1]),null);
+});
+
+test("dumpBounce attaches a fast-chart read to the coins it surfaces",async()=>{
+  const d=await S.dumpBounce(true);
+  const withBump=d.rows.filter(r=>r.bump);
+  assert.ok(withBump.length>0,"stage 2 runs on the survivors");
+  for(const r of withBump){
+    assert.ok(["quiet","building","running","late","fading"].includes(r.bump.state));
+    assert.ok(r.bumpInfo&&r.bumpInfo.label&&r.bumpInfo.what);
+    assert.strictEqual(r.bump.tf,"4h");
+    if(r.bump.n)assert.ok(r.bump.medPct>=20&&r.bump.medHours<=72,"bumps are big AND fast by definition");
+    assert.ok(Array.isArray(r.fastSpark)&&r.fastSpark.length>1);
+  }
+  assert.ok(d.rows.every(r=>r.a===undefined),"the internal asset handle must not leak into the API");
 });
