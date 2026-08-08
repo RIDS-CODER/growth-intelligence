@@ -9,6 +9,8 @@ instruments.json
 setups.json
 # paper-trading bot state
 paper-state.json
+# trades you told the watcher about (symbols, entries, Telegram chat ids)
+positions.json
 
 node_modules/
 .DS_Store

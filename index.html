@@ -175,6 +175,7 @@
     <button class="btn" id="quickBtn" onclick="toggleQuick()" style="border-color:#f59e0b;background:rgba(245,158,11,.15);color:#fde68a">⚡ Quick Trades</button>
     <button class="btn" id="moversBtn" onclick="toggleMovers()" style="border-color:#fb7185;background:rgba(251,113,133,.14);color:#fecdd3">🔥 Volume Movers</button>
     <button class="btn" id="listBtn" onclick="toggleListings()" style="border-color:#c084fc;background:rgba(192,132,252,.14);color:#e9d5ff">🎢 Dump &amp; Bounce</button>
+    <button class="btn" id="posBtn" onclick="togglePositions()" style="border-color:#f472b6;background:rgba(244,114,182,.14);color:#fbcfe8">🔔 Position Watch</button>
     <button class="btn" id="paperBtn" onclick="togglePaper()" style="border-color:#34d399;background:rgba(52,211,153,.14);color:#a7f3d0">🤖 Paper Bot</button>
     <span class="pstat" id="filterNote"></span>
   </div>
@@ -184,6 +185,7 @@
   <div id="quickPanel" style="display:none"></div>
   <div id="moversPanel" style="display:none"></div>
   <div id="listPanel" style="display:none"></div>
+  <div id="posPanel" style="display:none"></div>
   <div id="researchPanel" style="display:none"></div>
   <div id="paperPanel" style="display:none"></div>
   <div id="tradesPanel" style="display:none"></div>
@@ -1198,7 +1200,7 @@ async function loadListings(force){
     if(d.usdtInr>0){usdtInr=d.usdtInr;scalpRateSrc=d.rateSrc||scalpRateSrc;}
     listState.data=d; }
   catch(e){ listState.err=String(e.message||e); }
-  listState.loading=false; renderListShell();
+  listState.loading=false; trackedAt=0; renderListShell();
 }
 // Log scale, always. These coins run −95% from the peak; on a linear axis the whole post-crash
 // life — which is the part you would actually be trading — collapses into a flat line.
@@ -1347,6 +1349,125 @@ function nlCard(r,i){
       <div class="sub" style="margin-top:5px">${r.sym}${r.tk?' · <a style="color:var(--accent2);cursor:pointer" onclick="event.stopPropagation();openResearchFor(\''+r.tk+'\',\'short\')">🔎 research</a>':''}</div>
     </div></div>`;
 }
+
+/* ============================================================
+   🔔 POSITION WATCH — a trade YOU placed, watched on the server.
+
+   Distinct from the other two things that look similar:
+     📋 My Trades      — browser-only P&L notebook; dies with the tab, never touches Telegram.
+     📌 Tracked setups — recommendations THIS APP made, followed to an outcome.
+     🔔 Position Watch — "I bought X at Y." Lives server-side, so the watch keeps running with
+                         the browser shut, and pings ONE named Telegram user — the person who
+                         actually placed it — the moment the signal turns against them.
+   ============================================================ */
+let posState={open:false,data:null,loading:false,err:'',msg:'',uni:null,form:{side:'long',tf:'1h'}};
+let posTimer=null;
+function togglePositions(){const el=document.getElementById('posPanel');posState.open=el.style.display==='none';
+  el.style.display=posState.open?'block':'none';
+  if(posState.open){ renderPosShell(); loadPositions(); loadUniverse();
+    if(posTimer)clearInterval(posTimer);
+    posTimer=setInterval(()=>{ if(posState.open)loadPositions(true); },30000);
+  }else if(posTimer){clearInterval(posTimer);posTimer=null;}}
+async function loadUniverse(){
+  if(posState.uni)return;
+  try{ posState.uni=await(await fetch('/api/universe')).json(); renderPosShell(); }catch(e){}
+}
+async function loadPositions(quiet){
+  if(!quiet)posState.loading=true, renderPosBody();
+  try{ const d=await(await fetch('/api/positions?_='+Date.now())).json();
+    if(d.usdtInr>0)usdtInr=d.usdtInr;
+    posState.data=d; posState.err=''; }
+  catch(e){ posState.err=String(e.message||e); }
+  posState.loading=false; renderPosBody();
+}
+async function addPosition(){
+  const g=id=>(document.getElementById(id)||{}).value;
+  const body={sym:g('posSym'),side:g('posSide'),entry:+g('posEntry'),qty:+g('posQty')||null,tf:g('posTf'),
+    chat:g('posChat'), chatName:(document.getElementById('posChat')||{}).selectedOptions?.[0]?.textContent||''};
+  if(!body.sym){posState.msg='⚠ Pick a symbol first.';return renderPosBody();}
+  if(!(body.entry>0)){posState.msg='⚠ Enter the price you actually got filled at.';return renderPosBody();}
+  posState.msg='⏳ Adding…'; renderPosBody();
+  try{
+    const d=await(await fetch('/api/positions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
+    if(d.error){posState.msg='⚠ '+d.error;}
+    else{ posState.msg='✅ Watching '+(d.position.tk||d.position.sym)+(body.chat?' — a confirmation just went to '+(body.chatName||'that Telegram user'):'');
+      ['posEntry','posQty'].forEach(i=>{const el=document.getElementById(i);if(el)el.value='';}); }
+  }catch(e){ posState.msg='⚠ '+String(e.message||e); }
+  await loadPositions(true);
+}
+async function removePosition(id,label){
+  if(!confirm('Stop watching '+label+'? This only stops the alerts — it does not close anything on your exchange.'))return;
+  try{ await fetch('/api/positions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'close',id})}); }catch(e){}
+  posState.msg='Removed '+label+'.'; await loadPositions(true);
+}
+const posSideCol=s=>s>0?'var(--buy)':'var(--sell)';
+function posStatus(p){
+  if(p.err)return {txt:'⚠ can’t read — '+p.err,col:'#fbbf24'};
+  if(p.rev)return {txt:'⚠ REVERSED — signal is against you',col:'var(--sell)'};
+  if(p.verdict==='HOLD')return {txt:'• no clear signal either way',col:'var(--muted)'};
+  return {txt:'✅ signal still agrees ('+p.verdict+')',col:'var(--buy)'};
+}
+function posRow(p){
+  const dec=p.entry<5?4:2, f=v=>v==null||!isFinite(v)?'—':'₹'+(+v).toFixed(dec);
+  const st=posStatus(p), pnl=p.pnlPct;
+  return `<div class="trow" style="border-color:${p.rev?'rgba(234,57,67,.5)':'var(--line)'}">
+    <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:baseline">
+      <div><b style="color:${posSideCol(p.side)}">${p.side>0?'LONG':'SHORT'}</b> <b>${p.name||p.tk||p.sym}</b>
+        <span class="sub">${p.tf} · from ${f(p.entry)}${p.qty?' · qty '+p.qty:''}</span></div>
+      <div style="text-align:right">${pnl!=null?`<b style="color:${pnl>=0?'var(--buy)':'var(--sell)'}">${pnl>=0?'+':''}${pnl}%</b> `:''}
+        <span class="sub">live ${f(p.price)}</span></div>
+    </div>
+    <div class="sub" style="margin-top:4px;color:${st.col}">${st.txt}</div>
+    <div class="sub" style="margin-top:3px">📣 alerts to <b>${p.chatName||(p.chat?'chat …'+String(p.chat).slice(-4):'nobody — no Telegram user was picked')}</b>${p.alerts?' · '+p.alerts+' sent':''}
+      · <a style="color:var(--sell);cursor:pointer" onclick="removePosition('${p.id}','${(p.tk||p.sym).replace(/'/g,"")}')">stop watching</a></div>
+  </div>`;
+}
+function renderPosShell(){
+  const el=document.getElementById('posPanel'); if(!el)return;
+  const d=posState.data||{}, uni=posState.uni;
+  const opts=(uni?[...uni.crypto,...uni.other]:[]).slice(0,600)
+    .map(a=>`<option value="${a.sym}">${a.tk||a.sym}${a.name&&a.name!==a.tk?' — '+a.name:''} (${a.cls})</option>`).join('');
+  const chats=d.chats||[];
+  const chatSel=!d.hasToken
+    ? `<div class="sub" style="color:#fbbf24">No Telegram bot token set on the server, so alerts can’t be sent. Positions are still watched and shown here.</div>`
+    : chats.length
+      ? `<select id="posChat" class="editin" style="min-width:180px">${chats.map(c=>`<option value="${c.id}">${c.name||('chat …'+String(c.id).slice(-4))}</option>`).join('')}</select>`
+      : `<div class="sub" style="color:#fbbf24">Nobody has messaged the bot yet. Open it in Telegram, send it “hi”, then reopen this panel — you’ll then be able to pick who gets the alerts.</div>`;
+  el.innerHTML=`<div class="tradespanel" style="border-color:rgba(244,114,182,.45)">
+    <h3>🔔 Position Watch <span class="sub">— trades you placed, watched on the server</span>
+      <button class="btn" style="padding:2px 9px;font-size:11px" onclick="loadPositions()">↻ refresh</button>
+      <span class="sub">${d.ts?'· checked '+new Date(d.ts).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true}):''} · auto ⟳ 30s · server re-checks every 2 min</span></h3>
+    <div class="sub" style="line-height:1.55;margin:2px 0 8px">
+      Tell it what you bought or shorted and at what price. It keeps reading the signal behind that trade and, the moment the signal
+      <b>turns against you</b>, sends <b>one Telegram message to the person you name below</b> — and one more if it comes back onside.
+      Nothing in between, so a trade that sits reversed won’t spam you. This runs <b>on the server</b>, so it keeps working with this
+      tab closed. It never places or closes anything on your exchange — it only tells you.
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+      <input id="posSym" class="editin" list="posUni" placeholder="Symbol (e.g. BTC)" style="width:150px">
+      <datalist id="posUni">${opts}</datalist>
+      <select id="posSide" class="editin"><option value="long">LONG (bought)</option><option value="short">SHORT (sold)</option></select>
+      <input id="posEntry" class="editin" type="number" step="any" placeholder="Your entry price" style="width:140px">
+      <input id="posQty" class="editin" type="number" step="any" placeholder="Qty (optional)" style="width:120px">
+      <select id="posTf" class="editin">${['15m','30m','1h','4h','daily'].map(t=>`<option value="${t}"${t==='1h'?' selected':''}>${t} signal</option>`).join('')}</select>
+      <span class="sub">alert:</span>${chatSel}
+      <button class="btn go" style="padding:6px 14px" onclick="addPosition()">+ Watch this trade</button>
+    </div>
+    <div id="posBody"></div></div>`;
+  renderPosBody();
+}
+function renderPosBody(){
+  const el=document.getElementById('posBody'); if(!el)return;
+  const d=posState.data;
+  const msg=posState.msg?`<div class="sub" style="margin-bottom:8px;padding:6px 9px;border-radius:8px;background:rgba(255,255,255,.04);border:1px solid var(--line)">${posState.msg}</div>`:'';
+  if(posState.err){el.innerHTML=msg+'<div class="sub" style="padding:12px;color:var(--sell)">Couldn’t load: '+posState.err+'</div>';return;}
+  if(posState.loading&&!d){el.innerHTML=msg+'<div class="sub" style="padding:12px">⏳ Loading…</div>';return;}
+  const list=(d&&d.positions)||[];
+  if(!list.length){el.innerHTML=msg+'<div class="empty">No positions being watched. Add one above and you’ll get a Telegram message if the signal turns against it.</div>';return;}
+  const rev=list.filter(p=>p.rev).length;
+  el.innerHTML=msg+`<div class="sub" style="margin-bottom:6px">${list.length} watched${rev?` · <b style="color:var(--sell)">${rev} reversed</b>`:' · all onside'}</div>`
+    +list.map(posRow).join('');
+}
 const NL_FILTERS=[['all','All'],['buy','🟢 Buy now'],['short','🔴 Short now'],['wait_buy','⏳ Waiting to buy'],['wait_short','⏳ Waiting to short']];
 function renderListShell(){
   const el=document.getElementById('listPanel'); if(!el)return;
@@ -1369,8 +1490,9 @@ function renderListShell(){
       instruction refresh every 20 seconds</b>, so the card never tells you to buy a zone price has already left.
     </div>
     <div style="display:flex;gap:5px;flex-wrap:wrap;margin:4px 0 8px;align-items:center">${tabs}${scalpCcyTabs('Crypto')}</div>
+    <div id="listTracked"></div>
     <div id="listBody"></div></div>`;
-  renderListBody();
+  renderListBody(); renderTracked('listTracked');   // live plans are tracked server-side — show them HERE, where they came from
 }
 function renderListBody(){
   const el=document.getElementById('listBody'); if(!el)return;

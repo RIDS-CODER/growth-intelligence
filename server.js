@@ -1912,6 +1912,112 @@ async function alertScan(){
   }
   try{ await dumpBounceAlerts(); }catch(e){}
 }
+/* ============================================================
+   🔔 POSITION WATCH — trades YOU actually placed, watched server-side.
+
+   Different from 📋 My Trades (browser-only, localStorage, dies with the tab) and from
+   📌 Tracked setups (recommendations the app made). This is: "I bought X at Y — tell me if the
+   reason to hold it disappears." It lives on the server so the watch keeps running with the
+   browser closed, which is the only way a reversal alert is worth anything.
+
+   Each position names ONE Telegram recipient — the person who actually placed the trade — and
+   alerts go only to them, never to the broadcast list. Alerts fire on state TRANSITIONS
+   (onside → reversed, reversed → back onside), never on a timer, so a trade that sits reversed
+   pings once rather than every two minutes.
+   ============================================================ */
+const POS_FILE=path.join(__dirname,"positions.json");
+const POS_SWEEP_MS=120000;
+let POSITIONS=[];
+try{const j=JSON.parse(fs.readFileSync(POS_FILE,"utf8"));if(Array.isArray(j))POSITIONS=j;}catch(e){}
+let posDirty=false;
+function savePositions(){if(!posDirty)return;try{fs.writeFileSync(POS_FILE,JSON.stringify(POSITIONS));posDirty=false;}catch(e){}}
+// Find a tradeable instrument by symbol OR ticker, across every universe this server knows.
+function resolveAsset(sym){
+  const q=String(sym||"").trim().toUpperCase(); if(!q)return null;
+  const all=[...CRYPTO,...STOCKS,...ETFS,...INDICES,...COMMODITIES];
+  return all.find(a=>String(a.sym).toUpperCase()===q)
+      || all.find(a=>String(a.tk||"").toUpperCase()===q)
+      || all.find(a=>String(a.sym).toUpperCase().startsWith(q))
+      || null;
+}
+async function positionData(asset,tf){
+  if(asset.src==="cg")return await loadCrypto(asset,tf);
+  if(DEMO)return synth(hashStr(asset.sym),tf==="daily"?500:400,0.03);
+  if(!loggedIn())throw new Error("login");
+  await ensureInstruments();
+  const key=keyForAsset(asset); if(!key)throw new Error("no instrument key");
+  return await upstoxCandles(key,tf);
+}
+// Current verdict + price for one position. Drops the forming bar, exactly like /api/signal.
+async function positionSignal(pos){
+  const asset=resolveAsset(pos.sym); if(!asset)throw new Error("unknown symbol");
+  if(asset.src==="cg"&&!DEMO){try{await ensureCryptoUniverse();}catch(e){}}
+  const d=await positionData(asset,pos.tf||"1h");
+  if(!d||!d.close||d.close.length<41)throw new Error("not enough history");
+  const sig=computeSignal(d.close.slice(0,-1),d.high.slice(0,-1),d.low.slice(0,-1),(pos.tf==="daily")?20:12);
+  return {price:d.price||d.close[d.close.length-1],verdict:sig.verdict,score:sig.score};
+}
+const posPnl=(p,px)=>(p.entry>0&&px>0)?+((p.side>0?px/p.entry-1:1-px/p.entry)*100).toFixed(2):null;
+function fmtPosAlert(p,kind,px,verdict){
+  const dec=p.entry<5?4:2, f=v=>"₹"+(+v).toFixed(dec);
+  const pnl=posPnl(p,px), side=p.side>0?"LONG":"SHORT";
+  const pl=pnl==null?"":`\nP&L <b>${pnl>=0?"+":""}${pnl}%</b> from your ${f(p.entry)} entry`;
+  if(kind==="watch")
+    return `👀 <b>Now watching your ${side} ${p.tk||p.sym}</b>\n`+
+      `Entry ${f(p.entry)} · ${p.tf} chart · live ${f(px)}\n`+
+      `You will get one message here if the signal turns against this trade, and one if it comes back. Nothing in between.`;
+  if(kind==="reversed")
+    return `⚠️ <b>YOUR TRADE REVERSED — ${p.tk||p.sym}</b>\n`+
+      `Your <b>${side}</b> is now against the signal (<b>${verdict}</b> on ${p.tf}).${pl}\n`+
+      `Live ${f(px)}\n\n`+
+      `<b>The reason you entered is gone.</b> Either close it, or move your stop to where you would admit you were wrong — do not widen it and hope.\n`+
+      `<i>Simulation / not financial advice — verify on your platform.</i>`;
+  if(kind==="onside")
+    return `✅ <b>Back onside — ${p.tk||p.sym}</b>\n`+
+      `The signal agrees with your <b>${side}</b> again (<b>${verdict}</b> on ${p.tf}).${pl}\nLive ${f(px)}`;
+  return "";
+}
+async function positionsSweep(){
+  const open=POSITIONS.filter(p=>p.status==="open");
+  if(!open.length)return 0;
+  let sent=0;
+  for(const p of open){
+    let s; try{ s=await positionSignal(p); }catch(e){ p.err=String(e.message||e).slice(0,60); posDirty=true; continue; }
+    delete p.err;
+    p.price=s.price; p.verdict=s.verdict; p.pnlPct=posPnl(p,s.price); p.seen=Date.now(); posDirty=true;
+    // HOLD is not a reversal — it means the engine has no opinion, which is not the same as
+    // disagreeing with you. Only an explicitly opposite verdict counts.
+    const against = p.side>0 ? s.verdict==="SELL" : s.verdict==="BUY";
+    if(against&&!p.rev){
+      p.rev=Date.now(); p.alerts=(p.alerts||0)+1;
+      if(TG_TOKEN&&p.chat){ const r=await tgSend(p.chat,fmtPosAlert(p,"reversed",s.price,s.verdict)); if(r.ok)sent++; }
+    }else if(!against&&p.rev){
+      delete p.rev; p.alerts=(p.alerts||0)+1;
+      if(TG_TOKEN&&p.chat){ const r=await tgSend(p.chat,fmtPosAlert(p,"onside",s.price,s.verdict)); if(r.ok)sent++; }
+    }
+  }
+  savePositions();
+  return sent;
+}
+async function addPosition(b){
+  const asset=resolveAsset(b.sym); if(!asset)return {error:"Unknown symbol — pick one from the list."};
+  const side=(String(b.side).toLowerCase()==="short"||+b.side<0)?-1:1;
+  const entry=+b.entry;
+  if(!(entry>0))return {error:"Entry price must be a positive number."};
+  const tf=TF_MIN[b.tf]?b.tf:"1h";
+  const p={id:"p"+Date.now().toString(36)+Math.random().toString(36).slice(2,6),
+    sym:asset.sym,tk:asset.tk||"",name:asset.name||asset.tk||asset.sym,cls:asset.cls||"",src:asset.src||"",
+    side,entry,qty:+b.qty>0?+b.qty:null,tf,
+    chat:String(b.chat||"").trim()||null, chatName:String(b.chatName||"").trim()||null,
+    created:Date.now(),status:"open",alerts:0,note:String(b.note||"").slice(0,120)};
+  POSITIONS.push(p); posDirty=true;
+  try{ const s=await positionSignal(p); p.price=s.price; p.verdict=s.verdict; p.pnlPct=posPnl(p,s.price);
+       if(p.side>0?s.verdict==="SELL":s.verdict==="BUY")p.rev=Date.now(); }catch(e){ p.err=String(e.message||e).slice(0,60); }
+  // Confirm to the chosen recipient immediately — it proves the alert route works before it matters.
+  if(TG_TOKEN&&p.chat&&p.price>0){ try{ await tgSend(p.chat,fmtPosAlert(p,"watch",p.price)); }catch(e){} }
+  savePositions();
+  return {ok:true,position:p};
+}
 function sendJSON(res,o,c=200){const b=JSON.stringify(o);res.writeHead(c,{"Content-Type":"application/json","Access-Control-Allow-Origin":"*"});res.end(b);}
 const MIME={".html":"text/html",".js":"text/javascript",".css":"text/css",".json":"application/json",".svg":"image/svg+xml"};
 async function handler(req,res){
@@ -1966,6 +2072,21 @@ async function handler(req,res){
       const cl=data.close.slice(0,-1),hi=data.high.slice(0,-1),lo=data.low.slice(0,-1);
       const sig=computeSignal(cl,hi,lo,tf==='daily'?20:12);
       return sendJSON(res,{sym,verdict:sig.verdict,score:sig.score});}
+    if(p==="/api/positions"){   // 🔔 trades you placed, watched server-side for a reversal
+      if(req.method==="POST"){ const body=await readBody(req); let b={}; try{b=JSON.parse(body);}catch(e){return sendJSON(res,{error:"bad json"},400);}
+        if(b.action==="close"||b.action==="delete"){
+          const i=POSITIONS.findIndex(x=>x.id===b.id); if(i<0)return sendJSON(res,{error:"not found"},404);
+          const [gone]=POSITIONS.splice(i,1); posDirty=true; savePositions(); return sendJSON(res,{ok:true,removed:gone.id}); }
+        if(!DEMO)try{await ensureCryptoUniverse();}catch(e){}
+        return sendJSON(res,await addPosition(b)); }
+      const chats=await listChats();
+      return sendJSON(res,{positions:POSITIONS.slice().sort((a,b)=>b.created-a.created),
+        chats, hasToken:!!TG_TOKEN, usdtInr:priceRate(), rateSrc:priceRateSrc(), ts:Date.now(), demo:DEMO}); }
+    if(p==="/api/positions/sweep"){ return sendJSON(res,{sent:await positionsSweep(),positions:POSITIONS}); }
+    if(p==="/api/universe"){    // symbols the watcher will accept, for the add-position picker
+      if(!DEMO)try{await ensureCryptoUniverse();}catch(e){}
+      const map=a=>({sym:a.sym,tk:a.tk||"",name:a.name||a.tk||a.sym,cls:a.cls||""});
+      return sendJSON(res,{crypto:CRYPTO.map(map),other:[...STOCKS,...ETFS,...INDICES,...COMMODITIES].map(map)}); }
     if(p==="/api/alert/status"){ const chats=await resolveChats(); return sendJSON(res,{hasToken:!!TG_TOKEN,configured:!!(TG_TOKEN&&chats.length),recipients:chats.length,explicit:!!TG_CHATS.length,chat:chats.length?('…'+String(chats[0]).slice(-4)+(chats.length>1?' +'+(chats.length-1)+' more':'')):null,on:alertState.on,minConf:alertState.minConf,tfs:alertState.tfs,lastRun:alertState.lastRun,sent:alertState.sent,lastErr:alertState.lastErr}); }
     if(p==="/api/alert/detectchat"){ const c=await detectChat(true); return sendJSON(res,{hasToken:!!TG_TOKEN,found:!!c,chat:c?('…'+String(c).slice(-4)):null,lastErr:alertState.lastErr}); }
     if(p==="/api/alert/chats"){ return sendJSON(res,{hasToken:!!TG_TOKEN,chats:await listChats(),using:(TG_CHATS.length?TG_CHATS:(detectedChat?[detectedChat]:[])).map(String),explicit:!!TG_CHATS.length}); }
@@ -1992,6 +2113,10 @@ if(require.main===module){
   setInterval(()=>{ paper.tick().catch(()=>{}); }, 60000);
   // Setup-tracker sweep — follow every recommended scalp to its stop/target/expiry, once a minute.
   setInterval(()=>{ setupsSweep().catch(()=>{}); }, 60000);
+  // 🔔 Position watch — re-read the signal behind every trade you told us you placed, and ping
+  // its owner on Telegram the moment it turns against them. Runs regardless of the alert toggle:
+  // you asked to be told about YOUR money, so it is not lumped in with scan broadcasts.
+  setInterval(()=>{ positionsSweep().catch(()=>{}); }, POS_SWEEP_MS);
   // Telegram alert loop — scan for High-confidence quick scalps every 3 min (inert until a bot token is configured).
   if(TG_TOKEN){ console.log('  Telegram alerts: ON (chat auto-detected from whoever messages the bot)'); setInterval(()=>{ alertScan().catch(()=>{}); }, 180000); setTimeout(()=>alertScan().catch(()=>{}),15000); }
   else console.log('  Telegram alerts: off (set TELEGRAM_BOT_TOKEN to enable — chat ID optional)');
@@ -2001,6 +2126,8 @@ module.exports={IND,computeSignal,buildSetup,buildReasons,confidenceOf,alertElig
   backtestSeries,scoreSeriesArr,backtest,processAsset,blendResearch,assetBtScore,cdxLiveInr,cdxUsdtInr,topMovers,ticker24,
   trackSetups,sweepSetups,updateSetupWithPrice,setupStats,markReversals,realizedPct,volMetrics,priceRate,priceRateSrc,
   planTrackables,fmtPlanAlert,dumpBounceAlerts,
+  resolveAsset,positionSignal,positionsSweep,addPosition,fmtPosAlert,posPnl,
+  __getPositions:()=>POSITIONS,__resetPositions:()=>{POSITIONS=[];},
   zigzag,listingProfile,bumpProfile,tradePlan,planNowFor,backtestPlan,forwardStats,dumpBounce,sparkline,synthListing,synthBump,cleanSeries,cleanOHLC,
   __setFx:(r)=>{fxRate=r;fxAt=Date.now();},__setMode:(m)=>{cryptoMode=m;},
   __getSetups:()=>SETUPS,__resetSetups:()=>{SETUPS={active:[],resolved:[]};},
