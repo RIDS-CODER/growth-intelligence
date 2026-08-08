@@ -188,7 +188,9 @@ test("dumpBounce returns ranked rows with everything a card needs",async()=>{
     assert.ok(r.ddPct>=40,"a coin still near its high is not in this regime");
     assert.ok(r.peakAgeDays>=30,"the high must be old — otherwise it is a pullback, not a bleed");
     if(r.verifiedListing)assert.ok(r.peakPos<=0.6,"peaked late = a recent runner, not a bled coin");
-    assert.ok(r.cycles>=1&&r.rally.medPct>=15,"needs bounces big enough to be worth trading");
+    // Cycle count and bounce size are RANKING inputs now, not gates — they used to reject half
+    // the bleeding coins, so they must never be asserted as guarantees here.
+    assert.ok(r.cycles>=0&&typeof r.score==="number");
     assert.ok(r.phaseInfo&&r.phaseInfo.label&&r.phaseInfo.what);
     assert.ok(r.fwd&&r.fwd.baseN>0,"every row carries its own base rate");
     assert.ok(Array.isArray(r.spark)&&r.spark.length>1);
@@ -291,4 +293,90 @@ test("dumpBounce attaches a fast-chart read to the coins it surfaces",async()=>{
     assert.ok(Array.isArray(r.fastSpark)&&r.fastSpark.length>1);
   }
   assert.ok(d.rows.every(r=>r.a===undefined),"the internal asset handle must not leak into the API");
+});
+
+/* ---------------- the gates, and what they must NOT reject ---------------- */
+
+// A coin in a near-monotonic bleed whose bumps are sharp and intraday: it never forms a 15% leg
+// between two DAILY closes, so it has no complete daily cycle. This is the COOKIE / XAI case, and
+// an earlier cut of the scanner threw exactly these away.
+function monotonicBleeder(seed){
+  let s=seed||1; const r=()=>{s=(s*16807)%2147483647;return s/2147483647;};
+  const c=[]; let x=100;
+  for(let i=0;i<3;i++){c.push(x);x*=1.5;}
+  for(let i=0;i<300;i++){x=Math.max(1e-6,x*(1-0.011+0.010*Math.sin(i/9)+(r()-0.5)*0.04));c.push(x);}
+  return c;
+}
+
+test("a monotonic bleeder has no daily cycle — and must still qualify",()=>{
+  const p=S.listingProfile(monotonicBleeder(7919));
+  assert.strictEqual(p.cycles,0,"fixture check: no complete 15% daily leg either way");
+  // The only two gates. Requiring a cycle here rejected half of a bleeding-coin population.
+  assert.ok(p.ddPct>=35,"deep below its high");
+  assert.ok(p.peakAgeDays>=20,"and that high is old");
+});
+
+/* ---------------- tradePlan — the levels ---------------- */
+
+function planFor(seed){
+  const fd=S.synthBump(seed||4242);
+  return S.tradePlan(fd.close,fd.high,fd.low,S.bumpProfile(fd.close,fd.vol));
+}
+
+test("tradePlan orders the long: stop below the zone, targets strictly above it",()=>{
+  const L=planFor().long;
+  assert.ok(L.stop<L.entryLo,"stop under the floor");
+  assert.ok(L.entryLo<L.entryHi);
+  assert.ok(L.entryHi<L.targets[0]);
+  assert.ok(L.targets[0]<L.targets[1]&&L.targets[1]<L.targets[2],"strictly progressing");
+  assert.ok(L.ret.every(v=>v>0)&&L.riskPct>0&&L.rrr>0);
+});
+
+test("tradePlan orders the short the other way — this is the with-trend side",()=>{
+  const S_=planFor().short;
+  assert.ok(S_.stop>S_.entryHi,"stop above the zone");
+  assert.ok(S_.entryLo<S_.entryHi);
+  assert.ok(S_.entryLo>S_.targets[0]);
+  assert.ok(S_.targets[0]>S_.targets[1]&&S_.targets[1]>S_.targets[2]);
+  assert.ok(S_.ret.every(v=>v>0),"a short's return is positive when price falls");
+});
+
+test("no long target sits above known resistance while that level goes unlisted",()=>{
+  // The regression: projecting off the median bump alone put T1 ABOVE the swing high where this
+  // coin's bumps had actually died, and never listed that high at all.
+  // The invariant: you may never be told to hold for a level BEYOND known resistance without
+  // that resistance itself being listed as the nearer target. (A ladder that stops short of the
+  // roof entirely is fine — that just means resistance is past even the stretch target.)
+  let checked=0;
+  for(const seed of [11,222,3333,44444,555555,66,777,8888]){
+    const p=planFor(seed); if(!p)continue;
+    if(p.long.targets.some(t=>t>p.roof)){
+      checked++;
+      assert.ok(p.long.targets.some(t=>Math.abs(t/p.roof-1)<0.001),
+        "seed "+seed+": resistance at "+p.roof+" skipped by "+p.long.targets.join("/"));
+    }
+  }
+  assert.ok(checked>0,"fixture check: at least one plan must actually reach past the roof");
+});
+
+test("tradePlan gives exactly one instruction, and it agrees with the price",()=>{
+  for(const seed of [11,222,3333,44444,555555]){
+    const p=planFor(seed); if(!p)continue;
+    assert.ok(["buy","short","wait_buy","wait_short"].includes(p.now));
+    if(p.now==="buy")assert.ok(p.price<=p.long.entryHi);
+    if(p.now==="short")assert.ok(p.price>=p.short.entryLo);
+    if(p.now.startsWith("wait"))assert.ok(p.price>p.long.entryHi&&p.price<p.short.entryLo,"waiting means mid-air");
+  }
+});
+
+test("tradePlan still produces levels for a coin with no measured bump, and says they are estimated",()=>{
+  const fd=S.synthBump(31337);
+  const p=S.tradePlan(fd.close,fd.high,fd.low,null);
+  assert.ok(p&&p.long&&p.short);
+  assert.strictEqual(p.fromBump,false,"the card must be able to soften the targets");
+  assert.ok(p.bumpPct>0);
+});
+
+test("tradePlan refuses to place a stop it cannot justify",()=>{
+  assert.strictEqual(S.tradePlan([1,2,3],[1,2,3],[1,2,3],null),null);
 });

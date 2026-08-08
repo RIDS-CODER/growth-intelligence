@@ -1185,83 +1185,83 @@ function nlEdge(f){
   return {txt:`Buying a dip like this won <b>${w}%</b> of the time vs <b>${b}%</b> buying on any random day — a gap of ${e>0?'+':''}${e} points, which is noise. You would just be holding a volatile coin.`,col:'#fbbf24'};
 }
 /* The bump block — the headline of every card, because it is the only part with a clock on it. */
-function nlBump(r){
-  const b=r.bump, bi=r.bumpInfo||{};
-  if(!b)return `<div class="sub" style="margin:9px 0;padding:8px 10px;border-radius:9px;background:rgba(255,255,255,.03);border:1px solid var(--line)">
-    ⏱ <b>No fast-chart read.</b> ${r.bumpErr?'The 4h history did not load ('+r.bumpErr+').':'Not enough 4h history to measure this coin\'s bumps.'} Judge it on the daily cycle below only.</div>`;
-  const col=NL_PCOL[bi.col]||'var(--muted)';
-  const none=!b.n;
-  // A bump that gets fully given back is not a hold — it is a take-profit-into-strength trade,
-  // and that is the single most useful sentence on the card.
-  const give=b.retraceMed!=null
-    ? `Afterwards they gave back a median <b>${b.retraceMed}%</b> of the move within the same window${b.fullRate!=null?`, and <b>${b.fullRate}%</b> of them round-tripped completely`:''}.
-       ${b.retraceMed>=70?'<b style="color:var(--sell)">These do not hold. Take profit into strength or you give it all back.</b>':''}`
-    : 'None of them have had time to play out yet, so there is no give-back number.';
-  const volTxt=b.volX==null?'' : b.volX>=1.5
-    ? `<b style="color:var(--buy)">${b.volX}× normal volume</b> on this leg — a real crowd, not a wick.`
-    : b.volX>=0.9 ? `${b.volX}× normal volume on this leg — ordinary participation.`
-    : `<b style="color:#fbbf24">only ${b.volX}× normal volume</b> on this leg — thin, so treat the move as unconfirmed.`;
-  return `<div style="margin:9px 0 6px;padding:9px 11px;border-radius:9px;background:rgba(192,132,252,.08);border:1px solid ${col}">
-      <div style="font-size:13.5px;font-weight:700;color:${col}">${bi.icon||''} ${bi.label||'—'} <span class="sub" style="font-weight:500">· on the ${b.tf} chart</span></div>
-      <div class="sub" style="margin-top:3px;line-height:1.5;color:var(--txt)">${bi.what||''}</div>
-      <div class="sub" style="margin-top:5px">Current leg <b style="color:${b.legPct>=0?'var(--buy)':'var(--sell)'}">${nlPct(b.legPct)}</b> over <b>${nlHrs(b.legHours)}</b>${volTxt?' · '+volTxt:''}</div>
-      <div class="sub" style="margin-top:6px;line-height:1.5;padding-top:6px;border-top:1px dashed var(--line)">
-        ${none
-          ? `<b>No qualifying bump in the last ${b.windowDays} days.</b> A bump has to be ≥20% <i>and</i> done inside 3 days — a slow grind up is a different animal and is not counted. Without one, there is nothing here to time.`
-          : `Its bumps run a median <b style="color:var(--buy)">${nlPct(b.medPct)} in ~${nlHrs(b.medHours)}</b> — <b>${b.n}</b> of them in ${b.windowDays} days. ${give}`}
-      </div></div>`;
+/* One side of the plan: entry zone, stop, three targets. The LIVE side renders in full; the
+   other renders as a one-line "and then", with real levels so you can set the alert now. */
+function nlSide(s,label,note,live){
+  if(!s)return '';
+  const P=v=>scalpPrice(v,'Crypto'), buy=s.dir>0, col=buy?'var(--buy)':'var(--sell)';
+  if(!live)return `<div class="sub" style="margin-top:6px;padding:6px 9px;border-radius:8px;border:1px dashed var(--line);line-height:1.5">
+    <b style="color:${col}">${label}</b> — ${note} ${buy?'Buy':'Sell'} <b>${P(s.entryLo)}–${P(s.entryHi)}</b>, stop <b>${P(s.stop)}</b>, targets ${s.targets.map(t=>P(t)).join(' → ')} <span style="color:${col}">(+${s.ret.join('% / +')}%)</span> · R:R <b>${s.rrr}:1</b></div>`;
+  const tg=s.targets.map((t,k)=>`<div class="lv t${k+1}"><div class="k">Target ${k+1}</div><div class="v">${P(t)}</div><div class="r" style="color:${col}">+${s.ret[k]}%</div></div>`).join('');
+  return `<div style="font-size:13px;margin:4px 0"><b style="color:${col}">${label}</b> · R:R <b>${s.rrr}:1</b> <span class="sub">${note}</span></div>
+    <div class="qlevels">
+      <div class="lv entry" style="grid-column:1/-1"><div class="k">${buy?'Buy':'Short'} between</div><div class="v">${P(s.entryLo)} &nbsp;–&nbsp; ${P(s.entryHi)}</div></div>
+      <div class="lv stop"><div class="k">Stop loss</div><div class="v">${P(s.stop)}</div><div class="r" style="color:var(--sell)">−${s.riskPct}%</div></div>
+      ${tg}
+    </div>`;
+}
+/* THE TRADE — first thing on the card, because a pattern you cannot act on is trivia. */
+function nlPlan(r){
+  if(!r.plan)return `<div class="sub" style="margin:8px 0;padding:8px 10px;border-radius:9px;border:1px solid var(--line)">
+    ⏱ <b>No levels.</b> ${r.bumpErr?'The 4h history did not load ('+r.bumpErr+').':'Not enough 4h history to place a stop honestly, so none is offered.'}</div>`;
+  const p=r.plan, pi=r.planInfo||{}, col=NL_PCOL[pi.col]||'var(--muted)', P=v=>scalpPrice(v,'Crypto');
+  const buyLive=p.now==='buy', shortLive=p.now==='short';
+  const est=p.fromBump?'':' <span title="This coin has no completed bump on the 4h chart yet, so the target distance is estimated from its recent range instead of measured. Treat the targets as softer.">(sizes estimated, not measured)</span>';
+  const wait=p.now==='wait_buy'
+    ? `Set an alert at <b>${P(p.long.entryHi)}</b> — that is <b>${Math.abs(p.toBuy)}%</b> below here.`
+    : p.now==='wait_short' ? `Set an alert at <b>${P(p.short.entryLo)}</b> — that is <b>+${p.toShort}%</b> above here.` : '';
+  return `<div style="margin:8px 0 6px;padding:10px 12px;border-radius:10px;background:rgba(192,132,252,.08);border:1px solid ${col}">
+      <div style="font-size:14px;font-weight:800;color:${col}">${pi.icon||''} ${pi.label||''}</div>
+      <div class="sub" style="margin-top:3px;line-height:1.5;color:var(--txt)">${pi.lead||''}${est}</div>
+      ${wait?`<div class="sub" style="margin-top:4px">${wait}</div>`:''}
+      ${nlSide(p.long,'① LONG the bounce','counter-trend — take profit into strength.',buyLive||p.now==='wait_buy')}
+      ${nlSide(p.short,'② SHORT the failure','with-trend — this is the higher-probability side.',shortLive||p.now==='wait_short')}
+      <div class="sub" style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--line)">Floor <b>${P(p.floor)}</b> · where bumps have died <b>${P(p.roof)}</b> · live <b>${P(p.price)}</b></div>
+    </div>`;
+}
+/* The evidence behind the levels, in one strip rather than three paragraphs. */
+function nlEvidence(r){
+  const b=r.bump, bi=r.bumpInfo||{}, bcol=NL_PCOL[bi.col]||'var(--muted)';
+  const hold=b&&b.retraceMed!=null&&b.retraceMed>=70
+    ? `<b style="color:var(--sell)">Bumps here do not hold</b> — a median <b>${b.retraceMed}%</b> came straight back${b.fullRate?`, ${b.fullRate}% of them all the way`:''}. Take profit into strength.`
+    : b&&b.retraceMed!=null ? `Past bumps gave back a median <b>${b.retraceMed}%</b> afterwards.` : '';
+  return `<div class="qlevels" style="margin-top:8px">
+      <div class="lv"><div class="k">Its typical bump</div><div class="v" style="color:var(--buy)">${b&&b.medPct!=null?'+'+b.medPct+'%':'—'}</div><div class="r" style="color:var(--muted)">${b&&b.medHours?'in ~'+nlHrs(b.medHours)+' · '+b.n+' seen':'none measured'}</div></div>
+      <div class="lv"><div class="k">Right now (4h)</div><div class="v" style="color:${bcol};font-size:12px">${bi.icon||''} ${bi.label||'—'}</div><div class="r" style="color:var(--muted)">${b?nlPct(b.legPct)+' / '+nlHrs(b.legHours):'—'}${b&&b.volX!=null?' · '+b.volX+'× vol':''}</div></div>
+      <div class="lv stop"><div class="k">Off its high</div><div class="v" style="color:var(--sell)">−${r.ddPct}%</div><div class="r" style="color:var(--muted)">set ${r.peakAgeDays}d ago</div></div>
+    </div>
+    ${hold?`<div class="sub" style="margin-top:5px;line-height:1.5">${hold}</div>`:''}`;
 }
 function nlCard(r,i){
-  const ph=r.phaseInfo||{}, pcol=NL_PCOL[ph.col]||'var(--muted)', ed=nlEdge(r.fwd), f=r.fwd||{};
-  const bi=r.bumpInfo||{}, bcol=NL_PCOL[bi.col]||'var(--muted)';
-  const P=v=>scalpPrice(v,'Crypto');
+  const pi=r.planInfo||{}, pcol=NL_PCOL[pi.col]||'var(--muted)', ed=nlEdge(r.fwd), f=r.fwd||{};
+  const ph=r.phaseInfo||{}, P=v=>scalpPrice(v,'Crypto');
   // Honest about what we can and cannot see: a series that hit the 400-bar fetch cap means the
   // coin is OLDER than our window, not that it listed 400 days ago.
-  const age=r.verifiedListing
-    ? `listed ~<b>${r.ageDays}d</b> ago`
-    : `<b>${r.ageDays}d</b> of history <span title="The daily feed caps at 400 bars, so this coin listed EARLIER than our window starts — we just cannot see how much earlier.">(listing is older)</span>`;
-  const legTxt=r.leg?(r.leg.dir>0
-      ? `Up <b>${nlPct(r.leg.pct)}</b> over <b>${r.leg.days}d</b> from the last daily swing low`
-      : `Down <b>${nlPct(r.leg.pct)}</b> over <b>${r.leg.days}d</b> from the last daily swing high`):'No confirmed daily swing yet';
-  const thin=(r.rally.n||0)<3;
+  const age=r.verifiedListing?`listed ~<b>${r.ageDays}d</b> ago`
+    :`<b>${r.ageDays}d</b> of history <span title="The daily feed caps at 400 bars, so this coin listed EARLIER than our window starts — we just cannot see how much earlier.">(listing is older)</span>`;
   return `<div class="tc">
     <div class="hd" onclick="this.parentNode.classList.toggle('open')" style="cursor:pointer">
       <div class="l"><div class="name">#${i+1} ${r.name}</div>
-        <div class="sub">${r.tk} · ${age} · <span style="color:var(--sell)">−${r.ddPct}%</span> from a high set <b>${r.peakAgeDays}d</b> ago · <span style="color:var(--accent2)">▾ bump &amp; base rate</span></div></div>
-      <div class="r"><span class="verdict" style="background:rgba(192,132,252,.14);color:${bcol};white-space:nowrap;font-size:10px;padding:4px 8px">${bi.icon||'•'} ${bi.label||'NO FAST READ'}</span>
-        <div class="btmini" style="border-color:#c084fc;color:#e9d5ff;margin-top:6px" title="Pattern fit (0–100): how closely this matches 'fell from an old high and never recovered' — depth of the fall, how long ago the high was set, complete cycles, bounce size, and whether each low is lower. A PATTERN gauge, not a buy signal and not a win probability.">🎢 ${r.score}</div></div></div>
+        <div class="sub">${r.tk} · ${age} · <span style="color:var(--sell)">−${r.ddPct}%</span> from a high set <b>${r.peakAgeDays}d</b> ago · <span style="color:var(--accent2)">▾ levels &amp; evidence</span></div></div>
+      <div class="r"><span class="verdict" style="background:rgba(192,132,252,.14);color:${pcol};white-space:nowrap;font-size:10px;padding:4px 8px">${pi.icon||'•'} ${pi.label||'NO LEVELS'}</span>
+        <div class="btmini" style="border-color:#c084fc;color:#e9d5ff;margin-top:6px" title="Pattern fit (0–100): how closely this matches 'fell from an old high and never recovered' — depth of the fall, age of the high, complete cycles, bounce size, lower lows. It RANKS the list; it does not gate it, and it is not a buy signal.">🎢 ${r.score}</div></div></div>
     <div class="bd">
-      ${nlBump(r)}
-      ${r.fastSpark?nlSpark(r.fastSpark,null,'#22d3ee',56):''}
-      ${r.fastSpark?`<div class="sub" style="margin-top:-2px">Fast chart — last ~${r.bump?r.bump.windowDays:66} days on ${r.bump?r.bump.tf:'4h'} bars · live <b>${P(r.price)}</b>${r.qv>0?' · 24h vol '+fmtQv(r.qv):''}</div>`:''}
-
-      <div style="margin:12px 0 4px;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);font-weight:700">The bigger picture — daily</div>
-      ${nlSpark(r.spark,r.verifiedListing?r.peakPos:null,'#c084fc',52)}
-      <div class="sub" style="margin-top:-2px">${r.verifiedListing?'Whole life on this exchange':'Last '+r.ageDays+' days'}, log scale${r.verifiedListing?' · dashed line = the listing high':''}</div>
-      <div class="sub" style="margin-top:6px;line-height:1.5"><b style="color:${pcol}">${ph.icon||''} ${ph.label||''}</b> — ${ph.what||''}</div>
-      <div class="sub" style="margin-top:3px">${legTxt} · currently <b>${nlPct(r.off30)}</b> above its 30-day low.</div>
-
-      <div class="qlevels">
-        <div class="lv t1"><div class="k">Typical daily bounce</div><div class="v">${r.rally.medPct!=null?nlPct(r.rally.medPct):'—'}</div><div class="r">~${r.rally.medDays||'—'} days · ${r.rally.n} seen</div></div>
-        <div class="lv stop"><div class="k">Typical daily fall</div><div class="v">${r.drop.medPct!=null?nlPct(r.drop.medPct):'—'}</div><div class="r" style="color:var(--sell)">~${r.drop.medDays||'—'} days · ${r.drop.n} seen</div></div>
-        <div class="lv"><div class="k">Over this window</div><div class="v" style="color:var(--sell)">${nlPct(r.driftPct)}</div><div class="r" style="color:var(--muted)">${r.cycles} full cycle${r.cycles===1?'':'s'}</div></div>
+      ${nlPlan(r)}
+      ${nlEvidence(r)}
+      <div class="sub" style="margin:8px 0;padding:7px 9px;border-radius:8px;background:rgba(255,255,255,.03);border:1px solid var(--line);line-height:1.55;color:${ed.col}">
+        📉 ${ed.txt}${f.n>=8?` <span style="color:var(--muted)">(${f.n} past dips, held ${f.horizon}d · median <b style="color:${(f.med||0)>=0?'var(--buy)':'var(--sell)'}">${nlPct(f.med)}</b> vs ${nlPct(f.baseMed)} on a random day)</span>`:''}
       </div>
-      ${thin?'<div class="sub" style="color:#fbbf24">Only '+r.rally.n+' daily bounce'+(r.rally.n===1?'':'es')+' to average — that is an anecdote, not a pattern.</div>':''}
-
-      <div style="margin:9px 0;padding:8px 10px;border-radius:9px;background:rgba(255,255,255,.03);border:1px solid var(--line)">
-        <div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);font-weight:700">📉 What actually happened last time</div>
-        <div class="sub" style="margin-top:4px;line-height:1.55;color:${ed.col}">${ed.txt}</div>
-        ${f.n>=8?`<div class="sub" style="margin-top:4px">Measured on <b>${f.n}</b> past days this coin sat ≥${f.dipPct}% below its 20-day high, held <b>${f.horizon} days</b>. Median result <b style="color:${(f.med||0)>=0?'var(--buy)':'var(--sell)'}">${nlPct(f.med)}</b> vs <b>${nlPct(f.baseMed)}</b> for any random day.
-          ${(f.med!=null&&f.med<0)?'<b style="color:var(--sell)">Note the median is negative — even the winning-ish setup lost money on a typical try.</b>':''}</div>`:''}
-      </div>
-
       <div class="sub" style="line-height:1.5;padding:7px 9px;border-radius:8px;background:rgba(245,158,11,.09);border:1px solid rgba(245,158,11,.32);color:#fbbf24">
-        ⚠ <b>This coin is ${nlPct(r.driftPct)} over the window shown.</b> That drift is the trade you are fighting: supply keeps arriving and every bump is counter-trend inside it. Size for a full stop-out, take the bump, do not marry it.
+        ⚠ <b>${nlPct(r.driftPct)} over the window shown.</b> That drift is what you are fighting on the long side and riding on the short side. Size for a full stop-out; take the bounce, do not marry it.
       </div>
-      <div class="sub" style="margin-top:5px">${r.sym}${r.tk?' · <a style="color:var(--accent2);cursor:pointer" onclick="event.stopPropagation();openResearchFor(\''+r.tk+'\',\'short\')">🔎 research</a>':''} · <a style="color:var(--accent2);cursor:pointer" onclick="event.stopPropagation();toggleQuick()">⚡ Quick Trades has the entry/stop/target plan</a></div>
+      ${r.fastSpark?nlSpark(r.fastSpark,null,'#22d3ee',56):''}
+      ${r.fastSpark?`<div class="sub" style="margin-top:-2px">Fast chart — last ~${r.bump?r.bump.windowDays:66} days on ${r.bump?r.bump.tf:'4h'} bars${r.qv>0?' · 24h vol '+fmtQv(r.qv):''}</div>`:''}
+      ${nlSpark(r.spark,r.verifiedListing?r.peakPos:null,'#c084fc',48)}
+      <div class="sub" style="margin-top:-2px">${r.verifiedListing?'Whole life on this exchange':'Last '+r.ageDays+' days'}, log scale${r.verifiedListing?' · dashed line = the listing high':''} · daily view: <b style="color:${NL_PCOL[ph.col]||'var(--muted)'}">${ph.icon||''} ${ph.label||''}</b>${r.rally.medPct!=null?` · typical daily swing ${nlPct(r.rally.medPct)} up / ${nlPct(r.drop.medPct)} down`:''}</div>
+      <div class="sub" style="margin-top:5px">${r.sym}${r.tk?' · <a style="color:var(--accent2);cursor:pointer" onclick="event.stopPropagation();openResearchFor(\''+r.tk+'\',\'short\')">🔎 research</a>':''}</div>
     </div></div>`;
 }
-const NL_FILTERS=[['all','All'],['running','🔥 Bump running'],['building','🌱 Basing'],['late','⚠️ Bump late'],['fading','📉 Fading']];
+const NL_FILTERS=[['all','All'],['buy','🟢 Buy now'],['short','🔴 Short now'],['wait_buy','⏳ Waiting to buy'],['wait_short','⏳ Waiting to short']];
 function renderListShell(){
   const el=document.getElementById('listPanel'); if(!el)return;
   const d=listState.data;
@@ -1272,11 +1272,11 @@ function renderListShell(){
       <span class="sub">${d&&d.ts?'· updated '+new Date(d.ts).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true}):''}${d?' · '+d.found+' of '+d.scanned+' coins qualify':''}</span></h3>
     <div class="sub" style="line-height:1.55;margin:2px 0 8px">
       The <b>XAI / COOKIE / VANA</b> shape: a coin peaks, falls and falls and falls, throws one sharp bump, then falls again.
-      Not fraud — these are real projects with a <b>small circulating float against a huge total supply</b>, so every unlock
-      lands on a thin book, and a coin everyone is short squeezes hard when it does turn.
-      <b>Daily bars</b> decide which coins are in that regime; <b>4h bars</b> time the bump, because these moves run +50% and
-      die inside 24–72 hours. For every past bump the panel also measures <b>how much was given back afterwards</b> — that is
-      the "then it falls again" half, and it is what tells you whether to hold or to take profit into strength.
+      Every card gives you <b>both trades that shape offers</b> — <b style="color:var(--buy)">buy the bounce</b> (counter-trend, fast)
+      and then <b style="color:var(--sell)">short the failure</b> (with-trend, better odds) — with entry zone, stop and three
+      targets, and one line telling you which side is live right now. Levels come from the coin's own 4h floor, the level where
+      its last bumps died, and its own median bump size. Only two things gate the list: at least
+      <b>35% below a high set 20+ days ago</b>, plus a liquidity floor — everything else <i>ranks</i> the list instead of hiding coins.
       Rescanned every 30 minutes.
     </div>
     <div style="display:flex;gap:5px;flex-wrap:wrap;margin:4px 0 8px;align-items:center">${tabs}${scalpCcyTabs('Crypto')}</div>
@@ -1289,14 +1289,14 @@ function renderListBody(){
   if(listState.err){el.innerHTML='<div class="sub" style="padding:14px;color:var(--sell)">Couldn’t scan: '+listState.err+'</div>';return;}
   const d=listState.data; if(!d){el.innerHTML='<div class="sub" style="padding:14px">—</div>';return;}
   let rows=d.rows||[];
-  if(listState.state!=='all')rows=rows.filter(r=>r.bump&&r.bump.state===listState.state);
+  if(listState.state!=='all')rows=rows.filter(r=>r.plan&&r.plan.now===listState.state);
   if(!rows.length){
     el.innerHTML='<div class="empty">'+(d.found
-      ? 'No qualifying coin is in that state on the 4h chart right now — try another filter. Coins with no fast-chart read only appear under “All”.'
-      : 'No coin in the universe is bleeding from an old high right now. That is a normal result, not a failure: it needs to be at least '+d.cfg.minDrawdown+'% below a high set '+d.cfg.minPeakAgeDays+'+ days ago, with at least one complete cycle and bounces of '+d.cfg.minRally+'%+. Scanned '+d.scanned+' coins.')+'</div>';
+      ? 'No coin is at that point of the cycle right now — try another filter. Coins with no 4h levels only appear under “All”.'
+      : 'No coin in the universe is bleeding from an old high right now. That is a normal result, not a failure: it needs to be at least '+d.cfg.minDrawdown+'% below a high set '+d.cfg.minPeakAgeDays+'+ days ago, Scanned '+d.scanned+' coins.')+'</div>';
     return;}
   el.innerHTML='<div class="cards">'+rows.map(nlCard).join('')+'</div>'
-    +'<div class="sub" style="margin-top:10px;line-height:1.55">🎢 <b>Pattern fit is not a buy signal.</b> A 95 means the coin closely matches "fell from an old high and never recovered" — a description of a <i>falling</i> asset. The tradeable claim, if there is one, is in the bump block and the base-rate box, and on several coins those will tell you there is no edge. Every number is measured on that coin\'s own history with no look-ahead; past behaviour of a supply schedule is not a promise about the next unlock. Remember Indian VDA tax: 30% + 4% cess on gains, <b>with no offset for losses</b>.</div>';
+    +'<div class="sub" style="margin-top:10px;line-height:1.55">🎢 <b>Pattern fit is not a buy signal.</b> A 95 means the coin closely matches "fell from an old high and never recovered" — a description of a <i>falling</i> asset. The levels are the tradeable part; the 📉 line under them says what that trade has actually returned, and on several coins it will tell you there is no edge. Every number is measured on that coin\'s own history with no look-ahead; past behaviour of a supply schedule is not a promise about the next unlock. Remember Indian VDA tax: 30% + 4% cess on gains, <b>with no offset for losses</b>.</div>';
 }
 /* ============ 📌 TRACKED SETUPS — every recommendation is followed to its outcome, even after it leaves the live list ============ */
 let trackedCache=null,trackedAt=0;

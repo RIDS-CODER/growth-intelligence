@@ -178,44 +178,61 @@ coin everyone is already short squeezes violently when it does turn. Naming the 
 useful part; "fake coin" would be an accusation this app can't support and would hide the thing you
 can actually trade.
 
-### Two timeframes, because the two halves run on different clocks
+### The two trades, with levels
 
-**Daily bars decide which coins are in the regime.** Not listing age — the regime *outlives* the
-listing. XAI listed in early 2024 and was still trading this way years later, so a listing-age gate
-would reject the very coins the feature exists to find. What matters instead is that the high is
-**old** and price is far below it:
+Every card gives you **both trades this shape offers**, and one line saying which is live *right now*:
 
-| Filter | Why |
+| | |
 |---|---|
-| ≥ 40% below its high | A coin near its high isn't in this regime. |
-| High set ≥ 30 days ago | 40% off a high set last week is a *pullback*, not a bleed. |
-| ≥ 1 complete cycle, bounces ≥ 15% | Needs repeated behaviour, and bounces worth trading. |
-| Peaked in the first 60% of its life | **Only applied when the history provably starts at the listing.** Past 400 daily bars the feed is capped, so bar 0 is an arbitrary date and this test would be meaningless. |
+| **① LONG the bounce** | Counter-trend. Buy zone in the lower part of the base, stop under the floor, three targets. Fast, and the one that pays — but you're buying a falling coin, so the stop isn't optional. |
+| **② SHORT the failure** | With-trend. Entry where this coin's bumps have died before, stop above it, targets back down to the prior low. Smaller reward, better odds — it's the direction the coin is already going. |
 
-Cards say which case they're in: *"listed ~180d ago"* when the series starts at the listing, or
-*"400d of history (listing is older)"* when it hit the cap.
+The instruction is always one of four: 🟢 **BUY THE BOUNCE** · 🔴 **SHORT THE FAILURE** ·
+⏳ **WAIT — TO BUY** · ⏳ **WAIT — TO SHORT**. The two waiting states give you the exact price to set
+an alert at and how far away it is. "Mid-air" is a real answer and gets said out loud rather than
+dressed up as a signal.
 
-**4h bars time the bump — that's the trade.** These moves run +50% and die inside 24–72 hours; on
-daily closes the whole event is one candle, so a daily-only view would quote *"bounces run ~20 days"*
-for something that was over in two. A **bump** is an up-leg that is both **big (≥20%)** and
-**fast (≤3 days)** — a slow grind of the same size is a different animal and isn't counted.
+Levels come from the coin's own **4h structure** — its recent floor, the swing high where the last
+bump rolled over, its ATR — and its own **median bump size**. Never from a generic indicator.
+Targets are picked from real levels and sorted, so a nearer resistance can't be skipped in favour of
+a formula's projection. When a coin has no completed bump yet, the target distance is estimated from
+its recent range and the card says so.
 
-- **🔥 BUMP RUNNING** — a fast counter-trend move is underway, still short of this coin's typical size.
-- **⚠️ BUMP LATE** — it has already matched the typical bump in size or in hours. Past bumps rolled over here.
-- **📉 FADING** — rolling over off the last swing high. The give-back leg.
-- **🌱 BASING** — off the lows but not moving with force. Set an alert; don't chase.
+### Rank, don't gate
 
-Each card carries **this coin's own** bump size and duration in hours, plus the volume on the current
-leg versus normal — a squeeze with a real crowd behind it is a squeeze; a spike on nothing is a wick.
+Only **two things** keep a coin off the list: at least **35% below a high set 20+ days ago**, plus a
+liquidity floor. That's the regime; everything else *ranks* the list.
+
+An earlier version also required a complete daily cycle and a ≥15% median daily bounce. Measured
+against a population of bleeding coins, **the cycle test alone rejected half of them** — and exactly
+the wrong half: coins in a near-monotonic bleed whose bumps are sharp and intraday, so they never
+form a 15% leg between two *daily closes*. That is the XAI / COOKIE shape precisely. Those tests are
+now score inputs and card stats.
+
+Age is not a gate either. The regime **outlives the listing** — XAI listed in early 2024 and was
+still trading this way years later — so cards say which case they're in: *"listed ~180d ago"* when
+the series provably starts at the listing, or *"400d of history (listing is older)"* when it hit the
+400-bar fetch cap.
+
+### Why two timeframes
+
+**Daily bars** decide which coins are in the regime. **4h bars** time the bump and place the levels,
+because these moves run +50% and die inside 24–72 hours — on daily closes the whole event is one
+candle, so a daily-only view would quote *"bounces run ~20 days"* for something that was over in two.
+
+A **bump** is an up-leg that is both **big (≥20%)** and **fast (≤3 days)** — a slow grind of the same
+size is a different animal and isn't counted. Each card shows this coin's median bump size and
+duration in hours, its live 4h state, and the volume on the current leg versus normal: a squeeze
+with a real crowd behind it is a squeeze; a spike on nothing is a wick.
 
 ### The part that keeps this honest
 
 **Every bump is measured for what happened *after* it**, over the same window it took to form: the
 median % given back, and how many round-tripped completely. When that give-back is high the card says
-so in as many words — *"These do not hold. Take profit into strength or you give it all back."* That
-is the "then it falls again" half, and it's what makes this a trade with an exit instead of a hope.
+so in as many words — *"Bumps here do not hold. Take profit into strength."* That is the "then it
+falls again" half, and it's what turns the second trade from a guess into a plan.
 
-On the daily side, every card also reports **what buying a dip like today's actually returned**:
+Every card also reports **what buying a dip like today's actually returned**:
 
 - the win rate and median return after past dips of the same depth, held for as long as this coin's bounces usually run, **versus**
 - the same horizon bought on **any random day**.
@@ -226,18 +243,17 @@ up as a statistic. Both are computed **causally** — each bar is compared to it
 high, never a future one — and deliberately **not** from the swing pivots, because every pivot low is
 followed by a rally *by construction*, which would make any coin look like a money printer.
 
-**🎢 Pattern fit (0–100) is not a buy signal.** A high score means the coin closely matches "fell from
-an old high and never recovered", which is a description of a *falling* asset. Depth of the fall
-(25%), age of the high (15%), complete cycles (20%), bounce size (20%), lower lows (15%), plus a small
-bonus (5%) when the history provably starts at the listing.
+**🎢 Pattern fit (0–100) ranks the list; it does not gate it, and it is not a buy signal.** A high
+score means the coin closely matches "fell from an old high and never recovered" — a description of a
+*falling* asset. Depth of the fall (25%), age of the high (15%), complete cycles (20%), bounce size
+(20%), lower lows (15%), plus a small bonus (5%) when the history provably starts at the listing.
 
 Crypto only — the pattern is about token unlock schedules, which have no equivalent in an index or an
 NSE stock. Cached 30 minutes (**↻ rescan** forces a refresh); the daily pass covers the whole universe
 and the 4h pass runs only on the coins that qualify.
 API: `GET /api/dumpbounce` · settings in `config.json`: `dumpBounceTop`, `dumpBounceMinDrawdown`,
-`dumpBounceMinRally`, `dumpBounceMinQv`, `dumpBounceZigzag`, `bumpZigzag`, `bumpMinPct`, `bumpMaxBars`
-(or env `NL_TOP`, `NL_MIN_DD`, `NL_MIN_RALLY`, `NL_MIN_QV`, `NL_ZIGZAG`, `BUMP_ZIGZAG`,
-`BUMP_MIN_PCT`, `BUMP_MAX_BARS`).
+`dumpBounceMinQv`, `dumpBounceZigzag`, `bumpZigzag`, `bumpMinPct`, `bumpMaxBars` (or env `NL_TOP`,
+`NL_MIN_DD`, `NL_MIN_QV`, `NL_ZIGZAG`, `BUMP_ZIGZAG`, `BUMP_MIN_PCT`, `BUMP_MAX_BARS`).
 ## How prices stay accurate
 
 - **Stocks/ETFs/indices:** Upstox real-time last-traded price (LTP), refreshed every few seconds, plus
