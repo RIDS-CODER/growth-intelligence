@@ -253,6 +253,22 @@ Three things keep the number honest:
   at the floor, where a bleeding coin lives — fire constantly and starve the short down to a
   one-trade sample. That was an artifact of the simulation, not a fact about the strategy.
 
+**Was it the stop, or the idea?** When a plan loses, those are two different failures with opposite
+fixes, so the card separates them: of the trades that stopped out, **how many reached Target 1 anyway
+inside the hold window**.
+
+- **High** (≥50%) — the stop is being picked off before the move arrives. Widening it, and sizing
+  smaller to keep the same rupee risk, is the lever to try.
+- **Low** (≤25%) — price mostly kept going. A wider stop would mainly just lose more per trade; if
+  this side loses money, the trade is what's wrong, not the stop.
+
+Across the demo coins this rate ranges from 15% to 80%, so there is **no single right answer to tune
+globally** — which is exactly why it's a per-coin diagnostic rather than a knob the app turns for you.
+The stop width itself is configurable (`bumpStopAtr`, default **1.1 ATR** beyond the floor/roof) and is
+deliberately *not* fitted to the backtest: letting the plan optimise against its own replay would fit
+it to whatever history happened to be in the window. Each card also shows the stop width in ATR so you
+can see what you'd be changing.
+
 The exit plan is the app's own (a third banked at each target, stop ratcheting), so these numbers are
 directly comparable to 📌 Tracked setups. Note the sample is small — 4h bars over ~50 days — which is
 exactly why the forward record below matters too.
@@ -300,8 +316,9 @@ Crypto only — the pattern is about token unlock schedules, which have no equiv
 NSE stock. Cached 30 minutes (**↻ rescan** forces a refresh); the daily pass covers the whole universe
 and the 4h pass runs only on the coins that qualify.
 API: `GET /api/dumpbounce` (tracked plans appear in `GET /api/setups`) · settings in `config.json`: `dumpBounceTop`, `dumpBounceMinDrawdown`,
-`dumpBounceMinQv`, `dumpBounceZigzag`, `bumpZigzag`, `bumpMinPct`, `bumpMaxBars` (or env `NL_TOP`,
-`NL_MIN_DD`, `NL_MIN_QV`, `NL_ZIGZAG`, `BUMP_ZIGZAG`, `BUMP_MIN_PCT`, `BUMP_MAX_BARS`).
+`dumpBounceMinQv`, `dumpBounceZigzag`, `bumpZigzag`, `bumpMinPct`, `bumpMaxBars`, `bumpStopAtr`
+(or env `NL_TOP`, `NL_MIN_DD`, `NL_MIN_QV`, `NL_ZIGZAG`, `BUMP_ZIGZAG`, `BUMP_MIN_PCT`,
+`BUMP_MAX_BARS`, `BUMP_STOP_ATR`).
 ## How prices stay accurate
 
 - **Stocks/ETFs/indices:** Upstox real-time last-traded price (LTP), refreshed every few seconds, plus

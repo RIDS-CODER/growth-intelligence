@@ -1242,11 +1242,23 @@ function nlBacktest(r){
     : side.avgR>0.15?`<div class="sub" style="margin-top:4px;color:var(--buy)"><b>This has made money on this coin</b> — ${side.avgR}R per trade over ${side.n} of them. Small sample; it is evidence, not a promise.</div>`
     : side.avgR<-0.05?`<div class="sub" style="margin-top:4px;color:var(--sell)"><b>⚠ This exact plan has LOST money on this coin</b> — ${side.avgR}R per trade over ${side.n} of them. The pattern is real; trading it this way has not paid. Do not take it just because the card is here.</div>`
     : `<div class="sub" style="margin-top:4px;color:#fbbf24">Roughly breakeven on this coin (${side.avgR}R over ${side.n} trades) — the edge, if any, is inside the noise.</div>`;
+  /* WAS IT THE STOP, OR THE IDEA? Of the trades that stopped out, how many reached Target 1
+     anyway inside the hold window. It separates "the stop sits inside normal noise and gets
+     picked off" from "price just kept going and no stop would have saved it" — two failures with
+     opposite fixes. Measured on the tape; nothing tunes itself against it. */
+  const s=(p.now==='short'||p.now==='wait_short')?p.short:p.long;
+  const why=(!side||!side.stops||side.stoppedEarlyPct==null)?''
+    : side.stoppedEarlyPct>=50
+      ? `<div class="sub" style="margin-top:4px;color:#fbbf24">🔍 <b>${side.stoppedEarly} of ${side.stops}</b> stop-outs reached Target 1 anyway inside the hold window — <b>the stop, not the idea, is what failed</b>. At ${s.stopAtrX} ATR from entry it is still being picked off before the move arrives. Widening it — and sizing smaller to keep the same rupee risk — is the lever to try.</div>`
+      : side.stoppedEarlyPct<=25
+      ? `<div class="sub" style="margin-top:4px;color:var(--muted)">🔍 Only <b>${side.stoppedEarly} of ${side.stops}</b> stop-outs came back to Target 1 — price mostly kept going. At ${s.stopAtrX} ATR out, <b>widening the stop would mainly just lose more per trade</b>. If this side loses money, the trade is what is wrong, not the stop.</div>`
+      : `<div class="sub" style="margin-top:4px;color:var(--muted)">🔍 <b>${side.stoppedEarly} of ${side.stops}</b> stop-outs came back to Target 1 — mixed. The stop is ${s.stopAtrX} ATR from entry.</div>`;
   return `<div style="margin:8px 0;padding:8px 10px;border-radius:9px;background:rgba(255,255,255,.03);border:1px solid var(--line)">
       <div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);font-weight:700">🧪 These exact levels, replayed on this coin</div>
       <div style="margin-top:4px">${line(side,isL?'Buying the bounce':'Shorting the failure')}</div>
       <div style="margin-top:2px;opacity:.75">${line(other,isL?'Shorting the failure':'Buying the bounce')}</div>
       ${verdict}
+      ${why}
       <div class="sub" style="margin-top:4px;color:var(--muted)">Replayed over ~${Math.round(bt.simBars*4/24)} days of ${bt.tf} bars, deciding only on bars available at the time. A stop and a target in the same bar counts as the stop. Exit plan is a third at each target with the stop ratcheting — so this is comparable to 📌 Tracked setups, which now follows these live too.</div>
     </div>`;
 }

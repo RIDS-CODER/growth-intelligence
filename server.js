@@ -1037,6 +1037,7 @@ const BUMP_TF="4h", BUMP_BAR_H=4;
 const BUMP_ZZ=parseFloat(process.env.BUMP_ZIGZAG)||parseFloat(CFG.bumpZigzag)||12;   // % reversal on the fast series
 const BUMP_MIN_PCT=parseFloat(process.env.BUMP_MIN_PCT)||parseFloat(CFG.bumpMinPct)||20;  // a bump worth the name
 const BUMP_MAX_BARS=parseInt(process.env.BUMP_MAX_BARS)||parseInt(CFG.bumpMaxBars)||18;   // …and it has to be FAST (≤3 days)
+const BUMP_STOP_ATR=parseFloat(process.env.BUMP_STOP_ATR)||parseFloat(CFG.bumpStopAtr)||1.1;  // stop this many ATR beyond the floor/roof
 const med=a=>{if(!a||!a.length)return null;const s=a.slice().sort((x,y)=>x-y),m=s.length>>1;return s.length%2?s[m]:(s[m-1]+s[m])/2;};
 const avg=a=>a&&a.length?a.reduce((s,v)=>s+v,0)/a.length:0;
 // Drop bad bars from every series TOGETHER — filtering close alone silently misaligns volume
@@ -1252,17 +1253,22 @@ function tradePlan(close,high,low,bump,opts){
     while(keep.length<3)keep.push((keep.length?keep[keep.length-1]:base)*(1+dir*step));
     return prog(keep.slice(0,3),dir);
   };
+  // How far below the floor the stop sits, in ATR. Exposed as a knob because the backtest's
+  // stop-out diagnostic can only tell you it is wrong — it must not be allowed to tune itself,
+  // or the plan would be fitted to whatever history happened to be in the window.
+  const stopAtr=o.stopAtr||BUMP_STOP_ATR;
   // LONG — buy the bounce, in the lower part of the base.
   const buyLo=lo, buyHi=Math.max(lo*1.05,lo+0.7*atr), buyMid=(buyLo+buyHi)/2;
-  const buyStop=Math.min(lo-1.1*atr,lo*0.93);
+  const buyStop=Math.min(lo-stopAtr*atr,lo*0.93);
   const buyT=ladder([hi,buyMid*(1+0.45*bp),buyMid*(1+0.9*bp),buyMid*(1+1.4*bp)],buyMid,1,0.4*bp);
   // SHORT — sell the failure, where past bumps died: the recent swing high, or the floor
   // projected up by one full typical bump, whichever is higher.
   const shRef=Math.max(hi,lo*(1+bp)), shLo=shRef*0.96, shHi=shRef*1.03, shMid=(shLo+shHi)/2;
-  const shStop=Math.max(shHi+1.1*atr,shHi*1.07);
+  const shStop=Math.max(shHi+stopAtr*atr,shHi*1.07);
   const shT=ladder([lo,shMid-0.4*(shMid-lo),shMid-0.75*(shMid-lo)],shMid,-1,0.3*bp);
   const side=(dir,eLo,eHi,mid,stop,T)=>({dir,entryLo:eLo,entryHi:eHi,entry:mid,stop,targets:T,
     riskPct:+(Math.abs(mid-stop)/mid*100).toFixed(1),
+    stopAtrX:+(Math.abs(mid-stop)/atr).toFixed(2),        // stop width in ATR — how much noise it tolerates
     ret:T.map(t=>+((dir>0?t/mid-1:1-t/mid)*100).toFixed(1)),
     rrr:+(Math.abs(T[1]-mid)/Math.max(1e-12,Math.abs(mid-stop))).toFixed(2)});
   const long=side(1,buyLo,buyHi,buyMid,buyStop,buyT);
@@ -1338,8 +1344,20 @@ function backtestPlan(close,high,low,vol,opts){
         // STOP FIRST. With only OHLC we cannot know whether the stop or the target printed
         // first inside a bar, and assuming the target would flatter every result.
         const stopped = open.dir>0 ? ll[j]<=open.stop : hh[j]>=open.stop;
-        if(stopped){ trades.push({...open,exitBar:j,
-          pnl:planPnl(open.dir,open.fill,open.targets,open.hitT,open.stop),why:open.hitT?"trail":"stop"}); }
+        if(stopped){
+          /* DIAGNOSTIC — was it the stop that failed, or the idea? For a trade stopped before
+             banking anything, keep reading the tape to the end of the hold window and record
+             whether Target 1 arrived anyway. A high rate means the stop is sitting inside normal
+             noise and getting picked off before the move; a low rate means price simply kept
+             going and no stop placement would have saved it. This is an observation about the
+             tape, NOT a tuned parameter — nothing downstream optimises against it. */
+          let recovered=false;
+          if(open.hitT===0){
+            const t1=open.targets[0], end=Math.min(n-1,open.bar+(o.maxHold||PB_MAX_HOLD));
+            for(let q=j;q<=end;q++){ if(open.dir>0?hh[q]>=t1:ll[q]<=t1){recovered=true;break;} }
+          }
+          trades.push({...open,exitBar:j,recovered,
+            pnl:planPnl(open.dir,open.fill,open.targets,open.hitT,open.stop),why:open.hitT?"trail":"stop"}); }
         else{
           while(open.hitT<3){
             const t=open.targets[open.hitT];
@@ -1367,11 +1385,15 @@ function backtestPlan(close,high,low,vol,opts){
     const p=list.map(t=>t.pnl), wins=p.filter(v=>v>0).length;
     const R=list.map(t=>t.riskPct>0?t.pnl/t.riskPct:0);
     const thin=list.length<PB_MIN_TRADES;
+    const stopped=list.filter(t=>t.why==="stop");
+    const rec=stopped.filter(t=>t.recovered).length;
     return {n:list.length,thin,
       winRate:thin?null:Math.round(100*wins/list.length),
       medPct:+med(p).toFixed(1), avgR:+(avg(R)).toFixed(2),
       best:+Math.max(...p).toFixed(1), worst:+Math.min(...p).toFixed(1),
-      stops:list.filter(t=>t.why==="stop").length, full:list.filter(t=>t.why==="targets").length};
+      stops:stopped.length, full:list.filter(t=>t.why==="targets").length,
+      // of the stop-outs, how many reached Target 1 anyway inside the hold window
+      stoppedEarly:rec, stoppedEarlyPct:stopped.length?Math.round(100*rec/stopped.length):null};
   };
   return {long:summarise(trades.filter(t=>t.dir>0)), short:summarise(trades.filter(t=>t.dir<0)),
     all:summarise(trades), bars:n, simBars:n-warm, tf:BUMP_TF};
