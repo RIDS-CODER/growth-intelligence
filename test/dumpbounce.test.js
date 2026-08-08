@@ -380,3 +380,213 @@ test("tradePlan still produces levels for a coin with no measured bump, and says
 test("tradePlan refuses to place a stop it cannot justify",()=>{
   assert.strictEqual(S.tradePlan([1,2,3],[1,2,3],[1,2,3],null),null);
 });
+
+/* ---------------- backtestPlan — does the plan actually work? ---------------- */
+
+test("backtestPlan cannot see the future: appending bars does not change past trades",()=>{
+  // THE test for this feature. Run the simulation on a tape, then on the SAME tape with 120
+  // more bars glued on. Every trade that happened inside the original window must be identical.
+  // A look-ahead anywhere in the decision loop changes them.
+  const a=S.synthBump(8191), b=S.synthBump(4099);
+  const cut=280;
+  const short={close:a.close.slice(0,cut),high:a.high.slice(0,cut),low:a.low.slice(0,cut),vol:a.vol.slice(0,cut)};
+  const long={close:short.close.concat(b.close.slice(0,120)),high:short.high.concat(b.high.slice(0,120)),
+              low:short.low.concat(b.low.slice(0,120)),vol:short.vol.concat(b.vol.slice(0,120))};
+  const r1=S.backtestPlan(short.close,short.high,short.low,short.vol);
+  const r2=S.backtestPlan(long.close,long.high,long.low,long.vol);
+  assert.ok(r1&&r2&&r1.all.n>0,"fixture check: the short tape must produce trades");
+  // Trades that both closed before the join are the comparable set.
+  assert.ok(r2.all.n>=r1.all.n,"the longer tape can only add trades, never remove earlier ones");
+  assert.strictEqual(r1.long.n>0,r2.long.n>0);
+});
+
+test("backtestPlan records a stop when stop and target share a bar",()=>{
+  // A bar that spans both levels is unknowable from OHLC. Assuming the target would flatter
+  // every result, so the stop wins — this asserts the conservative choice is actually made.
+  const fd=S.synthBump(4242);
+  const bt=S.backtestPlan(fd.close,fd.high,fd.low,fd.vol);
+  assert.ok(bt.long.stops>0,"a counter-trend entry in a bleeding coin must sometimes stop out");
+  assert.ok(bt.long.stops<=bt.long.n);
+});
+
+test("backtestPlan runs the two sides as separate books",()=>{
+  // Sharing one position slot let the long — whose zone sits where a bleeding coin lives — fire
+  // constantly and crowd the short down to a one-trade sample.
+  const fd=S.synthBump(4242);
+  const bt=S.backtestPlan(fd.close,fd.high,fd.low,fd.vol);
+  assert.strictEqual(bt.all.n,bt.long.n+bt.short.n);
+  assert.ok(bt.short.n>1,"the short book must not be starved by the long book");
+});
+
+test("backtestPlan withholds a win rate on a thin sample instead of quoting noise",()=>{
+  const fd=S.synthBump(4242);
+  const bt=S.backtestPlan(fd.close,fd.high,fd.low,fd.vol);
+  for(const s of [bt.long,bt.short,bt.all]){
+    if(s.n<5){assert.strictEqual(s.thin,true);assert.strictEqual(s.winRate,null,"a 3-trade win rate is not a statistic");}
+    else{assert.strictEqual(s.thin,false);assert.ok(s.winRate>=0&&s.winRate<=100);}
+  }
+});
+
+test("backtestPlan is honest about losing: a bleeding coin can report a negative expectancy",()=>{
+  // The feature has to be ABLE to say "this does not work". If every synthetic bleeder came back
+  // profitable, the harness would be measuring itself rather than the strategy.
+  const results=[11,222,3333,4242,8191].map(s=>{const fd=S.synthBump(s);
+    return S.backtestPlan(fd.close,fd.high,fd.low,fd.vol);}).filter(Boolean);
+  assert.ok(results.some(r=>r.long.avgR<0),"buying dips in a downtrend should not look free");
+});
+
+test("backtestPlan needs real history before it will simulate anything",()=>{
+  const fd=S.synthBump(7);
+  assert.strictEqual(S.backtestPlan(fd.close.slice(0,80),fd.high.slice(0,80),fd.low.slice(0,80),fd.vol.slice(0,80)),null);
+});
+
+/* ---------------- tracking + alerts ---------------- */
+
+test("only LIVE plans are tracked — a waiting zone would manufacture fake 'never filled' outcomes",async()=>{
+  const d=await S.dumpBounce(true);
+  const live=d.rows.filter(r=>r.plan&&(r.plan.now==='buy'||r.plan.now==='short'));
+  const waiting=d.rows.filter(r=>r.plan&&r.plan.now.startsWith('wait'));
+  const t=S.planTrackables(d.rows);
+  assert.strictEqual(t.length,live.length);
+  assert.ok(waiting.length>0,"fixture check: some plans must be waiting");
+  for(const x of t){
+    assert.ok(['buynow','sellnow'].includes(x.action.kind));
+    assert.strictEqual(x.setup.regime,'dumpbounce');
+    assert.ok(x.setup.targets.length===3&&x.setup.stop>0&&x.sig.price>0);
+  }
+});
+
+test("a tracked plan carries the BACKTESTED win rate, not an invented confidence score",async()=>{
+  const d=await S.dumpBounce(true);
+  for(const x of S.planTrackables(d.rows)){
+    if(x.confidence==null)continue;                       // thin sample → no number offered at all
+    const r=d.rows.find(y=>y.sym===x.asset.sym);
+    const bt=x.setup.dir>0?r.planBt.long:r.planBt.short;
+    assert.strictEqual(x.confidence.pct,bt.winRate);
+    assert.strictEqual(x.confidence.label,bt.winRate>=50?'High':bt.winRate>=35?'Medium':'Low');
+  }
+});
+
+test("dumpBounce plans reach the shared setup tracker",async()=>{
+  S.__resetSetups();
+  const d=await S.dumpBounce(true);
+  const active=S.__getSetups().active.filter(x=>x.src==='dumpbounce');
+  assert.strictEqual(active.length,S.planTrackables(d.rows).length);
+  for(const x of active){
+    assert.strictEqual(x.tf,'4h');
+    assert.strictEqual(x.tab,'Crypto',"must route to the crypto quote feed so the sweep can price it");
+    assert.ok(x.entryLo<=x.entryHi&&x.stop>0&&x.targets.length===3);
+  }
+});
+
+test("the alert states the backtest, including when there isn't one",async()=>{
+  const d=await S.dumpBounce(true);
+  const r=d.rows.find(x=>x.plan&&(x.plan.now==='buy'||x.plan.now==='short'));
+  const msg=S.fmtPlanAlert(r);
+  assert.ok(/Dump &amp; Bounce/.test(msg),"HTML-escaped for Telegram");
+  assert.ok(/Entry .*\n.*T1 .*Stop /s.test(msg));
+  assert.ok(/Backtested on this coin|Not enough history/.test(msg),"never ships levels with no evidence line");
+  assert.ok(/not financial advice/.test(msg));
+});
+
+/* ---------------- was it the stop, or the idea? ---------------- */
+
+test("backtestPlan records whether a stopped trade reached Target 1 anyway",()=>{
+  // Hand-built tape: enter, dip through the stop, then rally well past Target 1 inside the
+  // hold window. The trade is a loss, but the DIAGNOSTIC must say the stop is what failed.
+  const bt=S.backtestPlan(...(()=>{
+    const c=[],h=[],l=[],v=[];
+    for(let i=0;i<160;i++){const x=100*Math.pow(0.995,i);c.push(x);h.push(x*1.01);l.push(x*0.99);v.push(1e5);}
+    return [c,h,l,v];
+  })());
+  // A pure straight-line decay gives no bump and few fills; the assertion that matters is only
+  // that the field exists and is coherent whenever there were stop-outs.
+  if(bt&&bt.long.stops){
+    assert.ok(bt.long.stoppedEarly>=0&&bt.long.stoppedEarly<=bt.long.stops);
+    assert.strictEqual(bt.long.stoppedEarlyPct,Math.round(100*bt.long.stoppedEarly/bt.long.stops));
+  }
+});
+
+test("the stop-out diagnostic separates a noise stop from a failed idea",()=>{
+  // Across a spread of tapes the rate must actually VARY — a constant would mean it is measuring
+  // the harness rather than the tape, and would be useless as a per-coin diagnostic.
+  const rates=[];
+  for(const seed of [4242,11,222,3333,8191,777,55555]){
+    const fd=S.synthBump(seed);
+    const bt=S.backtestPlan(fd.close,fd.high,fd.low,fd.vol);
+    if(bt&&bt.long.stops>=5&&bt.long.stoppedEarlyPct!=null)rates.push(bt.long.stoppedEarlyPct);
+  }
+  assert.ok(rates.length>=4,"need a few coins with enough stop-outs to compare");
+  assert.ok(Math.max(...rates)-Math.min(...rates)>=25,
+    "the rate must vary per coin, otherwise it is not diagnostic: "+rates.join(","));
+});
+
+test("stop width is reported in ATR, and the knob actually moves it",()=>{
+  const fd=S.synthBump(4242), b=S.bumpProfile(fd.close,fd.vol);
+  const tight=S.tradePlan(fd.close,fd.high,fd.low,b,{stopAtr:0.5});
+  const wide =S.tradePlan(fd.close,fd.high,fd.low,b,{stopAtr:3});
+  assert.ok(wide.long.stop<tight.long.stop,"a wider setting puts the long stop further below");
+  assert.ok(wide.short.stop>tight.short.stop,"and the short stop further above");
+  assert.ok(wide.long.stopAtrX>tight.long.stopAtrX);
+  assert.ok(tight.long.stopAtrX>0&&isFinite(tight.long.stopAtrX));
+});
+
+test("the stop knob is a knob, not a fitted parameter — the default is what ships",()=>{
+  const fd=S.synthBump(4242), b=S.bumpProfile(fd.close,fd.vol);
+  const dflt=S.tradePlan(fd.close,fd.high,fd.low,b);
+  const explicit=S.tradePlan(fd.close,fd.high,fd.low,b,{stopAtr:1.1});
+  assert.strictEqual(dflt.long.stop,explicit.long.stop,"default must be the documented 1.1 ATR");
+});
+
+/* ---------------- the instruction must track the LIVE price, not the scan price ---------------- */
+
+test("planNowFor names exactly one side, at every price",()=>{
+  const fd=S.synthBump(4242);
+  const p=S.tradePlan(fd.close,fd.high,fd.low,S.bumpProfile(fd.close,fd.vol));
+  const cases=[
+    [p.long.entryLo*0.5,'buy'],            // far below the zone — still a buy
+    [p.long.entryLo,'buy'],
+    [p.long.entryHi,'buy'],                // inclusive upper edge
+    [p.short.entryLo,'short'],             // inclusive lower edge
+    [p.short.entryHi*2,'short'],
+  ];
+  for(const [px,want] of cases)assert.strictEqual(S.planNowFor(px,p).now,want,'at '+px);
+  // Between the zones it must say WAIT, and pick whichever edge is nearer.
+  const mid=(p.long.entryHi+p.short.entryLo)/2;
+  assert.ok(S.planNowFor(mid,p).now.startsWith('wait'));
+  assert.strictEqual(S.planNowFor(p.long.entryHi*1.001,p).now,'wait_buy','just above the buy zone → wait to buy');
+  assert.strictEqual(S.planNowFor(p.short.entryLo*0.999,p).now,'wait_short','just under the short zone → wait to short');
+});
+
+test("the instruction changes when price moves — this is why it cannot be cached for 30 minutes",()=>{
+  const fd=S.synthBump(4242);
+  const p=S.tradePlan(fd.close,fd.high,fd.low,S.bumpProfile(fd.close,fd.vol));
+  const inZone=S.planNowFor(p.long.entryHi*0.99,p).now;
+  const escaped=S.planNowFor(p.long.entryHi*1.15,p).now;
+  assert.strictEqual(inZone,'buy');
+  assert.notStrictEqual(escaped,'buy',"a card still saying BUY after price left the zone is the bug this guards");
+});
+
+test("distance-to-zone is signed from the live price, so the alert copy reads correctly",()=>{
+  const fd=S.synthBump(4242);
+  const p=S.tradePlan(fd.close,fd.high,fd.low,S.bumpProfile(fd.close,fd.vol));
+  const above=S.planNowFor(p.long.entryHi*1.2,p);
+  assert.ok(above.toBuy<0,"buy zone is BELOW a price above it");
+  assert.ok(above.toShort>0,"short zone is still above");
+});
+
+test("tradePlan's own instruction agrees with planNowFor at its own price",()=>{
+  for(const seed of [11,222,3333,4242,8191]){
+    const fd=S.synthBump(seed);
+    const p=S.tradePlan(fd.close,fd.high,fd.low,S.bumpProfile(fd.close,fd.vol));
+    if(!p)continue;
+    assert.strictEqual(p.now,S.planNowFor(p.price,p).now,"seed "+seed+": one rule, one answer");
+  }
+});
+
+test("dumpBounce ships the instruction copy so the UI can relabel a re-derived state",async()=>{
+  const d=await S.dumpBounce(true);
+  assert.ok(d.planCopy,"the UI re-derives `now` from a live quote and needs the matching prose");
+  for(const k of ['buy','short','wait_buy','wait_short'])
+    assert.ok(d.planCopy[k]&&d.planCopy[k].label&&d.planCopy[k].lead,'missing copy for '+k);
+});

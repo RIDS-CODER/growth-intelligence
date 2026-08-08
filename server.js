@@ -1037,6 +1037,7 @@ const BUMP_TF="4h", BUMP_BAR_H=4;
 const BUMP_ZZ=parseFloat(process.env.BUMP_ZIGZAG)||parseFloat(CFG.bumpZigzag)||12;   // % reversal on the fast series
 const BUMP_MIN_PCT=parseFloat(process.env.BUMP_MIN_PCT)||parseFloat(CFG.bumpMinPct)||20;  // a bump worth the name
 const BUMP_MAX_BARS=parseInt(process.env.BUMP_MAX_BARS)||parseInt(CFG.bumpMaxBars)||18;   // …and it has to be FAST (≤3 days)
+const BUMP_STOP_ATR=parseFloat(process.env.BUMP_STOP_ATR)||parseFloat(CFG.bumpStopAtr)||1.1;  // stop this many ATR beyond the floor/roof
 const med=a=>{if(!a||!a.length)return null;const s=a.slice().sort((x,y)=>x-y),m=s.length>>1;return s.length%2?s[m]:(s[m-1]+s[m])/2;};
 const avg=a=>a&&a.length?a.reduce((s,v)=>s+v,0)/a.length:0;
 // Drop bad bars from every series TOGETHER — filtering close alone silently misaligns volume
@@ -1221,6 +1222,21 @@ function bumpProfile(close,vol,opts){
    Levels come from the coin's own 4h structure (recent floor, the swing high where the last bump
    rolled over, its ATR) and its own median bump size — never from a generic indicator. Exactly
    one side is live at a time; the other says what price to wait for. */
+/* WHICH SIDE IS LIVE, for a given price. Split out because the LEVELS are structural and fine to
+   be half an hour old, but the INSTRUCTION is not: price can leave the buy zone in minutes, and a
+   card still saying "BUY NOW" off a stale price is worse than no card. The UI re-runs this rule
+   against a fresh quote, so this function is the single source of truth for it — keep the copy in
+   index.html (nlNow) in step, and see the enumerated test in test/dumpbounce.test.js.
+   Exactly one instruction, always. "Mid-air" is a real answer and gets said out loud rather than
+   dressed up as a signal. */
+function planNowFor(price,plan){
+  const buyHi=plan.long.entryHi, shLo=plan.short.entryLo;
+  let now;
+  if(price<=buyHi)now="buy";
+  else if(price>=shLo)now="short";
+  else now=(price-buyHi)<(shLo-price)?"wait_buy":"wait_short";
+  return {now, toBuy:+((buyHi/price-1)*100).toFixed(1), toShort:+((shLo/price-1)*100).toFixed(1)};
+}
 function tradePlan(close,high,low,bump,opts){
   const o=opts||{}, {c:cl,h:hh,l:ll}=cleanOHLC(close,high,low,null);
   const n=cl.length; if(n<40)return null;
@@ -1252,29 +1268,144 @@ function tradePlan(close,high,low,bump,opts){
     while(keep.length<3)keep.push((keep.length?keep[keep.length-1]:base)*(1+dir*step));
     return prog(keep.slice(0,3),dir);
   };
+  // How far below the floor the stop sits, in ATR. Exposed as a knob because the backtest's
+  // stop-out diagnostic can only tell you it is wrong — it must not be allowed to tune itself,
+  // or the plan would be fitted to whatever history happened to be in the window.
+  const stopAtr=o.stopAtr||BUMP_STOP_ATR;
   // LONG — buy the bounce, in the lower part of the base.
   const buyLo=lo, buyHi=Math.max(lo*1.05,lo+0.7*atr), buyMid=(buyLo+buyHi)/2;
-  const buyStop=Math.min(lo-1.1*atr,lo*0.93);
+  const buyStop=Math.min(lo-stopAtr*atr,lo*0.93);
   const buyT=ladder([hi,buyMid*(1+0.45*bp),buyMid*(1+0.9*bp),buyMid*(1+1.4*bp)],buyMid,1,0.4*bp);
   // SHORT — sell the failure, where past bumps died: the recent swing high, or the floor
   // projected up by one full typical bump, whichever is higher.
   const shRef=Math.max(hi,lo*(1+bp)), shLo=shRef*0.96, shHi=shRef*1.03, shMid=(shLo+shHi)/2;
-  const shStop=Math.max(shHi+1.1*atr,shHi*1.07);
+  const shStop=Math.max(shHi+stopAtr*atr,shHi*1.07);
   const shT=ladder([lo,shMid-0.4*(shMid-lo),shMid-0.75*(shMid-lo)],shMid,-1,0.3*bp);
   const side=(dir,eLo,eHi,mid,stop,T)=>({dir,entryLo:eLo,entryHi:eHi,entry:mid,stop,targets:T,
     riskPct:+(Math.abs(mid-stop)/mid*100).toFixed(1),
+    stopAtrX:+(Math.abs(mid-stop)/atr).toFixed(2),        // stop width in ATR — how much noise it tolerates
     ret:T.map(t=>+((dir>0?t/mid-1:1-t/mid)*100).toFixed(1)),
     rrr:+(Math.abs(T[1]-mid)/Math.max(1e-12,Math.abs(mid-stop))).toFixed(2)});
   const long=side(1,buyLo,buyHi,buyMid,buyStop,buyT);
   const short=side(-1,shLo,shHi,shMid,shStop,shT);
-  // Exactly one instruction, always. "Mid-air" is a real answer and gets said out loud rather
-  // than dressed up as a signal.
-  let now;
-  if(price<=buyHi)now="buy";
-  else if(price>=shLo)now="short";
-  else now=(price-buyHi)<(shLo-price)?"wait_buy":"wait_short";
-  return {now,price,floor:lo,roof:hi,atr,bumpPct:+(bp*100).toFixed(1),fromBump,long,short,
-    toBuy:+((buyHi/price-1)*100).toFixed(1), toShort:+((shLo/price-1)*100).toFixed(1)};
+  return {...planNowFor(price,{long,short}),price,floor:lo,roof:hi,atr,
+    bumpPct:+(bp*100).toFixed(1),fromBump,long,short};
+}
+/* ---- DID THE PLAN ACTUALLY WORK? ----
+   The base-rate box answers "what did buying a dip on this coin return" — a generic question.
+   It does NOT answer "if you had taken THIS buy zone, with THIS stop, for THESE targets, every
+   time it fired, what happened?" Those are different questions and the second one is the one a
+   trader is actually asking, so it gets measured here.
+
+   Causality is structural, not asserted: the plan for bar i is produced by calling the SAME
+   production tradePlan() on a strict prefix [0..i], and fills are only ever checked on bars
+   AFTER i. The backtest therefore cannot drift from the live logic, and cannot see the future.
+
+   Two conservative choices, both of which make the numbers worse and both of which are honest:
+   a stop and a target inside the same bar is recorded as the STOP (intrabar order is unknowable
+   from OHLC), and the exit plan is the app's own — a third banked at each target with the stop
+   ratcheting — so these results are directly comparable to the tracker's forward record. */
+const PB_WARMUP=100;          // bars of history before the first simulated decision
+const PB_STEP=3;              // re-derive the plan every N bars; plans do not change bar to bar
+const PB_MAX_HOLD=90;         // force-close after ~15 days on 4h — it is a bump trade, not an investment
+const PB_MIN_TRADES=5;        // below this, report the sample and refuse to quote a win rate
+function planPnl(dir,fill,targets,hitT,exit){
+  let g=0,rem=1;
+  for(let k=0;k<Math.min(hitT,3);k++){ if(targets[k]==null)break; g+=(1/3)*dir*(targets[k]-fill)/fill; rem-=1/3; }
+  if(rem>0.001)g+=rem*dir*(exit-fill)/fill;
+  return g*100;
+}
+function backtestPlan(close,high,low,vol,opts){
+  const o=opts||{}, {c:cl,h:hh,l:ll,v:vv}=cleanOHLC(close,high,low,vol);
+  const n=cl.length, warm=o.warmup||PB_WARMUP;
+  if(n<warm+40)return null;
+  // Derive each decision ONCE, on a strict prefix, and let both books read the same plans.
+  // Nothing here can see past bar i, and fills below are only ever checked from i+1.
+  const plans=[];
+  for(let i=warm;i<n-1;i+=PB_STEP){
+    let p=null;
+    try{ p=tradePlan(cl.slice(0,i+1),hh.slice(0,i+1),ll.slice(0,i+1),
+           bumpProfile(cl.slice(0,i+1),vv.slice(0,i+1))); }catch(e){ p=null; }
+    plans.push({i,p});
+  }
+  /* The two sides run as SEPARATE books. Sharing one position slot let the long — whose zone sits
+     at the floor, where a bleeding coin lives — fire constantly and crowd the short out to a
+     one-trade sample. That was an artifact of the simulation, not a fact about the strategy. */
+  const run=(want)=>{
+    const trades=[]; let open=null, k=0;
+    for(let i=warm;i<n-1;i++){
+      while(k<plans.length-1&&plans[k+1].i<=i)k++;
+      const plan=plans[k]&&plans[k].i<=i?plans[k].p:null;
+      if(!open&&plan){
+        const j=i+1;
+        if(want>0&&ll[j]<=plan.long.entryHi){
+          const fill=Math.min(plan.long.entryHi,hh[j]);
+          if(fill>plan.long.stop)open={dir:1,fill,stop:plan.long.stop,
+            targets:plan.long.targets.slice(),riskPct:plan.long.riskPct,hitT:0,bar:j};
+        }else if(want<0&&hh[j]>=plan.short.entryLo){
+          const fill=Math.max(plan.short.entryLo,ll[j]);
+          if(fill<plan.short.stop)open={dir:-1,fill,stop:plan.short.stop,
+            targets:plan.short.targets.slice(),riskPct:plan.short.riskPct,hitT:0,bar:j};
+        }
+      }
+      if(!open)continue;
+      for(let j=open.bar+1;j<n;j++){
+        // STOP FIRST. With only OHLC we cannot know whether the stop or the target printed
+        // first inside a bar, and assuming the target would flatter every result.
+        const stopped = open.dir>0 ? ll[j]<=open.stop : hh[j]>=open.stop;
+        if(stopped){
+          /* DIAGNOSTIC — was it the stop that failed, or the idea? For a trade stopped before
+             banking anything, keep reading the tape to the end of the hold window and record
+             whether Target 1 arrived anyway. A high rate means the stop is sitting inside normal
+             noise and getting picked off before the move; a low rate means price simply kept
+             going and no stop placement would have saved it. This is an observation about the
+             tape, NOT a tuned parameter — nothing downstream optimises against it. */
+          let recovered=false;
+          if(open.hitT===0){
+            const t1=open.targets[0], end=Math.min(n-1,open.bar+(o.maxHold||PB_MAX_HOLD));
+            for(let q=j;q<=end;q++){ if(open.dir>0?hh[q]>=t1:ll[q]<=t1){recovered=true;break;} }
+          }
+          trades.push({...open,exitBar:j,recovered,
+            pnl:planPnl(open.dir,open.fill,open.targets,open.hitT,open.stop),why:open.hitT?"trail":"stop"}); }
+        else{
+          while(open.hitT<3){
+            const t=open.targets[open.hitT];
+            if(t==null||!(open.dir>0?hh[j]>=t:ll[j]<=t))break;
+            open.hitT++;
+            if(open.hitT===1)open.stop=open.fill;                // breakeven after T1
+            else if(open.hitT===2)open.stop=open.targets[0];     // T1 after T2
+          }
+          if(open.hitT>=3)trades.push({...open,exitBar:j,
+            pnl:planPnl(open.dir,open.fill,open.targets,3,open.targets[2]),why:"targets"});
+          else if(j-open.bar>=(o.maxHold||PB_MAX_HOLD))trades.push({...open,exitBar:j,
+            pnl:planPnl(open.dir,open.fill,open.targets,open.hitT,cl[j]),why:"timeout"});
+          else if(j<n-1)continue;                                // still running
+          // still open when the tape ends is NOT a result, so it is simply dropped
+        }
+        i=j; open=null; break;
+      }
+      if(open){i=n;open=null;}
+    }
+    return trades;
+  };
+  const trades=run(1).concat(run(-1));
+  const summarise=(list)=>{
+    if(!list.length)return {n:0,thin:true,winRate:null,medPct:null,avgR:null,best:null,worst:null,stops:0,full:0};
+    const p=list.map(t=>t.pnl), wins=p.filter(v=>v>0).length;
+    const R=list.map(t=>t.riskPct>0?t.pnl/t.riskPct:0);
+    const thin=list.length<PB_MIN_TRADES;
+    const stopped=list.filter(t=>t.why==="stop");
+    const rec=stopped.filter(t=>t.recovered).length;
+    return {n:list.length,thin,
+      winRate:thin?null:Math.round(100*wins/list.length),
+      medPct:+med(p).toFixed(1), avgR:+(avg(R)).toFixed(2),
+      best:+Math.max(...p).toFixed(1), worst:+Math.min(...p).toFixed(1),
+      stops:stopped.length, full:list.filter(t=>t.why==="targets").length,
+      // of the stop-outs, how many reached Target 1 anyway inside the hold window
+      stoppedEarly:rec, stoppedEarlyPct:stopped.length?Math.round(100*rec/stopped.length):null};
+  };
+  return {long:summarise(trades.filter(t=>t.dir>0)), short:summarise(trades.filter(t=>t.dir<0)),
+    all:summarise(trades), bars:n, simBars:n-warm, tf:BUMP_TF};
 }
 const PLAN_NOW={
   buy:       {icon:'🟢',label:'BUY THE BOUNCE',col:'buy',
@@ -1342,6 +1473,31 @@ function synthBump(seed){
   const now=Date.now();
   return {close,high,low,vol,times:close.map((_,i)=>now-(n-1-i)*BUMP_BAR_H*36e5),price:close[n-1],mtime:now};
 }
+/* Adapt live plans into the shape the setup tracker already understands, so Dump & Bounce
+   trades get followed to an outcome exactly like Quick Trades and Volume Movers do.
+   Only plans that are LIVE NOW are tracked — price is already inside the zone, so the fill is
+   immediate. A WAITING plan is deliberately left alone: the tracker expires unfilled setups
+   after a fixed number of bars, and a buy zone can legitimately take days to be reached, so
+   tracking those would manufacture a pile of fake "never filled" outcomes. */
+function planTrackables(rows){
+  const out=[];
+  for(const r of rows||[]){
+    const p=r.plan; if(!p||(p.now!=="buy"&&p.now!=="short"))continue;
+    const s=p.now==="buy"?p.long:p.short;
+    const bt=r.planBt&&(s.dir>0?r.planBt.long:r.planBt.short);
+    out.push({
+      asset:{sym:r.sym,tk:r.tk,name:r.name,cls:"Crypto",src:"cg"},
+      sig:{price:p.price,verdict:s.dir>0?"BUY":"SELL"},
+      action:{kind:s.dir>0?"buynow":"sellnow",cls:"now"},
+      setup:{dir:s.dir,entryLo:s.entryLo,entryHi:s.entryHi,stop:s.stop,riskPct:s.riskPct,
+        targets:s.targets,ret:s.ret,rrr:s.rrr,regime:"dumpbounce"},
+      // The tracked record carries the BACKTESTED win rate, not an invented confidence score.
+      confidence:(bt&&!bt.thin&&bt.winRate!=null)
+        ?{label:bt.winRate>=50?"High":bt.winRate>=35?"Medium":"Low",pct:bt.winRate}:null,
+      dec:(p.price<5?4:2)});
+  }
+  return out;
+}
 let nlInflight=null;
 async function dumpBounce(force){
   const ck="dumpbounce";
@@ -1389,11 +1545,21 @@ async function dumpBounce(force){
           // The levels — built on the same fast series the bump was measured on.
           const pl=tradePlan(fd.close,fd.high,fd.low,b);
           if(pl){r.plan=pl;r.planInfo=PLAN_NOW[pl.now];}
+          // …and what those exact levels have actually returned on this coin's own tape.
+          const bt=backtestPlan(fd.close,fd.high,fd.low,fd.vol);
+          if(bt)r.planBt=bt;
         }catch(e){r.bumpErr=String(e.message||e).slice(0,80);}
       });
       keep.forEach(r=>{delete r.a;});
+      // Follow these to an outcome like every other recommendation the app makes, so a
+      // Dump & Bounce trade never vanishes off the panel mid-trade — and so the feature builds
+      // a FORWARD record to set against the backtest above.
+      try{ trackSetups(planTrackables(keep),BUMP_TF,"dumpbounce"); }catch(e){}
       const out={rows:keep,found:rows.length,scanned:res.length,skip,ts:Date.now(),demo:DEMO,cryptoMode,
         usdtInr:priceRate(),rateSrc:priceRateSrc(),
+        // The UI re-derives the instruction from a live quote, so it needs the copy for every
+        // state — shipped once here rather than duplicated as prose in index.html.
+        planCopy:PLAN_NOW,
         cfg:{minAgeDays:NL_MIN_AGE,minPeakAgeDays:NL_MIN_PEAK_AGE,minDrawdown:NL_MIN_DD,
           zigzag:NL_ZZ_PCT,minQv:NL_MIN_QV,bumpTf:BUMP_TF,bumpMinPct:BUMP_MIN_PCT,bumpMaxHours:BUMP_MAX_BARS*BUMP_BAR_H}};
       if(res.length)cSet(ck,out);
@@ -1688,6 +1854,42 @@ function fmtAlert(r){
     `R:R ${s.rrr.toFixed(1)}:1 · live ${f(r.sig.price)}\n`+
     `<i>Simulation / not financial advice — verify on your platform before trading.</i>`;
 }
+/* 🎢 Dump & Bounce alerts. A bump runs and dies inside 24–72 hours, so a panel you have to be
+   looking at is a panel that misses the trade. Fires on the TRANSITION into a live zone, not on
+   every scan while price sits there, so a coin parked in its buy zone pings once, not hourly. */
+let dbAlertLast={};
+function fmtPlanAlert(r){
+  const p=r.plan, s=p.now==="buy"?p.long:p.short, isL=s.dir>0;
+  const dec=p.price<5?4:2, f=v=>"₹"+(+v).toFixed(dec);
+  const bt=r.planBt&&(isL?r.planBt.long:r.planBt.short);
+  const ev=(bt&&!bt.thin&&bt.winRate!=null)
+    ? `Backtested on this coin: <b>${bt.winRate}%</b> win over ${bt.n} trades · avg <b>${bt.avgR}R</b>`
+    : `Not enough history on this coin to backtest (${bt?bt.n:0} trades) — size accordingly`;
+  return `🎢 <b>Dump &amp; Bounce — ${isL?"buy the bounce":"short the failure"}</b>\n`+
+    `${isL?"🟢 LONG":"🔴 SHORT"} <b>${r.tk||r.sym}</b> · ${BUMP_TF} · ${isL?"counter-trend":"with-trend"}\n`+
+    `Entry ${f(s.entryLo)}–${f(s.entryHi)}\n`+
+    `🎯 T1 ${f(s.targets[0])} (+${s.ret[0]}%)   🛑 Stop ${f(s.stop)} (−${s.riskPct}%)\n`+
+    `R:R ${s.rrr}:1 · live ${f(p.price)} · ${r.ddPct}% off a high set ${r.peakAgeDays}d ago\n`+
+    `${ev}\n`+
+    `<i>Simulation / not financial advice — verify on your platform before trading.</i>`;
+}
+async function dumpBounceAlerts(){
+  let d; try{ d=await dumpBounce(); }catch(e){ return 0; }
+  let sent=0;
+  const seen={};
+  for(const r of (d.rows||[])){
+    const now=r.plan&&r.plan.now; if(!now)continue;
+    seen[r.sym]=now;
+    if(now!=="buy"&&now!=="short")continue;
+    if(dbAlertLast[r.sym]===now)continue;                // already alerted this state — only the transition pings
+    dbAlertLast[r.sym]=now;
+    if(sent>=alertState.maxPerScan)continue;
+    const res=await sendTelegram(fmtPlanAlert(r));
+    if(res.ok){ alertState.sent++; sent++; }
+  }
+  dbAlertLast=seen;                                      // forget coins that dropped off the list
+  return sent;
+}
 async function alertScan(){
   if(!alertState.on || !TG_TOKEN) return;   // chat is auto-resolved at send time
   alertState.lastRun=Date.now();
@@ -1708,6 +1910,7 @@ async function alertScan(){
     const res=await sendTelegram(fmtAlert(r));
     if(res.ok){ alertState.sent++; sent++; }
   }
+  try{ await dumpBounceAlerts(); }catch(e){}
 }
 function sendJSON(res,o,c=200){const b=JSON.stringify(o);res.writeHead(c,{"Content-Type":"application/json","Access-Control-Allow-Origin":"*"});res.end(b);}
 const MIME={".html":"text/html",".js":"text/javascript",".css":"text/css",".json":"application/json",".svg":"image/svg+xml"};
@@ -1797,7 +2000,8 @@ module.exports={IND,computeSignal,buildSetup,buildReasons,confidenceOf,alertElig
   loadBinance,loadCoinDCX,loadCrypto,ensureCryptoUniverse,usdInr,resampleSeries,tfCfg,getCRYPTO:()=>CRYPTO,getMode:()=>cryptoMode,
   backtestSeries,scoreSeriesArr,backtest,processAsset,blendResearch,assetBtScore,cdxLiveInr,cdxUsdtInr,topMovers,ticker24,
   trackSetups,sweepSetups,updateSetupWithPrice,setupStats,markReversals,realizedPct,volMetrics,priceRate,priceRateSrc,
-  zigzag,listingProfile,bumpProfile,tradePlan,forwardStats,dumpBounce,sparkline,synthListing,synthBump,cleanSeries,cleanOHLC,
+  planTrackables,fmtPlanAlert,dumpBounceAlerts,
+  zigzag,listingProfile,bumpProfile,tradePlan,planNowFor,backtestPlan,forwardStats,dumpBounce,sparkline,synthListing,synthBump,cleanSeries,cleanOHLC,
   __setFx:(r)=>{fxRate=r;fxAt=Date.now();},__setMode:(m)=>{cryptoMode=m;},
   __getSetups:()=>SETUPS,__resetSetups:()=>{SETUPS={active:[],resolved:[]};},
   btcStateFromSeries,__setBtc:(s)=>{BTC_STATE=s;},
