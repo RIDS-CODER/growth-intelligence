@@ -1964,17 +1964,24 @@ function savePositions(){if(!posDirty)return;try{fs.writeFileSync(POS_FILE,JSON.
 function resolveAsset(sym){
   const q=String(sym||"").trim().toUpperCase(); if(!q)return null;
   const all=[...CRYPTO,...STOCKS,...ETFS,...INDICES,...COMMODITIES];
+  /* Three exact forms, because the universes label instruments differently: crypto carries `tk`
+     (BTC) and Upstox names carry `ts` — the NSE trading symbol (RELIANCE) — while `sym` is the
+     internal key (BTCUSDT / RELIANCE.NS). Missing `ts` here meant LT and ABB, both exact NSE
+     symbols, were REFUSED as ambiguous prefixes of LTIM/LTTS and ABBOTINDIA. An exact ticker must
+     always beat a prefix. */
   const exact = all.find(a=>String(a.sym).toUpperCase()===q)
-             || all.find(a=>String(a.tk||"").toUpperCase()===q);
+             || all.find(a=>String(a.tk||"").toUpperCase()===q)
+             || all.find(a=>String(a.ts||"").toUpperCase()===q);
   if(exact)return exact;
   /* Prefix matching is a convenience, but only when it is UNAMBIGUOUS. It used to return the
      first hit, so a half-typed "BT" silently bound to whatever happened to sort first — and a
      position quietly watching the wrong instrument is worse than one that refuses to be created.
      Quote-suffix variants of one coin (BTCUSDT / BTCINR) are the same asset, so they don't count
      as ambiguity; two different tickers do. */
-  const hits=all.filter(a=>String(a.sym).toUpperCase().startsWith(q)||String(a.tk||"").toUpperCase().startsWith(q));
+  const hits=all.filter(a=>String(a.sym).toUpperCase().startsWith(q)
+    ||String(a.tk||"").toUpperCase().startsWith(q)||String(a.ts||"").toUpperCase().startsWith(q));
   if(!hits.length)return null;
-  const bases=new Set(hits.map(a=>String(a.tk||a.sym).toUpperCase()));
+  const bases=new Set(hits.map(a=>String(a.tk||a.ts||a.sym).toUpperCase()));
   return bases.size===1?hits[0]:null;
 }
 async function positionData(asset,tf){

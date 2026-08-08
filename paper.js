@@ -145,25 +145,43 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
 
   // --- strategic selection: rank by conviction, take only quality setups ---
   const kindDir = k => (k==='buynow'||k==='buybreak'||k==='waitdip') ? 1 : (k==='sellnow'||k==='sellbreak'||k==='waitbounce') ? -1 : 0;
+  // Why the bot passed on everything. Without this, a correctly SELECTIVE bot and a broken one
+  // look identical from the panel: equity flat, no positions, no error. Counts are per tick.
+  let funnel={seen:0,noDirection:0,shortsOff:0,pendingOff:0,notScalp:0,lowConf:0,noEdge:0,eligible:0};
   function eligible(r){
+    funnel.seen++;
     if(!r||!r.sig||!r.action||!r.setup) return false;
-    const d=kindDir(r.action.kind); if(!d) return false;
-    if(d<0 && !S.allowShort) return false;
-    if((r.action.kind==='waitdip'||r.action.kind==='waitbounce') && !S.allowPending) return false;
+    const d=kindDir(r.action.kind); if(!d){ funnel.noDirection++; return false; }
+    if(d<0 && !S.allowShort){ funnel.shortsOff++; return false; }
+    if((r.action.kind==='waitdip'||r.action.kind==='waitbounce') && !S.allowPending){ funnel.pendingOff++; return false; }
     // SCALP-ONLY: only the quick/scalp regimes (range + correction) — never trend or breakout setups.
-    if(S.scalpOnly && !(r.setup.regime==='range' || r.setup.regime==='correction')) return false;
+    if(S.scalpOnly && !(r.setup.regime==='range' || r.setup.regime==='correction')){ funnel.notScalp++; return false; }
     // HIGH-CONFIDENCE ONLY: take only setups at/above the confidence floor (default 68 = High). Fall back to a
     // score proxy if the richer confidence metric isn't on the result (older scan payloads) so the bot isn't bricked.
     const conf = (r.confidence && r.confidence.pct!=null) ? r.confidence.pct : Math.min(97, Math.abs(r.sig.score)*2.2);
-    if(conf < (S.minConfPct||0)) return false;
+    if(conf < (S.minConfPct||0)){ funnel.lowConf++; return false; }
     // PROVEN EDGE ONLY: this coin's backtest, on THIS direction, must have actually made money — enough trades,
     // a win rate above the floor, and positive average return. No demonstrated edge on that side → don't take it.
     if(S.requireEdge){
       const side = r.setup.dir>0 ? 'long' : 'short';
       const e = r.btSide && r.btSide[side];
-      if(!e || !(e.trades>=(S.minEdgeTrades||0)) || !(e.winRate>=(S.minWinRate||0)) || !(e.avgRet>0)) return false;
+      if(!e || !(e.trades>=(S.minEdgeTrades||0)) || !(e.winRate>=(S.minWinRate||0)) || !(e.avgRet>0)){ funnel.noEdge++; return false; }
     }
+    funnel.eligible++;
     return true;
+  }
+  // Plain-English reason the bot is flat, built from the biggest rejection bucket.
+  function whyIdle(){
+    const f=S.funnel; if(!f||!f.seen) return null;
+    if(f.eligible) return null;
+    const buckets=[[f.notScalp,'none were scalp setups (range/correction) — turn off ⚡ Scalp only to widen'],
+      [f.noEdge,'none had a proven backtested edge on that side — lower 📊 Proven edge / Min hist win %'],
+      [f.lowConf,'none reached the confidence floor — lower Min conf %'],
+      [f.noDirection,'the engine had no actionable entry on any of them'],
+      [f.shortsOff,'the only candidates were shorts, and Shorts is off'],
+      [f.pendingOff,'the only candidates needed a resting limit, and Dip limits is off']];
+    buckets.sort((a,b)=>b[0]-a[0]);
+    return buckets[0][0] ? `Scanned ${f.seen} setups, took none: ${buckets[0][1]}.` : null;
   }
   const conviction = r => Math.abs(r.sig.score) + (r.mtf?r.mtf.agree*6:0) + ((r.bt&&r.bt.score)?r.bt.score*0.3:0);
 
@@ -215,7 +233,9 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
         const tfs=(S.timeframes&&S.timeframes.length)?S.timeframes:['15m'];
         let all=[];                                                   // hunt across ALL timeframes, then rank the best
         for(const tf of tfs){ try{ const d=await scan(S.tab,tf); if(d&&Array.isArray(d.results)){ for(const r of d.results) r._tf=tf; all=all.concat(d.results); } }catch(e){} }
+        funnel={seen:0,noDirection:0,shortsOff:0,pendingOff:0,notScalp:0,lowConf:0,noEdge:0,eligible:0};
         if(all.length) openFromScan(all, prices);
+        S.funnel=funnel;
       }
     }catch(e){ S.lastError=String(e.message||e); }
     save(); return snapshot();
@@ -235,6 +255,7 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
     const benched=Object.keys(S.stopOuts||{}).filter(s=>(S.stopOuts[s]||0)>=(S.maxStopOutsPerCoin||99));
     return { running:S.running, halted:S.halted, goalHit:S.goalHit, tab:S.tab, timeframes:S.timeframes, usdtInr:(typeof rate==='function'?(rate()||0):0),
       paused:(Date.now()<(S.pauseUntil||0)), pauseUntil:S.pauseUntil||0, lossStreak:S.lossStreak||0, benched,
+      funnel:S.funnel||null, whyIdle:whyIdle(),
       config:{capital:S.capital,riskPct:S.riskPct,dailyTargetPct:S.dailyTargetPct,maxLev:S.maxLev,feeBps:S.feeBps,slipBps:S.slipBps,dayLossLimitPct:S.dayLossLimitPct,allowShort:S.allowShort,allowPending:S.allowPending,allowAggressive:S.allowAggressive,scalpOnly:S.scalpOnly,minConfPct:S.minConfPct,requireEdge:S.requireEdge,minWinRate:S.minWinRate,minEdgeTrades:S.minEdgeTrades,minStopPct:S.minStopPct,stopCooldownMin:S.stopCooldownMin,maxStopOutsPerCoin:S.maxStopOutsPerCoin,lossStreakPause:S.lossStreakPause,streakPauseMin:S.streakPauseMin},
       cash:S.cash, equity:eq, startEquity:S.capital, retPct:(eq/S.capital-1)*100,
       dayStartEquity:S.dayStartEquity, dayRetPct:S.dayStartEquity?(eq/S.dayStartEquity-1)*100:0, targetEquity:S.dayStartEquity*(1+S.dailyTargetPct/100),
