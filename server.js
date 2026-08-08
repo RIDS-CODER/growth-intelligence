@@ -994,6 +994,416 @@ async function topMovers(tab,tf){
 }
 
 /* ============================================================
+   🎢 NEW LISTINGS — the post-listing cycle. A coin lists, sells off for months as
+   unlock supply hits a thin book, and rallies hard in between. This finds coins
+   currently INSIDE that regime, measures how big and how long their bounces have
+   actually been, and says where in the cycle price sits right now.
+
+   Why this is not called "fake coins": COOKIE, XAI and VANA are real projects. The
+   shape comes from a small circulating float against a huge fully-diluted supply, so
+   every unlock lands on a thin order book. Calling them fake would be an accusation
+   this app cannot support, and it would hide the actual mechanism — which is the part
+   you can trade.
+
+   HONESTY, built into every row: these coins carry a structural DOWNWARD drift, and
+   the rallies are counter-trend bounces inside it. So each card reports
+     · what happened historically after a dip like today's (`fwd.win`), AND
+     · what happened buying on ANY random day over the same horizon (`fwd.baseWin`).
+   If those two numbers are the same, "buy the dip here" has no edge — it is just this
+   coin's volatility, and the card says so. Both are computed causally (trailing highs
+   only, never a future bar), and deliberately NOT from the zigzag pivots: every zigzag
+   low is followed by a rally BY CONSTRUCTION, so scoring off pivots would make any
+   coin look like a money printer.
+   ============================================================ */
+const NL_BAR_CAP=400;                                          // daily bars the crypto loaders request
+const NL_TRUNC=NL_BAR_CAP-20;                                  // at/above this the series hit the cap — the listing is OLDER than what we can see
+const NL_MIN_AGE=21;                                           // below this there is nothing measurable
+const NL_MIN_PEAK_AGE=20;                                      // the high must be OLD — otherwise this is a pullback in an uptrend, not a bleed
+const NL_ZZ_PCT=parseFloat(process.env.NL_ZIGZAG)||parseFloat(CFG.dumpBounceZigzag)||15;      // % reversal that defines one daily leg
+const NL_MIN_DD=parseFloat(process.env.NL_MIN_DD)||parseFloat(CFG.dumpBounceMinDrawdown)||35; // % off the peak to qualify
+const NL_MIN_QV=parseFloat(process.env.NL_MIN_QV)||parseFloat(CFG.dumpBounceMinQv)||1e7;      // ₹1 Cr / 24h liquidity floor
+const NL_TOP=parseInt(process.env.NL_TOP)||parseInt(CFG.dumpBounceTop)||15;
+/* RANK, DON'T GATE. An earlier cut also required a complete daily cycle and a ≥15% median daily
+   bounce. Measured against a population of bleeding coins, the cycle test alone rejected HALF of
+   them — and it rejected exactly the wrong half: coins in a near-monotonic bleed whose bumps are
+   sharp and intraday, so they never form a 15% leg between two DAILY closes. That is the XAI /
+   COOKIE shape precisely. Those tests are now score inputs and card stats; the only hard gates
+   are the ones that define the regime (deep below an old high) plus a liquidity floor. */
+const NL_TTL=30*60*1000;                                       // daily bars — pointless to refetch on the 45s panel timer
+/* The BUMP pass runs on 4h bars. A squeeze in one of these coins runs and dies inside 24–72
+   hours; on daily closes that whole event is one or two candles, so a daily-only view would
+   quote "bounces run ~20 days" for a move that was over in two. 400 × 4h ≈ 66 days of history. */
+const BUMP_TF="4h", BUMP_BAR_H=4;
+const BUMP_ZZ=parseFloat(process.env.BUMP_ZIGZAG)||parseFloat(CFG.bumpZigzag)||12;   // % reversal on the fast series
+const BUMP_MIN_PCT=parseFloat(process.env.BUMP_MIN_PCT)||parseFloat(CFG.bumpMinPct)||20;  // a bump worth the name
+const BUMP_MAX_BARS=parseInt(process.env.BUMP_MAX_BARS)||parseInt(CFG.bumpMaxBars)||18;   // …and it has to be FAST (≤3 days)
+const med=a=>{if(!a||!a.length)return null;const s=a.slice().sort((x,y)=>x-y),m=s.length>>1;return s.length%2?s[m]:(s[m-1]+s[m])/2;};
+const avg=a=>a&&a.length?a.reduce((s,v)=>s+v,0)/a.length:0;
+// Drop bad bars from every series TOGETHER — filtering close alone silently misaligns volume
+// (which the bump's crowd-confirmation is read from) and the highs/lows the levels are built on.
+function cleanOHLC(close,high,low,vol){
+  const c=[],h=[],l=[],v=[];
+  for(let i=0;i<(close||[]).length;i++){
+    const x=+close[i]; if(!(x>0&&isFinite(x)))continue;
+    const hh=high?+high[i]:NaN, ll=low?+low[i]:NaN;
+    c.push(x); h.push(hh>0&&isFinite(hh)?hh:x); l.push(ll>0&&isFinite(ll)?ll:x);
+    v.push(vol&&isFinite(+vol[i])?+vol[i]:0);
+  }
+  return {c,h,l,v};
+}
+function cleanSeries(close,vol){const r=cleanOHLC(close,null,null,vol);return {c:r.c,v:r.v};}
+
+// Alternating swing pivots. A leg only turns once price reverses `pct` from the running
+// extreme, so noise inside a trend cannot manufacture fake cycles. Returns CONFIRMED pivots
+// oldest-first ({i, px, k:1 high | -1 low}); the leg still in progress is excluded on purpose,
+// because its end is not known yet — that leg is what the phase logic reads instead.
+function zigzag(close,pct){
+  const n=close.length; if(!(n>2))return [];
+  const th=Math.max(0.005,(+pct||10)/100), piv=[];
+  let dir=0, hi=close[0], hiI=0, lo=close[0], loI=0;
+  for(let i=1;i<n;i++){
+    const p=close[i]; if(!(p>0))continue;
+    if(p>hi){hi=p;hiI=i;}
+    if(p<lo){lo=p;loI=i;}
+    if(dir>=0 && p<=hi*(1-th)){ piv.push({i:hiI,px:hi,k:1});  dir=-1; lo=p; loI=i; }
+    else if(dir<=0 && p>=lo*(1+th)){ piv.push({i:loI,px:lo,k:-1}); dir=1; hi=p; hiI=i; }
+  }
+  return piv;
+}
+// Downsample a series to ~m points for the card sparkline (keeps first and last bar).
+function sparkline(cl,m){
+  m=m||64; if(cl.length<=m)return cl.map(v=>+v.toPrecision(6));
+  const out=[]; for(let i=0;i<m;i++)out.push(+cl[Math.round(i*(cl.length-1)/(m-1))].toPrecision(6));
+  return out;
+}
+// Shape of one coin's recent life, from daily closes.
+// An exchange serves candles only from the listing date, so when the series is SHORTER than the
+// fetch cap, bar 0 really is the listing (`verifiedListing`). When it hits the cap we are looking
+// at a 400-day window of an older coin — which is not a reason to skip it. The regime that makes
+// these coins tradeable (deep below an OLD high, still bleeding, punctuated by sharp bumps) long
+// outlives the listing itself: XAI listed in early 2024 and was still trading that way years on.
+// An age gate would have thrown out the very coins this feature exists to find.
+function listingProfile(close,zzPct){
+  const cl=(close||[]).filter(v=>v>0&&isFinite(v));
+  const n=cl.length; if(n<NL_MIN_AGE)return null;
+  const price=cl[n-1];
+  let peak=cl[0],peakI=0,trough=cl[0],troughI=0;
+  for(let i=1;i<n;i++){ if(cl[i]>peak){peak=cl[i];peakI=i;} if(cl[i]<trough){trough=cl[i];troughI=i;} }
+  const piv=zigzag(cl,zzPct||NL_ZZ_PCT);
+  const ups=[],downs=[];
+  for(let k=1;k<piv.length;k++){
+    const a=piv[k-1],b=piv[k],pct=(b.px/a.px-1)*100,days=b.i-a.i;
+    if(!(days>0)||!isFinite(pct))continue;
+    (b.k===1?ups:downs).push({pct,days});                       // a leg ENDING at a high is a rally
+  }
+  const rally={medPct:med(ups.map(x=>x.pct)),medDays:med(ups.map(x=>x.days)),n:ups.length};
+  const drop={medPct:med(downs.map(x=>x.pct)),medDays:med(downs.map(x=>x.days)),n:downs.length};
+  // Lower lows are the unlock-supply signature: every bounce fails from a lower base.
+  const lows=piv.filter(p=>p.k===-1);
+  let ll=0; for(let k=1;k<lows.length;k++) if(lows[k].px<lows[k-1].px) ll++;
+  const lowerLows=lows.length>1?ll/(lows.length-1):0;
+  const cycles=Math.min(ups.length,downs.length);
+  // WHERE WE ARE NOW — the unfinished leg, measured from the last confirmed pivot.
+  const last=piv.length?piv[piv.length-1]:null;
+  const leg=last?{dir:last.k===-1?1:-1,days:(n-1)-last.i,pct:+((price/last.px-1)*100).toFixed(1),from:last.px}:null;
+  let phase='unclear';
+  if(leg&&leg.dir>0)                                            // rising off the last pivot low
+    phase=((rally.medPct!=null&&leg.pct>=0.8*rally.medPct)||(rally.medDays!=null&&leg.days>=rally.medDays))?'mature':'rallying';
+  else if(leg)                                                  // falling from the last pivot high
+    phase=((drop.medPct!=null&&leg.pct<=0.8*drop.medPct)||(drop.medDays!=null&&leg.days>=drop.medDays))?'bounce':'falling';
+  const ddPct=peak>0?(1-price/peak)*100:0;
+  const peakPos=n>1?peakI/(n-1):0;                              // 0 = peaked on the first bar we can see
+  const peakAgeDays=(n-1)-peakI;                                // how long ago the high was set — the real regime test
+  const truncated=n>=NL_TRUNC;
+  // How far above the RECENT floor price sits — the difference between "at the bottom of this
+  // fall" and "already 20% into the bounce", which the leg % alone does not tell you.
+  let lo30=cl[n-1]; for(let i=Math.max(0,n-30);i<n;i++) if(cl[i]<lo30)lo30=cl[i];
+  // Pattern fit — how closely this matches "fell from an old high and never recovered".
+  // NOT a buy signal: a high score describes a FALLING asset. peakPos only carries weight when
+  // the series provably starts at the listing; on a truncated window it means nothing, because
+  // bar 0 is an arbitrary date, so age-of-peak does that work instead.
+  const score=Math.round(100*(0.25*Math.min(1,ddPct/70)+0.15*Math.min(1,peakAgeDays/120)
+    +0.20*Math.min(1,cycles/3)+0.20*(rally.medPct!=null?Math.min(1,rally.medPct/40):0)
+    +0.15*lowerLows+0.05*((!truncated&&peakPos<=0.35)?1:0)));
+  return {ageDays:n,truncated,verifiedListing:!truncated,peakAgeDays,price,peak,peakI,peakPos:+peakPos.toFixed(2),trough,troughI,
+    ddPct:+ddPct.toFixed(1), fromLow:trough>0?+((price/trough-1)*100).toFixed(1):null,
+    off30:lo30>0?+((price/lo30-1)*100).toFixed(1):null,          // % above the lowest close of the last 30 bars
+    driftPct:cl[0]>0?+((price/cl[0]-1)*100).toFixed(1):null,     // total return since the first served bar
+    rally:{medPct:rally.medPct!=null?+rally.medPct.toFixed(1):null,medDays:rally.medDays!=null?Math.round(rally.medDays):null,n:rally.n},
+    drop:{medPct:drop.medPct!=null?+drop.medPct.toFixed(1):null,medDays:drop.medDays!=null?Math.round(drop.medDays):null,n:drop.n},
+    lowerLows:+lowerLows.toFixed(2),cycles,pivots:piv.length,leg,phase,score};
+}
+// THE HONESTY LAYER. For every past bar that looked like today — at least `dipPct` below its
+// TRAILING `lookback`-day high, computed with past bars only — what did the next `horizon` days
+// do? `base*` is the same horizon bought on ANY day. When win ≈ baseWin the dip is not an edge.
+function forwardStats(close,dipPct,horizon,lookback){
+  const cl=(close||[]).filter(v=>v>0&&isFinite(v));
+  const n=cl.length,h=Math.max(1,Math.round(horizon||7)),lb=Math.max(5,Math.round(lookback||20)),th=(dipPct||20)/100;
+  const dip=[],all=[];
+  for(let i=lb;i+h<n;i++){
+    const fwd=(cl[i+h]/cl[i]-1)*100; if(!isFinite(fwd))continue;
+    all.push(fwd);
+    let hh=0; for(let j=i-lb;j<=i;j++) if(cl[j]>hh)hh=cl[j];    // trailing high — no future bar is read
+    if(hh>0 && cl[i]<=hh*(1-th)) dip.push(fwd);
+  }
+  const win=a=>a.length?Math.round(100*a.filter(v=>v>0).length/a.length):null;
+  const r=a=>{const m=med(a);return m!=null?+m.toFixed(1):null;};
+  return {n:dip.length,win:win(dip),med:r(dip),baseN:all.length,baseWin:win(all),baseMed:r(all),
+    horizon:h,dipPct:+(+(dipPct||20)).toFixed(0),
+    edge:(dip.length>=8&&win(dip)!=null&&win(all)!=null)?win(dip)-win(all):null};
+}
+/* ---- THE BUMP: the part you actually trade, measured on 4h bars ----
+   In these coins the counter-trend rally is fast and violent — often a short squeeze, since a
+   coin that has bled for months is heavily shorted — and it is usually given straight back. So a
+   bump is defined as an up-leg that is BOTH big (≥20%) and FAST (≤3 days); a slow 20% grind is a
+   different animal and is not counted. For every completed bump we then measure what happened
+   AFTER it, over the same number of bars it took to form. That retracement is the whole reason
+   this is a trade with an exit rather than a hope: if these moves round-trip, you take profit
+   into strength or you give it all back. */
+function bumpProfile(close,vol,opts){
+  const o=opts||{}, {c:cl,v:vv}=cleanSeries(close,vol);
+  const n=cl.length; if(n<40)return null;
+  const minPct=o.minPct||BUMP_MIN_PCT, maxBars=o.maxBars||BUMP_MAX_BARS, barH=o.barH||BUMP_BAR_H;
+  const piv=zigzag(cl,o.zz||BUMP_ZZ), bumps=[];
+  for(let k=1;k<piv.length;k++){
+    const a=piv[k-1],b=piv[k];
+    if(b.k!==1)continue;                                        // up-legs only: swing low → swing high
+    const pct=(b.px/a.px-1)*100, bars=b.i-a.i;
+    if(!(pct>=minPct)||!(bars>0)||bars>maxBars)continue;         // big AND fast, or it is not a bump
+    // Give-back over the same window it took to form. Only scored when that window has actually
+    // elapsed — measuring a half-finished retrace would flatter every recent bump.
+    const complete=b.i+bars<=n-1;
+    let retrace=null;
+    if(complete){
+      let lo=cl[b.i]; for(let j=b.i;j<=b.i+bars;j++) if(cl[j]<lo)lo=cl[j];
+      const span=b.px-a.px;
+      if(span>0)retrace=+Math.max(0,Math.min(100,(b.px-lo)/span*100)).toFixed(0);
+    }
+    bumps.push({i:a.i,peakI:b.i,pct:+pct.toFixed(1),bars,hours:bars*barH,retrace,complete});
+  }
+  const done=bumps.filter(b=>b.complete&&b.retrace!=null);
+  const medPct=med(bumps.map(b=>b.pct)), medBars=med(bumps.map(b=>b.bars));
+  // WHERE WE ARE NOW on the fast series.
+  const last=piv.length?piv[piv.length-1]:null, price=cl[n-1];
+  let state="quiet",legPct=0,legBars=0;
+  if(last){
+    legBars=(n-1)-last.i; legPct=+((price/last.px-1)*100).toFixed(1);
+    if(last.k===-1)                                             // rising off the last swing low
+      state=((medPct!=null&&legPct>=0.85*medPct)||(medBars!=null&&legBars>=medBars))?"late"
+           :(legPct>=minPct*0.4?"running":"building");
+    else state="fading";                                        // rolling over off the last swing high
+  }
+  // Crowd confirmation: volume on the current leg vs the 20 bars before it started. A squeeze
+  // with real volume behind it is a squeeze; a spike on nothing is a wick that gets given back.
+  let volX=null;
+  if(last&&n-last.i>=2){
+    const base=avg(vv.slice(Math.max(0,last.i-20),last.i));
+    if(base>0)volX=+(avg(vv.slice(last.i,n))/base).toFixed(2);
+  }
+  return {n:bumps.length,completed:done.length,
+    medPct:medPct!=null?+medPct.toFixed(1):null,
+    medHours:medBars!=null?Math.round(medBars*barH):null,
+    retraceMed:med(done.map(b=>b.retrace)),
+    fullRate:done.length?Math.round(100*done.filter(b=>b.retrace>=90).length/done.length):null,
+    state,legPct,legHours:legBars*barH,volX,windowDays:Math.round(n*barH/24),
+    bumps:bumps.slice(-6),tf:BUMP_TF};
+}
+/* ---- THE PLAN — the two trades this pattern actually offers, with levels ----
+   The pattern is only useful if it ends in "buy here, stop there, sell there". So every card
+   carries BOTH sides, because the shape offers both:
+
+     LONG the bounce   — counter-trend. Fast, and it is the one that pays, but you are buying
+                         into a falling asset, so the stop sits under the floor and the targets
+                         are fractions of THIS coin's own measured bump, not a hope.
+     SHORT the failure — with-trend. Entered where past bumps died, targeting the prior low.
+                         Lower reward, better odds: it is the direction the coin is already going.
+
+   Levels come from the coin's own 4h structure (recent floor, the swing high where the last bump
+   rolled over, its ATR) and its own median bump size — never from a generic indicator. Exactly
+   one side is live at a time; the other says what price to wait for. */
+function tradePlan(close,high,low,bump,opts){
+  const o=opts||{}, {c:cl,h:hh,l:ll}=cleanOHLC(close,high,low,null);
+  const n=cl.length; if(n<40)return null;
+  const price=cl[n-1];
+  const atrArr=IND.atr(cl,hh,ll,14);
+  const atr=(atrArr[n-1]>0?atrArr[n-1]:price*0.04);
+  const back=Math.min(n,o.lookback||45);
+  let lo=Infinity,hi=0;
+  for(let i=n-back;i<n;i++){ if(ll[i]<lo)lo=ll[i]; if(hh[i]>hi)hi=hh[i]; }
+  if(!(lo>0)||!(hi>lo))return null;
+  // This coin's typical bump. When it has no measured bump yet, fall back to a fraction of its
+  // own recent range so a coin still gets levels rather than being silently useless.
+  const bp=((bump&&bump.medPct>0)?bump.medPct:Math.max(15,Math.min(80,(hi/lo-1)*100*0.6)))/100;
+  const fromBump=!!(bump&&bump.medPct>0);
+  /* Targets are picked from real levels, not from a formula alone: the recent swing high (where
+     bumps actually died) competes with the bump-size projection and takes its rightful place in
+     the ladder. Sorting them means a target can never sit ABOVE known resistance while a nearer
+     level goes unlisted — which is what happens if you project off the median bump and ignore
+     the chart. Near-duplicates within 3% collapse, and the ladder is padded if levels run out. */
+  const prog=(a,dir)=>{const out=[];for(const v of a){const p=out.length?out[out.length-1]:null;
+    out.push(p==null?v:(dir>0?Math.max(v,p*1.004):Math.min(v,p*0.996)));}return out;};
+  const ladder=(cands,base,dir,step)=>{
+    const keep=[];
+    for(const v of cands){
+      if(!(v>0)||(dir>0?v<=base*1.02:v>=base*0.98))continue;
+      if(keep.every(x=>Math.abs(x/v-1)>0.03))keep.push(v);
+    }
+    keep.sort((a,b)=>dir>0?a-b:b-a);                                   // nearest level first
+    while(keep.length<3)keep.push((keep.length?keep[keep.length-1]:base)*(1+dir*step));
+    return prog(keep.slice(0,3),dir);
+  };
+  // LONG — buy the bounce, in the lower part of the base.
+  const buyLo=lo, buyHi=Math.max(lo*1.05,lo+0.7*atr), buyMid=(buyLo+buyHi)/2;
+  const buyStop=Math.min(lo-1.1*atr,lo*0.93);
+  const buyT=ladder([hi,buyMid*(1+0.45*bp),buyMid*(1+0.9*bp),buyMid*(1+1.4*bp)],buyMid,1,0.4*bp);
+  // SHORT — sell the failure, where past bumps died: the recent swing high, or the floor
+  // projected up by one full typical bump, whichever is higher.
+  const shRef=Math.max(hi,lo*(1+bp)), shLo=shRef*0.96, shHi=shRef*1.03, shMid=(shLo+shHi)/2;
+  const shStop=Math.max(shHi+1.1*atr,shHi*1.07);
+  const shT=ladder([lo,shMid-0.4*(shMid-lo),shMid-0.75*(shMid-lo)],shMid,-1,0.3*bp);
+  const side=(dir,eLo,eHi,mid,stop,T)=>({dir,entryLo:eLo,entryHi:eHi,entry:mid,stop,targets:T,
+    riskPct:+(Math.abs(mid-stop)/mid*100).toFixed(1),
+    ret:T.map(t=>+((dir>0?t/mid-1:1-t/mid)*100).toFixed(1)),
+    rrr:+(Math.abs(T[1]-mid)/Math.max(1e-12,Math.abs(mid-stop))).toFixed(2)});
+  const long=side(1,buyLo,buyHi,buyMid,buyStop,buyT);
+  const short=side(-1,shLo,shHi,shMid,shStop,shT);
+  // Exactly one instruction, always. "Mid-air" is a real answer and gets said out loud rather
+  // than dressed up as a signal.
+  let now;
+  if(price<=buyHi)now="buy";
+  else if(price>=shLo)now="short";
+  else now=(price-buyHi)<(shLo-price)?"wait_buy":"wait_short";
+  return {now,price,floor:lo,roof:hi,atr,bumpPct:+(bp*100).toFixed(1),fromBump,long,short,
+    toBuy:+((buyHi/price-1)*100).toFixed(1), toShort:+((shLo/price-1)*100).toFixed(1)};
+}
+const PLAN_NOW={
+  buy:       {icon:'🟢',label:'BUY THE BOUNCE',col:'buy',
+    lead:"Price is in the buy zone now. This is the counter-trend leg — fast, and the one that pays, but you are buying a falling coin: the stop is not optional."},
+  short:     {icon:'🔴',label:'SHORT THE FAILURE',col:'sell',
+    lead:"Price is where this coin's bumps have died before. This is the WITH-trend side — smaller reward, better odds, because it is the direction the coin is already going."},
+  wait_buy:  {icon:'⏳',label:'WAIT — TO BUY',col:'muted',
+    lead:"Above the buy zone and below where bumps fail — mid-air. Rest a limit at the buy zone and let it come to you; chasing here is how this pattern takes your money."},
+  wait_short:{icon:'⏳',label:'WAIT — TO SHORT',col:'muted',
+    lead:"Past the buy zone, not yet at the level where bumps roll over. The long is gone; the short is not on yet. Wait for the price below."}
+};
+const BUMP_STATE={
+  late:    {icon:'⚠️',label:'BUMP LATE',col:'sell',
+    what:"The move up has already matched this coin's typical bump in size or in hours. Past bumps rolled over here."},
+  running: {icon:'🔥',label:'BUMP RUNNING',col:'buy',
+    what:"A fast counter-trend move is underway and has not yet reached this coin's typical size. This is the part that pays — and it is measured in hours, not days."},
+  building:{icon:'🌱',label:'BASING',col:'muted',
+    what:"Off the lows but not yet moving with any force. Nothing to chase; this is where you set an alert."},
+  fading:  {icon:'📉',label:'FADING',col:'sell',
+    what:"Rolling over off the last swing high — the give-back leg. The bump, if there was one, is behind you."},
+  quiet:   {icon:'💤',label:'QUIET',col:'muted',
+    what:"No confirmed swing on the fast chart yet."}
+};
+const NL_PHASE={
+  bounce:  {icon:'👀',label:'BOUNCE ZONE',col:'buy',
+    what:"The fall has already run as deep or as long as this coin's own typical down-leg. This is WHERE past bounces started — it is not proof one starts now."},
+  rallying:{icon:'🚀',label:'RALLYING',col:'buy',
+    what:"Up off the last low but still short of this coin's typical bounce. Past bounces from this point still had room left."},
+  mature:  {icon:'⚠️',label:'RALLY MATURE',col:'sell',
+    what:"This bounce has already matched this coin's typical size or length. This is WHERE past bounces ended and the next leg down began."},
+  falling: {icon:'🩸',label:'STILL FALLING',col:'sell',
+    what:"In a down-leg that has not yet run its usual course. Buying here has usually meant more downside first."},
+  unclear: {icon:'•',label:'NO CLEAR LEG',col:'muted',
+    what:"Not enough confirmed swings yet to say where in the cycle this sits."}
+};
+// DEMO only: a synthetic low-float listing — pump on day one, structural decay, periodic bounces.
+function synthListing(seed){
+  let s=Math.abs(seed||1)%2147483647||1; const r=()=>{s=(s*16807)%2147483647;return s/2147483647;};
+  // A third of the demo coins run the full 400 bars, i.e. they hit the fetch cap — the
+  // "older coin, listing not verifiable" case that the age gate used to throw away.
+  const n=r()<0.35?NL_BAR_CAP:45+Math.floor(r()*220),close=[],high=[],low=[],vol=[];
+  let x=40+r()*400,ph=r()*6.28,per=7+r()*10;
+  for(let i=0;i<n;i++){
+    const mv=(i<3?0.11:-0.013)+0.032*Math.sin(i/per+ph)+(r()-0.5)*0.05;
+    x=Math.max(0.01,x*(1+mv));
+    close.push(x);high.push(x*1.05);low.push(x*0.95);vol.push(1e6*(1+Math.abs(mv)*25+r()));
+  }
+  const now=Date.now();
+  return {close,high,low,vol,times:close.map((_,i)=>now-(n-1-i)*864e5),price:close[close.length-1],mtime:now};
+}
+// DEMO only: a 4h bleeder that squeezes. Spike hard, fade hard, grind down — the shape of a
+// short squeeze in a coin everyone is already short.
+function synthBump(seed){
+  let s=Math.abs(seed||1)%2147483647||1; const r=()=>{s=(s*16807)%2147483647;return s/2147483647;};
+  const n=400,close=[],high=[],low=[],vol=[];
+  let x=1+r()*4,sq=0,fade=0;
+  for(let i=0;i<n;i++){
+    let mv;
+    if(sq>0){mv=0.055+(r()-0.5)*0.04;sq--;if(!sq)fade=6+Math.floor(r()*9);}
+    else if(fade>0){mv=-0.042+(r()-0.5)*0.04;fade--;}
+    else{mv=-0.004+(r()-0.5)*0.03;if(r()<0.014)sq=4+Math.floor(r()*7);}
+    x=Math.max(1e-8,x*(1+mv));
+    close.push(x);high.push(x*1.02);low.push(x*0.98);vol.push(1e5*(1+(sq>0?7:0)+r()*2));
+  }
+  const now=Date.now();
+  return {close,high,low,vol,times:close.map((_,i)=>now-(n-1-i)*BUMP_BAR_H*36e5),price:close[n-1],mtime:now};
+}
+let nlInflight=null;
+async function dumpBounce(force){
+  const ck="dumpbounce";
+  if(!force){const hit=cGet(ck,NL_TTL);if(hit)return {...hit,cached:true};}
+  if(nlInflight)return nlInflight;                              // one scan at a time — 120 daily-candle fetches is not cheap
+  nlInflight=(async()=>{
+    try{
+      if(!DEMO)try{await ensureCryptoUniverse();}catch(e){}
+      const uni=universeFor("Crypto");
+      let t24={};try{if(!DEMO)t24=await ticker24();}catch(e){}
+      const haveQv=Object.keys(t24).length>0;
+      // STAGE 1 — daily bars over the whole universe: which coins are in the regime at all.
+      const res=await mapLimit(uni,6,async a=>({a,d:DEMO?synthListing(hashStr(a.sym)):await loadCrypto(a,"daily")}));
+      const rows=[],skip={err:0,short:0,shallow:0,freshPeak:0,illiquid:0};
+      for(const r of res){
+        if(!r||r.__err||!r.d){skip.err++;continue;}
+        const cl=(r.d.close||[]).filter(v=>v>0&&isFinite(v));
+        const p=listingProfile(cl);
+        if(!p){skip.short++;continue;}
+        // TWO GATES ONLY — they define the regime, and nothing else is allowed to hide a coin.
+        // Deep below its high, and that high is OLD (40% off a high set last week is a pullback,
+        // not a bleed). Cycle count, bounce size and peak position used to be gates too; they
+        // rejected half the bleeding coins, so they are now score inputs and card stats instead.
+        if(p.ddPct<NL_MIN_DD){skip.shallow++;continue;}
+        if(p.peakAgeDays<NL_MIN_PEAK_AGE){skip.freshPeak++;continue;}
+        const qv=(haveQv&&t24[r.a.tk]&&t24[r.a.tk].qv)||0;
+        if(haveQv&&qv>0&&qv<NL_MIN_QV){skip.illiquid++;continue;}
+        // Condition the base rate on a dip the size this coin actually makes, over the
+        // horizon its bounces actually take — so the number answers THIS card's question.
+        const dipTh=Math.min(35,Math.max(12,Math.abs(p.drop.medPct||20)*0.8));
+        const fwd=forwardStats(cl,dipTh,Math.max(3,Math.min(30,p.rally.medDays||7)),20);
+        rows.push({a:r.a,sym:r.a.sym,tk:r.a.tk||"",name:r.a.name||r.a.tk||r.a.sym,cls:"Crypto",qv,
+          ...p,fwd,spark:sparkline(cl),phaseInfo:NL_PHASE[p.phase]||NL_PHASE.unclear});
+      }
+      rows.sort((a,b)=>b.score-a.score);
+      const keep=rows.slice(0,NL_TOP);
+      // STAGE 2 — the fast pass, on the survivors only. Daily closes cannot time a move that
+      // runs and dies inside 48 hours, and that move IS the trade. Running this on the whole
+      // universe would double the fetch count to no purpose.
+      await mapLimit(keep,5,async r=>{
+        try{
+          const fd=DEMO?synthBump(hashStr(r.sym)):await loadCrypto(r.a,BUMP_TF);
+          const b=bumpProfile(fd.close,fd.vol);
+          if(b){r.bump=b;r.bumpInfo=BUMP_STATE[b.state]||BUMP_STATE.quiet;r.fastSpark=sparkline((fd.close||[]).filter(v=>v>0),80);}
+          // The levels — built on the same fast series the bump was measured on.
+          const pl=tradePlan(fd.close,fd.high,fd.low,b);
+          if(pl){r.plan=pl;r.planInfo=PLAN_NOW[pl.now];}
+        }catch(e){r.bumpErr=String(e.message||e).slice(0,80);}
+      });
+      keep.forEach(r=>{delete r.a;});
+      const out={rows:keep,found:rows.length,scanned:res.length,skip,ts:Date.now(),demo:DEMO,cryptoMode,
+        usdtInr:priceRate(),rateSrc:priceRateSrc(),
+        cfg:{minAgeDays:NL_MIN_AGE,minPeakAgeDays:NL_MIN_PEAK_AGE,minDrawdown:NL_MIN_DD,
+          zigzag:NL_ZZ_PCT,minQv:NL_MIN_QV,bumpTf:BUMP_TF,bumpMinPct:BUMP_MIN_PCT,bumpMaxHours:BUMP_MAX_BARS*BUMP_BAR_H}};
+      if(res.length)cSet(ck,out);
+      return out;
+    }finally{nlInflight=null;}
+  })();
+  return nlInflight;
+}
+
+/* ============================================================
    📌 SETUP TRACKER — every scalp the panels recommend is snapshotted and then
    FOLLOWED to its outcome (filled → target/stop, or expired unfilled), even after
    it drops out of the live list. Fixes "I took the trade and the card vanished":
@@ -1321,6 +1731,8 @@ async function handler(req,res){
       return sendJSON(res,cryptoSignalsFrom(payload));}
     if(p==="/api/movers"){   // 🔥 biggest volume-backed movement right now, scalp plan attached
       return sendJSON(res,await topMovers(u.searchParams.get("tab")||"Crypto",u.searchParams.get("tf")||"5m"));}
+    if(p==="/api/dumpbounce"){   // 🎢 coins bleeding from an old high, with the 4h bump timed and its base rate
+      return sendJSON(res,await dumpBounce(u.searchParams.get("force")==="1"));}
     if(p==="/api/setups"){   // 📌 tracked setups: every recommendation followed to its outcome + forward hit-rate
       const tfq=u.searchParams.get("tf")||null, lim=Math.min(200,parseInt(u.searchParams.get("limit"))||40);
       const active=SETUPS.active.filter(x=>!tfq||x.tf===tfq).slice().sort((a,b)=>b.born-a.born).slice(0,60)
@@ -1385,6 +1797,7 @@ module.exports={IND,computeSignal,buildSetup,buildReasons,confidenceOf,alertElig
   loadBinance,loadCoinDCX,loadCrypto,ensureCryptoUniverse,usdInr,resampleSeries,tfCfg,getCRYPTO:()=>CRYPTO,getMode:()=>cryptoMode,
   backtestSeries,scoreSeriesArr,backtest,processAsset,blendResearch,assetBtScore,cdxLiveInr,cdxUsdtInr,topMovers,ticker24,
   trackSetups,sweepSetups,updateSetupWithPrice,setupStats,markReversals,realizedPct,volMetrics,priceRate,priceRateSrc,
+  zigzag,listingProfile,bumpProfile,tradePlan,forwardStats,dumpBounce,sparkline,synthListing,synthBump,cleanSeries,cleanOHLC,
   __setFx:(r)=>{fxRate=r;fxAt=Date.now();},__setMode:(m)=>{cryptoMode=m;},
   __getSetups:()=>SETUPS,__resetSetups:()=>{SETUPS={active:[],resolved:[]};},
   btcStateFromSeries,__setBtc:(s)=>{BTC_STATE=s;},

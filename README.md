@@ -167,6 +167,93 @@ Together these build a **forward record** — a measured, real-time hit rate of 
 themselves, distinct from the backtest. Statuses are sampled ~once a minute (state survives restarts via
 `setups.json`). API: `GET /api/setups` (`?tf=`, `?limit=`).
 
+## 🎢 Dump & Bounce — the fall / bump / fall pattern
+
+Click **🎢 Dump & Bounce** for the **XAI / COOKIE / VANA** shape: a coin peaks, falls and falls and
+falls, throws one sharp bump, then falls again.
+
+**That shape is not fraud, and the panel doesn't call it that.** These are real projects with a small
+**circulating float against a huge total supply**, so every unlock lands on a thin order book — and a
+coin everyone is already short squeezes violently when it does turn. Naming the mechanism is the
+useful part; "fake coin" would be an accusation this app can't support and would hide the thing you
+can actually trade.
+
+### The two trades, with levels
+
+Every card gives you **both trades this shape offers**, and one line saying which is live *right now*:
+
+| | |
+|---|---|
+| **① LONG the bounce** | Counter-trend. Buy zone in the lower part of the base, stop under the floor, three targets. Fast, and the one that pays — but you're buying a falling coin, so the stop isn't optional. |
+| **② SHORT the failure** | With-trend. Entry where this coin's bumps have died before, stop above it, targets back down to the prior low. Smaller reward, better odds — it's the direction the coin is already going. |
+
+The instruction is always one of four: 🟢 **BUY THE BOUNCE** · 🔴 **SHORT THE FAILURE** ·
+⏳ **WAIT — TO BUY** · ⏳ **WAIT — TO SHORT**. The two waiting states give you the exact price to set
+an alert at and how far away it is. "Mid-air" is a real answer and gets said out loud rather than
+dressed up as a signal.
+
+Levels come from the coin's own **4h structure** — its recent floor, the swing high where the last
+bump rolled over, its ATR — and its own **median bump size**. Never from a generic indicator.
+Targets are picked from real levels and sorted, so a nearer resistance can't be skipped in favour of
+a formula's projection. When a coin has no completed bump yet, the target distance is estimated from
+its recent range and the card says so.
+
+### Rank, don't gate
+
+Only **two things** keep a coin off the list: at least **35% below a high set 20+ days ago**, plus a
+liquidity floor. That's the regime; everything else *ranks* the list.
+
+An earlier version also required a complete daily cycle and a ≥15% median daily bounce. Measured
+against a population of bleeding coins, **the cycle test alone rejected half of them** — and exactly
+the wrong half: coins in a near-monotonic bleed whose bumps are sharp and intraday, so they never
+form a 15% leg between two *daily closes*. That is the XAI / COOKIE shape precisely. Those tests are
+now score inputs and card stats.
+
+Age is not a gate either. The regime **outlives the listing** — XAI listed in early 2024 and was
+still trading this way years later — so cards say which case they're in: *"listed ~180d ago"* when
+the series provably starts at the listing, or *"400d of history (listing is older)"* when it hit the
+400-bar fetch cap.
+
+### Why two timeframes
+
+**Daily bars** decide which coins are in the regime. **4h bars** time the bump and place the levels,
+because these moves run +50% and die inside 24–72 hours — on daily closes the whole event is one
+candle, so a daily-only view would quote *"bounces run ~20 days"* for something that was over in two.
+
+A **bump** is an up-leg that is both **big (≥20%)** and **fast (≤3 days)** — a slow grind of the same
+size is a different animal and isn't counted. Each card shows this coin's median bump size and
+duration in hours, its live 4h state, and the volume on the current leg versus normal: a squeeze
+with a real crowd behind it is a squeeze; a spike on nothing is a wick.
+
+### The part that keeps this honest
+
+**Every bump is measured for what happened *after* it**, over the same window it took to form: the
+median % given back, and how many round-tripped completely. When that give-back is high the card says
+so in as many words — *"Bumps here do not hold. Take profit into strength."* That is the "then it
+falls again" half, and it's what turns the second trade from a guess into a plan.
+
+Every card also reports **what buying a dip like today's actually returned**:
+
+- the win rate and median return after past dips of the same depth, held for as long as this coin's bounces usually run, **versus**
+- the same horizon bought on **any random day**.
+
+If those two match, the dip told you nothing and the card says exactly that. Several rows will. The
+gap between them is withheld entirely below 8 samples, because a five-sample "edge" is noise dressed
+up as a statistic. Both are computed **causally** — each bar is compared to its *trailing* 20-day
+high, never a future one — and deliberately **not** from the swing pivots, because every pivot low is
+followed by a rally *by construction*, which would make any coin look like a money printer.
+
+**🎢 Pattern fit (0–100) ranks the list; it does not gate it, and it is not a buy signal.** A high
+score means the coin closely matches "fell from an old high and never recovered" — a description of a
+*falling* asset. Depth of the fall (25%), age of the high (15%), complete cycles (20%), bounce size
+(20%), lower lows (15%), plus a small bonus (5%) when the history provably starts at the listing.
+
+Crypto only — the pattern is about token unlock schedules, which have no equivalent in an index or an
+NSE stock. Cached 30 minutes (**↻ rescan** forces a refresh); the daily pass covers the whole universe
+and the 4h pass runs only on the coins that qualify.
+API: `GET /api/dumpbounce` · settings in `config.json`: `dumpBounceTop`, `dumpBounceMinDrawdown`,
+`dumpBounceMinQv`, `dumpBounceZigzag`, `bumpZigzag`, `bumpMinPct`, `bumpMaxBars` (or env `NL_TOP`,
+`NL_MIN_DD`, `NL_MIN_QV`, `NL_ZIGZAG`, `BUMP_ZIGZAG`, `BUMP_MIN_PCT`, `BUMP_MAX_BARS`).
 ## How prices stay accurate
 
 - **Stocks/ETFs/indices:** Upstox real-time last-traded price (LTP), refreshed every few seconds, plus
