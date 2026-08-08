@@ -1426,11 +1426,15 @@ async function removePosition(id,label){
   posState.msg='Removed '+label+'.'; await loadPositions(true);
 }
 const posSideCol=s=>s>0?'var(--buy)':'var(--sell)';
+/* Three states, not two. "The signal disagrees with you" and "the signal TURNED on you" are
+   different facts with different responses, and collapsing them made every deliberate
+   counter-trend entry look like an emergency the moment it was added. */
 function posStatus(p){
   if(p.err)return {txt:'⚠ can’t read — '+p.err,col:'#fbbf24'};
-  if(p.rev)return {txt:'⚠ REVERSED — signal is against you',col:'var(--sell)'};
+  if(p.rev)return {txt:'⚠ REVERSED — the signal turned against you after you entered',col:'var(--sell)'};
+  if(p.against)return {txt:'↩ counter-trend — the signal ('+(p.verdict||'?')+') disagreed when you entered too, and still does',col:'#fbbf24'};
   if(p.verdict==='HOLD')return {txt:'• no clear signal either way',col:'var(--muted)'};
-  return {txt:'✅ signal still agrees ('+p.verdict+')',col:'var(--buy)'};
+  return {txt:'✅ signal agrees ('+p.verdict+')',col:'var(--buy)'};
 }
 function posRow(p){
   // Same ₹/$ toggle every other panel uses. Entries are STORED in ₹; this only changes the view.

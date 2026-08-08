@@ -140,7 +140,9 @@ test("the confirmation and recovery messages exist and are distinct",()=>{
   const back=S.fmtPosAlert(p,"onside",120,"BUY");
   assert.match(watch,/Now watching/);
   assert.match(watch,/one message here if the signal turns against/,"sets the expectation of no spam");
-  assert.match(back,/Back onside/);
+  // Deliberately not "back onside": for a counter-trend entry the signal was never onside to
+  // begin with, so this message has to read correctly the first time it agrees with you.
+  assert.match(back,/Signal now agrees with you/);
   assert.match(back,/\+20%/);
   assert.notStrictEqual(watch,back);
 });
@@ -184,4 +186,72 @@ test("P&L is unaffected by which currency it is displayed in",()=>{
   const r=88.5;
   assert.strictEqual(S.posPnl({side:1,entry:100},110),S.posPnl({side:1,entry:100*r},110*r));
   assert.strictEqual(S.posPnl({side:-1,entry:250},200),S.posPnl({side:-1,entry:250*r},200*r));
+});
+
+/* ---------------- a reversal is a CHANGE, not a comparison ---------------- */
+
+test("entering against the signal is recorded as counter-trend, not flagged as a reversal",async()=>{
+  // The reported bug: the flag was a stateless "does the signal disagree right now?", so a
+  // deliberately counter-trend entry was branded REVERSED the instant it was added — under a
+  // message reading "the reason you entered is gone" when there had never been one. And it is
+  // the MAIN case here: 🎢 Dump & Bounce exists to buy bounces in coins still rated SELL.
+  fresh();
+  const p=(await S.addPosition({sym:"BTC",side:1,entry:1000})).position;
+  assert.strictEqual(typeof p.against,"boolean","the baseline must be recorded at entry");
+  assert.ok(p.entryVerdict,"and the verdict it was taken against");
+  assert.strictEqual(p.counterAtEntry,p.against);
+  assert.ok(!p.rev,"adding a position must NEVER raise the reversal flag, whatever the signal says");
+});
+
+test("the sweep seeds an unseen position instead of alerting on it",async()=>{
+  // Covers records written before this fix, which carry no `against` field.
+  fresh();
+  await S.addPosition({sym:"BTC",side:1,entry:1000});
+  const p=S.__getPositions()[0];
+  delete p.against; delete p.rev; p.alerts=0;          // simulate a pre-upgrade record
+  await S.positionsSweep();
+  assert.strictEqual(typeof p.against,"boolean","seeded");
+  assert.ok(!p.rev,"an upgrade must not fire a reversal for a state it never observed");
+  assert.strictEqual(p.alerts,0,"and must not count an alert");
+});
+
+test("only a transition into disagreement is a reversal; staying there is not",async()=>{
+  fresh();
+  await S.addPosition({sym:"BTC",side:1,entry:1000});
+  const p=S.__getPositions()[0];
+  p.against=false; delete p.rev; p.alerts=0;
+  // Force the engine to disagree by flipping the side against whatever it currently reads.
+  const s=await S.positionSignal(p);
+  if(s.verdict==="HOLD"){                              // no opinion — assert the neutral rule instead
+    await S.positionsSweep();
+    assert.ok(!S.__getPositions()[0].rev,"HOLD must never flip the flag");
+    return;
+  }
+  p.side = s.verdict==="SELL" ? 1 : -1;                // now guaranteed to be against
+  await S.positionsSweep();
+  assert.ok(p.rev,"first sweep after the state changed must raise it");
+  const n1=p.alerts;
+  await S.positionsSweep();
+  assert.strictEqual(p.alerts,n1,"a trade that SITS reversed must not re-alert every sweep");
+});
+
+test("the reversal message does not claim a reason existed when none did",()=>{
+  const counter={sym:"X",tk:"X",side:1,entry:1,tf:"4h",cls:"Crypto",counterAtEntry:true,entryVerdict:"SELL"};
+  const normal ={sym:"X",tk:"X",side:1,entry:1,tf:"4h",cls:"Crypto",counterAtEntry:false,entryVerdict:"BUY"};
+  const m1=S.fmtPosAlert(counter,"reversed",0.9,"SELL");
+  const m2=S.fmtPosAlert(normal ,"reversed",0.9,"SELL");
+  assert.match(m2,/reason you entered is gone/,"a trade taken WITH the signal did lose its reason");
+  assert.ok(!/reason you entered is gone/.test(m1),
+    "a counter-trend trade never had a signal behind it — saying otherwise is simply false");
+  assert.match(m1,/came onside and has now turned again/);
+});
+
+test("the confirmation warns when a trade starts counter-trend, and stays quiet when it doesn't",()=>{
+  const counter={sym:"X",tk:"X",side:1,entry:1,tf:"4h",cls:"Crypto",counterAtEntry:true,entryVerdict:"SELL"};
+  const normal ={sym:"X",tk:"X",side:1,entry:1,tf:"4h",cls:"Crypto",counterAtEntry:false,entryVerdict:"BUY"};
+  const w1=S.fmtPosAlert(counter,"watch",1), w2=S.fmtPosAlert(normal,"watch",1);
+  assert.match(w1,/counter-trend trade from the start/);
+  assert.match(w1,/will NOT be pinged/,"sets the expectation so silence is not read as a fault");
+  assert.ok(!/counter-trend trade from the start/.test(w2));
+  assert.match(w2,/signal now <b>BUY<\/b>/,"both state the signal at entry");
 });
