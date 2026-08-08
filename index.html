@@ -491,7 +491,7 @@ function renderPaper(s){
     <h3>🤖 Paper Bot <span class="sub">— simulation · crypto futures · no real money</span> ${s.running?'<span style="color:var(--buy)">● RUNNING</span>':'<span class="sub">■ stopped</span>'} ${s.goalHit?'<span style="color:var(--buy)">🎯 daily target hit — done for today</span>':''} ${s.halted?'<span style="color:var(--sell)">⛔ halted — daily loss limit</span>':''} ${s.paused?'<span style="color:var(--hold)" title="Standing down after a run of losses — new entries paused so it stops fighting the tape. Resumes automatically.">⏸ cooling off (loss streak)</span>':''} ${(s.benched&&s.benched.length)?'<span class="sub" title="Coins benched for the day after repeated stop-outs — no revenge trades: '+s.benched.join(', ')+'">🪑 benched: '+s.benched.length+'</span>':''}</h3>
     ${s.config.scalpOnly===undefined
       ? '<div style="margin:4px 0;padding:8px 11px;border-radius:8px;background:rgba(234,57,67,.12);border:1px solid rgba(234,57,67,.5);color:#fca5a5;font-size:12.5px;font-weight:600">⚠ Your deployed <b>paper.js is out of date</b> — the Scalp-only filter isn’t in it, so the bot is still taking trend &amp; breakout trades. Upload the latest <b>paper.js</b> and hit <b>Reset</b>.</div>'
-      : `<div style="margin:4px 0;padding:7px 11px;border-radius:8px;background:${s.config.scalpOnly?'rgba(52,211,153,.1)':'rgba(245,158,11,.12)'};border:1px solid ${s.config.scalpOnly?'rgba(52,211,153,.4)':'rgba(245,158,11,.4)'};font-size:12.5px">Trading filter: <b style="color:${s.config.scalpOnly?'var(--buy)':'#fbbf24'}">${s.config.scalpOnly?'⚡ SCALP-ONLY':'ALL setups (scalp filter OFF)'}</b> · min confidence <b>${s.config.minConfPct!=null?s.config.minConfPct+'%':'—'}</b> · proven-edge gate <b style="color:${s.config.requireEdge?'var(--buy)':'var(--muted)'}">${s.config.requireEdge?'ON (≥'+(s.config.minWinRate||50)+'% hist win, this side)':'off'}</b> · shorts <b>${s.config.allowShort?'on':'off'}</b></div>`}
+      : `<div style="margin:4px 0;padding:7px 11px;border-radius:8px;background:${s.config.scalpOnly?'rgba(52,211,153,.1)':'rgba(245,158,11,.12)'};border:1px solid ${s.config.scalpOnly?'rgba(52,211,153,.4)':'rgba(245,158,11,.4)'};font-size:12.5px">Trading filter: <b style="color:${s.config.scalpOnly?'var(--buy)':'#fbbf24'}">${s.config.scalpOnly?'⚡ SCALP-ONLY':'ALL setups (scalp filter OFF)'}</b> · min confidence <b>${s.config.minConfPct!=null?s.config.minConfPct+'%':'—'}</b> · proven-edge gate <b style="color:${s.config.requireEdge?'var(--buy)':'var(--muted)'}">${s.config.requireEdge?'ON (≥'+(s.config.minWinRate||50)+'% hist win, this side)':'off'}</b> · shorts <b>${s.config.allowShort?'on':'off'}</b></div>`+(s.running&&s.whyIdle?`<div class="sub" style="margin:4px 0;padding:7px 11px;border-radius:8px;background:rgba(148,163,184,.1);border:1px dashed var(--line);line-height:1.5">⏳ <b>Running, holding nothing.</b> ${s.whyIdle} <span style="color:var(--muted)">Being selective and being broken look identical without this line — that is why it is here.</span></div>`:'')}
     <div style="display:flex;gap:6px;margin:6px 0;align-items:center"><span class="sub">Show in:</span>
       <button class="btn ${paperCcy==='INR'?'go':''}" style="padding:2px 10px;font-size:11px" onclick="setPaperCcy('INR')">₹ INR</button>
       <button class="btn ${paperCcy==='USDT'?'go':''}" style="padding:2px 10px;font-size:11px" onclick="setPaperCcy('USDT')">$ USDT</button>
@@ -573,11 +573,16 @@ function renderResearchResult(d){
       <div>${tgts}</div>
       <div class="sub" style="margin-top:5px">Per-timeframe stops disagreed by <b>${c.stopSpreadPct.toFixed(1)}%</b> — this averaged stop smooths that out.${c.btAvg!=null?' · Avg backtest grade <b>'+c.btAvg+'/100</b>':''}</div></div>`;
   } else {
-    plan=`<div class="sub" style="margin:9px 0">Only ${c.agree}% of the timeframes agree on a direction — no clean trade. Better to wait than force one.</div>`;
+    /* `agree` is agreement on the WINNING verdict, and HOLD can win it. Unanimous HOLD therefore
+       came out as "Only 100% of the timeframes agree on a direction" — a flat contradiction, and
+       the opposite of what happened: they agreed completely that there is nothing here. */
+    plan=(c.verdict==='HOLD')
+      ? `<div class="sub" style="margin:9px 0"><b>${c.agree}%</b> of the timeframes agree there is <b>no clean direction</b> right now${c.agree>=100?' — they are unanimous about it':''}. No trade is the trade; forcing one here is how the account bleeds.</div>`
+      : `<div class="sub" style="margin:9px 0">Only <b>${c.agree}%</b> of the timeframes agree on a direction — no clean trade. Better to wait than force one.</div>`;
   }
   out.innerHTML=`<div class="trow" style="border-color:rgba(167,139,250,.35)">
     <div class="th"><div><span class="nm">${d.sym}</span> <span class="sub">${d.horizon==='long'?'Long-term':'Short-term'} · live ${P(c.price)}</span></div>
-      <div style="text-align:right"><b style="color:var(--${vCol})">${vLabel}</b><br><span class="sub">${c.agree}% of timeframes agree</span></div></div>
+      <div style="text-align:right"><b style="color:var(--${vCol})">${vLabel}</b><br><span class="sub">${c.agree}% of timeframes agree${c.verdict==='HOLD'?' (on no trade)':''}</span></div></div>
     ${plan}
     <table class="rztbl"><thead><tr><th>TF</th><th>Signal</th><th>Score</th><th>Stop</th><th>Grade</th></tr></thead><tbody>${frames}</tbody></table>
     <p class="small" style="margin-top:6px;color:var(--muted)">Guidance only — blends standard indicator signals across timeframes; not a guarantee. Use the averaged stop as your risk anchor and size so one loss is small.</p></div>`;
@@ -1445,7 +1450,7 @@ function posRow(p){
       <div><b style="color:${posSideCol(p.side)}">${p.side>0?'LONG':'SHORT'}</b> <b>${p.name||p.tk||p.sym}</b>
         <span class="sub">${p.tf} · from ${f(p.entry)}${p.qty?' · qty '+p.qty:''}</span></div>
       <div style="text-align:right">${pnl!=null?`<b style="color:${pnl>=0?'var(--buy)':'var(--sell)'}">${pnl>=0?'+':''}${pnl}%</b> `:''}
-        <span class="sub">live ${f(p.price)}</span></div>
+        <span class="sub">${p.priceSrc==='candle'?'<span style="color:#fbbf24" title="No live quote reached the server for this symbol, so this is the last candle close and can lag the exchange.">last close</span>':'live'} ${f(p.price)}</span></div>
     </div>
     <div class="sub" style="margin-top:4px;color:${st.col}">${st.txt}</div>
     <div class="sub" style="margin-top:3px">📣 alerts to <b>${p.chatName||(p.chat?'chat …'+String(p.chat).slice(-4):'nobody — no Telegram user was picked')}</b>${p.alerts?' · '+p.alerts+' sent':''}
