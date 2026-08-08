@@ -312,9 +312,25 @@ score means the coin closely matches "fell from an old high and never recovered"
 *falling* asset. Depth of the fall (25%), age of the high (15%), complete cycles (20%), bounce size
 (20%), lower lows (15%), plus a small bonus (5%) when the history provably starts at the listing.
 
+### Two refresh rates, and why the price may still not match CoinDCX
+
+The scan is heavy — every coin's daily history, then 4h bars and a backtest on the survivors — so
+**levels are rebuilt every 30 minutes** (**↻ rescan** forces it). That's right for levels: a floor and
+a swing high don't move minute to minute.
+
+It is *not* right for the price, and it was wrong for the **instruction**. So **live quotes are polled
+every 20 seconds and the buy/short call is re-derived from them**, which means the card never tells
+you to buy a zone price has already left. The header shows both clocks (`levels from 11:20 am ·
+prices ⟳ 20s`). If a live quote can't be fetched, the card says **⚠ not live** rather than passing a
+scan-time price off as current.
+
+Beyond that, the same India-premium caveat as every other panel applies — see
+[Why a price may not match your exchange exactly](#why-a-price-may-not-match-your-exchange-exactly).
+Short version: if ₹ is off by a *consistent* 1–4%, that's the premium and the **$ USDT view is
+exact**; if it's off on a fast-moving coin and jitters, that's timing.
+
 Crypto only — the pattern is about token unlock schedules, which have no equivalent in an index or an
-NSE stock. Cached 30 minutes (**↻ rescan** forces a refresh); the daily pass covers the whole universe
-and the 4h pass runs only on the coins that qualify.
+NSE stock. The daily pass covers the whole universe and the 4h pass runs only on the coins that qualify.
 API: `GET /api/dumpbounce` (tracked plans appear in `GET /api/setups`) · settings in `config.json`: `dumpBounceTop`, `dumpBounceMinDrawdown`,
 `dumpBounceMinQv`, `dumpBounceZigzag`, `bumpZigzag`, `bumpMinPct`, `bumpMaxBars`, `bumpStopAtr`
 (or env `NL_TOP`, `NL_MIN_DD`, `NL_MIN_QV`, `NL_ZIGZAG`, `BUMP_ZIGZAG`, `BUMP_MIN_PCT`,

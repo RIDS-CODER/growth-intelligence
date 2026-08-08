@@ -1145,13 +1145,51 @@ function renderMoversList(){
    form. That retracement is the "then it falls again" half — and it is what makes this a trade
    with an exit instead of a hope.
    ============================================================ */
-let listState={open:false,data:null,loading:false,err:'',state:'all'};
+let listState={open:false,data:null,loading:false,err:'',state:'all',px:{},pxAt:0};
+let listTimer=null;
+/* The full scan is heavy (every coin's daily history, then 4h + a backtest on the survivors) and
+   cached for 30 minutes — which is right for LEVELS, since a floor and a swing high do not move
+   minute to minute. It is NOT right for the PRICE, and it was flatly wrong for the INSTRUCTION:
+   "🟢 BUY THE BOUNCE" computed off a half-hour-old quote can tell you to buy a zone price left
+   long ago. So live quotes are polled separately and the instruction is re-derived from them.
+   Mirror of planNowFor() in server.js — keep the two in step. */
+function nlNow(price,plan){
+  const buyHi=plan.long.entryHi, shLo=plan.short.entryLo;
+  let now;
+  if(price<=buyHi)now='buy';
+  else if(price>=shLo)now='short';
+  else now=(price-buyHi)<(shLo-price)?'wait_buy':'wait_short';
+  return {now, toBuy:+((buyHi/price-1)*100).toFixed(1), toShort:+((shLo/price-1)*100).toFixed(1)};
+}
+// Apply the freshest quote we have to a row, so price AND instruction reflect now, not scan time.
+function nlLive(r){
+  const q=listState.px[r.sym];
+  if(!r.plan)return r;
+  if(!(q>0))return {...r,stale:true};
+  const plan={...r.plan,...nlNow(q,r.plan),price:q};
+  // the label/lead must follow the RE-DERIVED instruction, not the one baked in at scan time
+  const copy=(listState.data&&listState.data.planCopy)||{};
+  return {...r,plan,planInfo:copy[plan.now]||r.planInfo,stale:false};
+}
+async function loadListPrices(){
+  try{
+    const d=await(await fetch('/api/quotes?tab=Crypto&_='+Date.now())).json();
+    if(d.usdtInr>0){usdtInr=d.usdtInr;scalpRateSrc=d.rateSrc||scalpRateSrc;}
+    if(d.quotes&&Object.keys(d.quotes).length){listState.px=d.quotes;listState.pxAt=d.ts||Date.now();}
+  }catch(e){}
+  if(listState.open&&listState.data)renderListBody();
+}
 const NL_PCOL={buy:'var(--buy)',sell:'var(--sell)',muted:'var(--muted)'};
 const nlPct=(v,d)=>v==null||!isFinite(v)?'—':(v>=0?'+':'')+(+v).toFixed(d==null?1:d)+'%';
 const nlHrs=h=>h==null?'—':h<48?h+'h':(h/24).toFixed(h%24?1:0)+'d';
 function toggleListings(){const el=document.getElementById('listPanel');listState.open=el.style.display==='none';
   el.style.display=listState.open?'block':'none';
-  if(listState.open){renderListShell();if(!listState.data)loadListings();}}
+  if(listState.open){
+    renderListShell(); if(!listState.data)loadListings();
+    loadListPrices();                                     // instruction must reflect the live price, not scan time
+    if(listTimer)clearInterval(listTimer);
+    listTimer=setInterval(()=>{ if(listState.open)loadListPrices(); },20000);
+  }else if(listTimer){clearInterval(listTimer);listTimer=null;}}
 function setListState(s){listState.state=s;renderListShell();}
 async function loadListings(force){
   listState.loading=true;listState.err='';renderListShell();
@@ -1216,7 +1254,7 @@ function nlPlan(r){
       ${wait?`<div class="sub" style="margin-top:4px">${wait}</div>`:''}
       ${nlSide(p.long,'① LONG the bounce','counter-trend — take profit into strength.',buyLive||p.now==='wait_buy')}
       ${nlSide(p.short,'② SHORT the failure','with-trend — this is the higher-probability side.',shortLive||p.now==='wait_short')}
-      <div class="sub" style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--line)">Floor <b>${P(p.floor)}</b> · where bumps have died <b>${P(p.roof)}</b> · live <b>${P(p.price)}</b></div>
+      <div class="sub" style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--line)">Floor <b>${P(p.floor)}</b> · where bumps have died <b>${P(p.roof)}</b> · ${r.stale?'price at last scan':'live'} <b>${P(p.price)}</b>${r.stale?' <span style="color:#fbbf24" title="No live quote reached the browser, so this price and the instruction above are from the last full scan and may be stale.">⚠ not live</span>':''}</div>
     </div>`;
 }
 /* THE VERDICT ON THE LEVELS THEMSELVES — not "what did buying a dip return" (generic) but
@@ -1248,6 +1286,10 @@ function nlBacktest(r){
      opposite fixes. Measured on the tape; nothing tunes itself against it. */
   const s=(p.now==='short'||p.now==='wait_short')?p.short:p.long;
   const why=(!side||!side.stops||side.stoppedEarlyPct==null)?''
+    // 2-of-2 is not evidence. Below 5 stop-outs the counts are reported without the inference —
+    // otherwise this line confidently diagnoses a cause directly under "too thin to judge".
+    : side.stops<5
+      ? `<div class="sub" style="margin-top:4px;color:var(--muted)">🔍 <b>${side.stoppedEarly} of ${side.stops}</b> stop-outs reached Target 1 anyway — too few to tell whether the stop or the idea is at fault. The stop sits ${s.stopAtrX} ATR from entry.</div>`
     : side.stoppedEarlyPct>=50
       ? `<div class="sub" style="margin-top:4px;color:#fbbf24">🔍 <b>${side.stoppedEarly} of ${side.stops}</b> stop-outs reached Target 1 anyway inside the hold window — <b>the stop, not the idea, is what failed</b>. At ${s.stopAtrX} ATR from entry it is still being picked off before the move arrives. Widening it — and sizing smaller to keep the same rupee risk — is the lever to try.</div>`
       : side.stoppedEarlyPct<=25
@@ -1313,7 +1355,7 @@ function renderListShell(){
   el.innerHTML=`<div class="tradespanel" style="border-color:rgba(192,132,252,.45)">
     <h3>🎢 Dump &amp; Bounce <span class="sub">— coins bleeding from an old high, with the bump timed</span>
       <button class="btn" style="padding:2px 9px;font-size:11px" onclick="loadListings(1)">↻ rescan</button>
-      <span class="sub">${d&&d.ts?'· updated '+new Date(d.ts).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true}):''}${d?' · '+d.found+' of '+d.scanned+' coins qualify':''}</span></h3>
+      <span class="sub">${d&&d.ts?'· levels from '+new Date(d.ts).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true}):''}${d?' · '+d.found+' of '+d.scanned+' coins qualify':''}${listState.pxAt?' · prices ⟳ 20s':''}</span></h3>
     <div class="sub" style="line-height:1.55;margin:2px 0 8px">
       The <b>XAI / COOKIE / VANA</b> shape: a coin peaks, falls and falls and falls, throws one sharp bump, then falls again.
       Every card gives you <b>both trades that shape offers</b> — <b style="color:var(--buy)">buy the bounce</b> (counter-trend, fast)
@@ -1323,7 +1365,8 @@ function renderListShell(){
       <b>35% below a high set 20+ days ago</b>, plus a liquidity floor — everything else <i>ranks</i> the list instead of hiding coins.
       Every card also <b>replays its own levels over the coin's history</b> and tells you what they returned — including when the answer is
       that they lost money. Live plans are followed to an outcome in <b>📌 Tracked setups</b>, and ping Telegram when price enters a zone.
-      Rescanned every 30 minutes.
+      <b>Levels</b> are rebuilt every 30 minutes — a floor and a swing high do not move minute to minute — but <b>prices and the buy/short
+      instruction refresh every 20 seconds</b>, so the card never tells you to buy a zone price has already left.
     </div>
     <div style="display:flex;gap:5px;flex-wrap:wrap;margin:4px 0 8px;align-items:center">${tabs}${scalpCcyTabs('Crypto')}</div>
     <div id="listBody"></div></div>`;
@@ -1334,7 +1377,7 @@ function renderListBody(){
   if(listState.loading){el.innerHTML='<div class="sub" style="padding:14px">⏳ Reading every coin\'s full daily history, then the 4h chart of the ones that qualify — ~40s the first time, then cached for 30 minutes.</div>';return;}
   if(listState.err){el.innerHTML='<div class="sub" style="padding:14px;color:var(--sell)">Couldn’t scan: '+listState.err+'</div>';return;}
   const d=listState.data; if(!d){el.innerHTML='<div class="sub" style="padding:14px">—</div>';return;}
-  let rows=d.rows||[];
+  let rows=(d.rows||[]).map(nlLive);
   if(listState.state!=='all')rows=rows.filter(r=>r.plan&&r.plan.now===listState.state);
   if(!rows.length){
     el.innerHTML='<div class="empty">'+(d.found

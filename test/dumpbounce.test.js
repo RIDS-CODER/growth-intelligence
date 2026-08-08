@@ -537,3 +537,56 @@ test("the stop knob is a knob, not a fitted parameter — the default is what sh
   const explicit=S.tradePlan(fd.close,fd.high,fd.low,b,{stopAtr:1.1});
   assert.strictEqual(dflt.long.stop,explicit.long.stop,"default must be the documented 1.1 ATR");
 });
+
+/* ---------------- the instruction must track the LIVE price, not the scan price ---------------- */
+
+test("planNowFor names exactly one side, at every price",()=>{
+  const fd=S.synthBump(4242);
+  const p=S.tradePlan(fd.close,fd.high,fd.low,S.bumpProfile(fd.close,fd.vol));
+  const cases=[
+    [p.long.entryLo*0.5,'buy'],            // far below the zone — still a buy
+    [p.long.entryLo,'buy'],
+    [p.long.entryHi,'buy'],                // inclusive upper edge
+    [p.short.entryLo,'short'],             // inclusive lower edge
+    [p.short.entryHi*2,'short'],
+  ];
+  for(const [px,want] of cases)assert.strictEqual(S.planNowFor(px,p).now,want,'at '+px);
+  // Between the zones it must say WAIT, and pick whichever edge is nearer.
+  const mid=(p.long.entryHi+p.short.entryLo)/2;
+  assert.ok(S.planNowFor(mid,p).now.startsWith('wait'));
+  assert.strictEqual(S.planNowFor(p.long.entryHi*1.001,p).now,'wait_buy','just above the buy zone → wait to buy');
+  assert.strictEqual(S.planNowFor(p.short.entryLo*0.999,p).now,'wait_short','just under the short zone → wait to short');
+});
+
+test("the instruction changes when price moves — this is why it cannot be cached for 30 minutes",()=>{
+  const fd=S.synthBump(4242);
+  const p=S.tradePlan(fd.close,fd.high,fd.low,S.bumpProfile(fd.close,fd.vol));
+  const inZone=S.planNowFor(p.long.entryHi*0.99,p).now;
+  const escaped=S.planNowFor(p.long.entryHi*1.15,p).now;
+  assert.strictEqual(inZone,'buy');
+  assert.notStrictEqual(escaped,'buy',"a card still saying BUY after price left the zone is the bug this guards");
+});
+
+test("distance-to-zone is signed from the live price, so the alert copy reads correctly",()=>{
+  const fd=S.synthBump(4242);
+  const p=S.tradePlan(fd.close,fd.high,fd.low,S.bumpProfile(fd.close,fd.vol));
+  const above=S.planNowFor(p.long.entryHi*1.2,p);
+  assert.ok(above.toBuy<0,"buy zone is BELOW a price above it");
+  assert.ok(above.toShort>0,"short zone is still above");
+});
+
+test("tradePlan's own instruction agrees with planNowFor at its own price",()=>{
+  for(const seed of [11,222,3333,4242,8191]){
+    const fd=S.synthBump(seed);
+    const p=S.tradePlan(fd.close,fd.high,fd.low,S.bumpProfile(fd.close,fd.vol));
+    if(!p)continue;
+    assert.strictEqual(p.now,S.planNowFor(p.price,p).now,"seed "+seed+": one rule, one answer");
+  }
+});
+
+test("dumpBounce ships the instruction copy so the UI can relabel a re-derived state",async()=>{
+  const d=await S.dumpBounce(true);
+  assert.ok(d.planCopy,"the UI re-derives `now` from a live quote and needs the matching prose");
+  for(const k of ['buy','short','wait_buy','wait_short'])
+    assert.ok(d.planCopy[k]&&d.planCopy[k].label&&d.planCopy[k].lead,'missing copy for '+k);
+});

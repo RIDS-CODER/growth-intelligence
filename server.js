@@ -1222,6 +1222,21 @@ function bumpProfile(close,vol,opts){
    Levels come from the coin's own 4h structure (recent floor, the swing high where the last bump
    rolled over, its ATR) and its own median bump size — never from a generic indicator. Exactly
    one side is live at a time; the other says what price to wait for. */
+/* WHICH SIDE IS LIVE, for a given price. Split out because the LEVELS are structural and fine to
+   be half an hour old, but the INSTRUCTION is not: price can leave the buy zone in minutes, and a
+   card still saying "BUY NOW" off a stale price is worse than no card. The UI re-runs this rule
+   against a fresh quote, so this function is the single source of truth for it — keep the copy in
+   index.html (nlNow) in step, and see the enumerated test in test/dumpbounce.test.js.
+   Exactly one instruction, always. "Mid-air" is a real answer and gets said out loud rather than
+   dressed up as a signal. */
+function planNowFor(price,plan){
+  const buyHi=plan.long.entryHi, shLo=plan.short.entryLo;
+  let now;
+  if(price<=buyHi)now="buy";
+  else if(price>=shLo)now="short";
+  else now=(price-buyHi)<(shLo-price)?"wait_buy":"wait_short";
+  return {now, toBuy:+((buyHi/price-1)*100).toFixed(1), toShort:+((shLo/price-1)*100).toFixed(1)};
+}
 function tradePlan(close,high,low,bump,opts){
   const o=opts||{}, {c:cl,h:hh,l:ll}=cleanOHLC(close,high,low,null);
   const n=cl.length; if(n<40)return null;
@@ -1273,14 +1288,8 @@ function tradePlan(close,high,low,bump,opts){
     rrr:+(Math.abs(T[1]-mid)/Math.max(1e-12,Math.abs(mid-stop))).toFixed(2)});
   const long=side(1,buyLo,buyHi,buyMid,buyStop,buyT);
   const short=side(-1,shLo,shHi,shMid,shStop,shT);
-  // Exactly one instruction, always. "Mid-air" is a real answer and gets said out loud rather
-  // than dressed up as a signal.
-  let now;
-  if(price<=buyHi)now="buy";
-  else if(price>=shLo)now="short";
-  else now=(price-buyHi)<(shLo-price)?"wait_buy":"wait_short";
-  return {now,price,floor:lo,roof:hi,atr,bumpPct:+(bp*100).toFixed(1),fromBump,long,short,
-    toBuy:+((buyHi/price-1)*100).toFixed(1), toShort:+((shLo/price-1)*100).toFixed(1)};
+  return {...planNowFor(price,{long,short}),price,floor:lo,roof:hi,atr,
+    bumpPct:+(bp*100).toFixed(1),fromBump,long,short};
 }
 /* ---- DID THE PLAN ACTUALLY WORK? ----
    The base-rate box answers "what did buying a dip on this coin return" — a generic question.
@@ -1548,6 +1557,9 @@ async function dumpBounce(force){
       try{ trackSetups(planTrackables(keep),BUMP_TF,"dumpbounce"); }catch(e){}
       const out={rows:keep,found:rows.length,scanned:res.length,skip,ts:Date.now(),demo:DEMO,cryptoMode,
         usdtInr:priceRate(),rateSrc:priceRateSrc(),
+        // The UI re-derives the instruction from a live quote, so it needs the copy for every
+        // state — shipped once here rather than duplicated as prose in index.html.
+        planCopy:PLAN_NOW,
         cfg:{minAgeDays:NL_MIN_AGE,minPeakAgeDays:NL_MIN_PEAK_AGE,minDrawdown:NL_MIN_DD,
           zigzag:NL_ZZ_PCT,minQv:NL_MIN_QV,bumpTf:BUMP_TF,bumpMinPct:BUMP_MIN_PCT,bumpMaxHours:BUMP_MAX_BARS*BUMP_BAR_H}};
       if(res.length)cSet(ck,out);
@@ -1989,7 +2001,7 @@ module.exports={IND,computeSignal,buildSetup,buildReasons,confidenceOf,alertElig
   backtestSeries,scoreSeriesArr,backtest,processAsset,blendResearch,assetBtScore,cdxLiveInr,cdxUsdtInr,topMovers,ticker24,
   trackSetups,sweepSetups,updateSetupWithPrice,setupStats,markReversals,realizedPct,volMetrics,priceRate,priceRateSrc,
   planTrackables,fmtPlanAlert,dumpBounceAlerts,
-  zigzag,listingProfile,bumpProfile,tradePlan,backtestPlan,forwardStats,dumpBounce,sparkline,synthListing,synthBump,cleanSeries,cleanOHLC,
+  zigzag,listingProfile,bumpProfile,tradePlan,planNowFor,backtestPlan,forwardStats,dumpBounce,sparkline,synthListing,synthBump,cleanSeries,cleanOHLC,
   __setFx:(r)=>{fxRate=r;fxAt=Date.now();},__setMode:(m)=>{cryptoMode=m;},
   __getSetups:()=>SETUPS,__resetSetups:()=>{SETUPS={active:[],resolved:[]};},
   btcStateFromSeries,__setBtc:(s)=>{BTC_STATE=s;},
