@@ -1498,6 +1498,18 @@ function planTrackables(rows){
   }
   return out;
 }
+/* DEMO only. This panel builds its own synthetic tapes (a listing shape and a squeeze shape),
+   which start from an arbitrary price — so BTC read ₹0.46 here while every other tab read
+   ₹5,386.25 for the same coin. Scaling is affine, so every ratio the feature computes (drawdown,
+   bump size, retrace %, R:R, the backtest) is untouched; only the absolute price moves onto the
+   same scale the rest of the demo uses. LIVE mode never needed this — there all panels read the
+   one feed. */
+function demoRescale(d,sym){
+  const ref=synth(hashStr(sym),300,0.03).price, last=d.close[d.close.length-1];
+  if(!(ref>0)||!(last>0))return d;
+  const f=ref/last;
+  return {...d,close:d.close.map(v=>v*f),high:d.high.map(v=>v*f),low:d.low.map(v=>v*f),price:ref};
+}
 let nlInflight=null;
 async function dumpBounce(force){
   const ck="dumpbounce";
@@ -1510,7 +1522,7 @@ async function dumpBounce(force){
       let t24={};try{if(!DEMO)t24=await ticker24();}catch(e){}
       const haveQv=Object.keys(t24).length>0;
       // STAGE 1 — daily bars over the whole universe: which coins are in the regime at all.
-      const res=await mapLimit(uni,6,async a=>({a,d:DEMO?synthListing(hashStr(a.sym)):await loadCrypto(a,"daily")}));
+      const res=await mapLimit(uni,6,async a=>({a,d:DEMO?demoRescale(synthListing(hashStr(a.sym)),a.sym):await loadCrypto(a,"daily")}));
       const rows=[],skip={err:0,short:0,shallow:0,freshPeak:0,illiquid:0};
       for(const r of res){
         if(!r||r.__err||!r.d){skip.err++;continue;}
@@ -1539,7 +1551,7 @@ async function dumpBounce(force){
       // universe would double the fetch count to no purpose.
       await mapLimit(keep,5,async r=>{
         try{
-          const fd=DEMO?synthBump(hashStr(r.sym)):await loadCrypto(r.a,BUMP_TF);
+          const fd=DEMO?demoRescale(synthBump(hashStr(r.sym)),r.sym):await loadCrypto(r.a,BUMP_TF);
           const b=bumpProfile(fd.close,fd.vol);
           if(b){r.bump=b;r.bumpInfo=BUMP_STATE[b.state]||BUMP_STATE.quiet;r.fastSpark=sparkline((fd.close||[]).filter(v=>v>0),80);}
           // The levels — built on the same fast series the bump was measured on.
@@ -1952,10 +1964,18 @@ function savePositions(){if(!posDirty)return;try{fs.writeFileSync(POS_FILE,JSON.
 function resolveAsset(sym){
   const q=String(sym||"").trim().toUpperCase(); if(!q)return null;
   const all=[...CRYPTO,...STOCKS,...ETFS,...INDICES,...COMMODITIES];
-  return all.find(a=>String(a.sym).toUpperCase()===q)
-      || all.find(a=>String(a.tk||"").toUpperCase()===q)
-      || all.find(a=>String(a.sym).toUpperCase().startsWith(q))
-      || null;
+  const exact = all.find(a=>String(a.sym).toUpperCase()===q)
+             || all.find(a=>String(a.tk||"").toUpperCase()===q);
+  if(exact)return exact;
+  /* Prefix matching is a convenience, but only when it is UNAMBIGUOUS. It used to return the
+     first hit, so a half-typed "BT" silently bound to whatever happened to sort first — and a
+     position quietly watching the wrong instrument is worse than one that refuses to be created.
+     Quote-suffix variants of one coin (BTCUSDT / BTCINR) are the same asset, so they don't count
+     as ambiguity; two different tickers do. */
+  const hits=all.filter(a=>String(a.sym).toUpperCase().startsWith(q)||String(a.tk||"").toUpperCase().startsWith(q));
+  if(!hits.length)return null;
+  const bases=new Set(hits.map(a=>String(a.tk||a.sym).toUpperCase()));
+  return bases.size===1?hits[0]:null;
 }
 async function positionData(asset,tf){
   if(asset.src==="cg")return await loadCrypto(asset,tf);
@@ -1968,11 +1988,18 @@ async function positionData(asset,tf){
 // Current verdict + price for one position. Drops the forming bar, exactly like /api/signal.
 async function positionSignal(pos){
   const asset=resolveAsset(pos.sym); if(!asset)throw new Error("unknown symbol");
-  if(asset.src==="cg"&&!DEMO){try{await ensureCryptoUniverse();}catch(e){}}
+  if(asset.src==="cg"&&!DEMO){
+    try{await ensureCryptoUniverse();}catch(e){}
+    // EVERY other crypto path refreshes this before pricing — scan(), researchCoin(), liveQuotes()
+    // and ticker24() all do. This one did not, so loadCoinDCX rescaled its candles against a
+    // cdxTicker snapshot that could be minutes or hours old, and Position Watch became the one
+    // surface quoting a different number for the same coin.
+    if(cryptoMode==="coindcx")await ensureCdxFresh();
+  }
   const d=await positionData(asset,pos.tf||"1h");
   if(!d||!d.close||d.close.length<41)throw new Error("not enough history");
   const sig=computeSignal(d.close.slice(0,-1),d.high.slice(0,-1),d.low.slice(0,-1),(pos.tf==="daily")?20:12);
-  return {price:d.price||d.close[d.close.length-1],verdict:sig.verdict,score:sig.score};
+  return {asset,price:d.price||d.close[d.close.length-1],verdict:sig.verdict,score:sig.score};
 }
 const posPnl=(p,px)=>(p.entry>0&&px>0)?+((p.side>0?px/p.entry-1:1-px/p.entry)*100).toFixed(2):null;
 function fmtPosAlert(p,kind,px,verdict){
@@ -2017,10 +2044,24 @@ async function positionsSweep(){
   const open=POSITIONS.filter(p=>p.status==="open");
   if(!open.length)return 0;
   let sent=0;
+  /* Price from the SAME source every other panel uses. The signal has to come from candles, but
+     the PRICE must not: in Binance mode loadBinance returns the last candle close × FX, while
+     /api/quotes reports the live ticker, so the two disagree on any fast-moving coin. Pull the
+     live book once per sweep (8s-cached) and overlay it, exactly as scan() pins Upstox LTPs.
+     Same tab-routing as setupsSweep, so a stock position gets an Upstox quote and a coin gets a
+     crypto one. */
+  const px={};
+  try{
+    const tabs=new Set(open.map(p=>p.src==="cg"?"Crypto":"All"));
+    for(const t of tabs){ try{ Object.assign(px,await liveQuotes(t)); }catch(e){} }
+  }catch(e){}
   for(const p of open){
     let s; try{ s=await positionSignal(p); }catch(e){ p.err=String(e.message||e).slice(0,60); posDirty=true; continue; }
     delete p.err;
-    p.price=s.price; p.verdict=s.verdict; p.pnlPct=posPnl(p,s.price); p.seen=Date.now(); posDirty=true;
+    const live=px[(s.asset&&s.asset.sym)||p.sym];
+    p.price=(live>0)?live:s.price;          // live book wins; candle close is the fallback
+    p.priceSrc=(live>0)?"live":"candle";
+    p.verdict=s.verdict; p.pnlPct=posPnl(p,p.price); p.seen=Date.now(); posDirty=true;
     // HOLD is not a reversal — it means the engine has no opinion, which is not the same as
     // disagreeing with you. Only an explicitly opposite verdict counts.
     const against = p.side>0 ? s.verdict==="SELL" : s.verdict==="BUY";
@@ -2059,7 +2100,12 @@ async function addPosition(b){
     chat:String(b.chat||"").trim()||null, chatName:String(b.chatName||"").trim()||null,
     created:Date.now(),status:"open",alerts:0,note:String(b.note||"").slice(0,120)};
   POSITIONS.push(p); posDirty=true;
-  try{ const s=await positionSignal(p); p.price=s.price; p.verdict=s.verdict; p.pnlPct=posPnl(p,s.price);
+  try{ const s=await positionSignal(p);
+       // Same live-book overlay the sweep uses, so the price you see the instant you add a trade
+       // is the price every other panel is showing for that coin.
+       let live=0; try{ live=(await liveQuotes(p.src==="cg"?"Crypto":"All"))[s.asset?s.asset.sym:p.sym]||0; }catch(e){}
+       p.price=(live>0)?live:s.price; p.priceSrc=(live>0)?"live":"candle";
+       p.verdict=s.verdict; p.pnlPct=posPnl(p,p.price);
        // Record the baseline instead of raising a flag. If the signal already disagrees, that is a
        // COUNTER-TREND entry — a legitimate deliberate choice, not a reversal — and it is said
        // plainly in the confirmation rather than dressed up as an alarm.
@@ -2183,7 +2229,7 @@ module.exports={IND,computeSignal,buildSetup,buildReasons,confidenceOf,alertElig
   planTrackables,fmtPlanAlert,dumpBounceAlerts,
   resolveAsset,positionSignal,positionsSweep,addPosition,fmtPosAlert,posPnl,allRecipients,
   __getPositions:()=>POSITIONS,__resetPositions:()=>{POSITIONS=[];},
-  zigzag,listingProfile,bumpProfile,tradePlan,planNowFor,backtestPlan,forwardStats,dumpBounce,sparkline,synthListing,synthBump,cleanSeries,cleanOHLC,
+  zigzag,listingProfile,bumpProfile,tradePlan,planNowFor,backtestPlan,demoRescale,forwardStats,dumpBounce,sparkline,synthListing,synthBump,cleanSeries,cleanOHLC,
   __setFx:(r)=>{fxRate=r;fxAt=Date.now();},__setMode:(m)=>{cryptoMode=m;},
   __getSetups:()=>SETUPS,__resetSetups:()=>{SETUPS={active:[],resolved:[]};},
   btcStateFromSeries,__setBtc:(s)=>{BTC_STATE=s;},

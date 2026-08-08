@@ -109,6 +109,27 @@ but there's no clean entry (don't chase spikes). Timeframes 5m / 15m / 30m / 1h,
 Use **🎯 Tradeable now only** to hide the WATCH rows. Both Volume Movers and Quick Trades have a
 **$ USDT / ₹ INR** display toggle (defaults to USDT — the currency most scalpers think in).
 
+### One coin, one price — across every tab
+
+Every panel reads the **same feed** and shows the **same number** for the same coin. A crypto price
+is built once (CoinDCX's liquid USDT market × CoinDCX's own USDT/INR, or the global price × plain FX
+when CoinDCX is unreachable) and the server reports the exact rate it priced with, so the **$ view is
+a lossless division** rather than a second conversion. There's a test that compares ⚡ Quick Trades,
+🔥 Volume Movers, 🎢 Dump & Bounce and 🔔 Position Watch coin by coin and fails if any two disagree.
+
+Two things that used to break it, both fixed:
+
+- **🔔 Position Watch never refreshed the live ticker.** Every other crypto path calls
+  `ensureCdxFresh()` before pricing; this one didn't, so it rescaled its candles against a snapshot
+  that could be minutes old. It now refreshes like the rest, **and** overlays the same live quote
+  the other panels use — the signal still comes from candles, but the price no longer does. Each row
+  says whether its price is `live` or a `last close` fallback, so a stale one can't hide.
+- **🎢 Dump & Bounce invented its own prices in DEMO.** It generates synthetic listing/squeeze tapes,
+  which start from an arbitrary price — BTC read ₹0.46 there while every other tab read ₹5,386.25.
+  Demo tapes are now scaled onto the shared price. Scaling is affine, so every ratio (drawdown, bump
+  size, retrace %, R:R, the backtest) is unchanged; only the absolute number moves. LIVE mode was
+  never affected — there all panels read the one feed.
+
 ### Why a price may not match your exchange exactly
 
 Each panel states which currency is exact right now, and it depends on whether this server can reach CoinDCX:

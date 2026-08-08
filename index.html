@@ -1445,7 +1445,7 @@ function posRow(p){
       <div><b style="color:${posSideCol(p.side)}">${p.side>0?'LONG':'SHORT'}</b> <b>${p.name||p.tk||p.sym}</b>
         <span class="sub">${p.tf} · from ${f(p.entry)}${p.qty?' · qty '+p.qty:''}</span></div>
       <div style="text-align:right">${pnl!=null?`<b style="color:${pnl>=0?'var(--buy)':'var(--sell)'}">${pnl>=0?'+':''}${pnl}%</b> `:''}
-        <span class="sub">live ${f(p.price)}</span></div>
+        <span class="sub">${p.priceSrc==='candle'?'<span style="color:#fbbf24" title="No live quote reached the server for this symbol, so this is the last candle close and can lag the exchange.">last close</span>':'live'} ${f(p.price)}</span></div>
     </div>
     <div class="sub" style="margin-top:4px;color:${st.col}">${st.txt}</div>
     <div class="sub" style="margin-top:3px">📣 alerts to <b>${p.chatName||(p.chat?'chat …'+String(p.chat).slice(-4):'nobody — no Telegram user was picked')}</b>${p.alerts?' · '+p.alerts+' sent':''}
