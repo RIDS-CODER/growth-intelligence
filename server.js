@@ -1817,6 +1817,23 @@ async function listChats(){
   }catch(e){}
   return out;
 }
+/* ONE recipient list, used everywhere. Quick Trades alerts go to resolveChats() — the EXPLICIT
+   TELEGRAM_CHAT_ID list when you have set one. listChats() is a different thing: only people whose
+   DMs are still inside Telegram's getUpdates retention. Position Watch used to offer only the
+   latter, so anyone who had configured chat IDs (which the Quick Trades panel actively tells you
+   to do) saw working scan alerts and an EMPTY recipient dropdown. Configured recipients come
+   first, so the watcher defaults to the same person Quick Trades already messages. */
+async function allRecipients(){
+  const named={};
+  try{ (await listChats()).forEach(c=>{ if(c&&c.id!=null)named[String(c.id)]=c.name||""; }); }catch(e){}
+  const out=[],seen=new Set();
+  const push=(id,src)=>{ id=String(id||"").trim(); if(!id||seen.has(id))return; seen.add(id);
+    out.push({id,name:named[id]||("chat …"+id.slice(-4)),src}); };
+  let primary=[]; try{ primary=await resolveChats(); }catch(e){}
+  primary.forEach(id=>push(id,"alerts"));            // exactly who Quick Trades sends to
+  Object.keys(named).forEach(id=>push(id,"messaged"));
+  return out;
+}
 async function tgSend(chat,text){
   const r=await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`,{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({chat_id:chat,text,parse_mode:'HTML',disable_web_page_preview:true})});
@@ -1959,7 +1976,14 @@ async function positionSignal(pos){
 }
 const posPnl=(p,px)=>(p.entry>0&&px>0)?+((p.side>0?px/p.entry-1:1-px/p.entry)*100).toFixed(2):null;
 function fmtPosAlert(p,kind,px,verdict){
-  const dec=p.entry<5?4:2, f=v=>"₹"+(+v).toFixed(dec);
+  /* Quote crypto in BOTH currencies. This message arrives on a phone, away from the app, and a
+     coin you bought on CoinDCX at $0.0067 is unrecognisable as "₹0.59" — showing one alone makes
+     the alert useless at exactly the moment it matters. Everything else is ₹-native. */
+  const r=priceRate(), dual=p.cls==="Crypto"&&r>0;
+  const f=v=>{ if(v==null||!isFinite(v))return "—";
+    const inr="₹"+(+v).toFixed(v<5?4:2);
+    if(!dual)return inr;
+    const u=v/r; return "$"+u.toFixed(u<5?4:2)+" ("+inr+")"; };
   const pnl=posPnl(p,px), side=p.side>0?"LONG":"SHORT";
   const pl=pnl==null?"":`\nP&L <b>${pnl>=0?"+":""}${pnl}%</b> from your ${f(p.entry)} entry`;
   if(kind==="watch")
@@ -2079,9 +2103,10 @@ async function handler(req,res){
           const [gone]=POSITIONS.splice(i,1); posDirty=true; savePositions(); return sendJSON(res,{ok:true,removed:gone.id}); }
         if(!DEMO)try{await ensureCryptoUniverse();}catch(e){}
         return sendJSON(res,await addPosition(b)); }
-      const chats=await listChats();
+      const chats=await allRecipients();
       return sendJSON(res,{positions:POSITIONS.slice().sort((a,b)=>b.created-a.created),
-        chats, hasToken:!!TG_TOKEN, usdtInr:priceRate(), rateSrc:priceRateSrc(), ts:Date.now(), demo:DEMO}); }
+        chats, hasToken:!!TG_TOKEN, explicit:!!TG_CHATS.length,
+        usdtInr:priceRate(), rateSrc:priceRateSrc(), ts:Date.now(), demo:DEMO}); }
     if(p==="/api/positions/sweep"){ return sendJSON(res,{sent:await positionsSweep(),positions:POSITIONS}); }
     if(p==="/api/universe"){    // symbols the watcher will accept, for the add-position picker
       if(!DEMO)try{await ensureCryptoUniverse();}catch(e){}
@@ -2089,7 +2114,7 @@ async function handler(req,res){
       return sendJSON(res,{crypto:CRYPTO.map(map),other:[...STOCKS,...ETFS,...INDICES,...COMMODITIES].map(map)}); }
     if(p==="/api/alert/status"){ const chats=await resolveChats(); return sendJSON(res,{hasToken:!!TG_TOKEN,configured:!!(TG_TOKEN&&chats.length),recipients:chats.length,explicit:!!TG_CHATS.length,chat:chats.length?('…'+String(chats[0]).slice(-4)+(chats.length>1?' +'+(chats.length-1)+' more':'')):null,on:alertState.on,minConf:alertState.minConf,tfs:alertState.tfs,lastRun:alertState.lastRun,sent:alertState.sent,lastErr:alertState.lastErr}); }
     if(p==="/api/alert/detectchat"){ const c=await detectChat(true); return sendJSON(res,{hasToken:!!TG_TOKEN,found:!!c,chat:c?('…'+String(c).slice(-4)):null,lastErr:alertState.lastErr}); }
-    if(p==="/api/alert/chats"){ return sendJSON(res,{hasToken:!!TG_TOKEN,chats:await listChats(),using:(TG_CHATS.length?TG_CHATS:(detectedChat?[detectedChat]:[])).map(String),explicit:!!TG_CHATS.length}); }
+    if(p==="/api/alert/chats"){ return sendJSON(res,{hasToken:!!TG_TOKEN,chats:await allRecipients(),using:(TG_CHATS.length?TG_CHATS:(detectedChat?[detectedChat]:[])).map(String),explicit:!!TG_CHATS.length}); }
     if(p==="/api/alert/test"){ const rr=await sendTelegram('✅ <b>Test alert</b> — Growth Intelligence Telegram is connected. You will get a ping here when a High-confidence quick scalp appears.'); return sendJSON(res,{...rr}); }
     if(p==="/api/alert/config" && req.method==="POST"){ const body=await readBody(req); let c={}; try{c=JSON.parse(body);}catch(e){} if(c.on!=null)alertState.on=!!c.on; if(c.minConf!=null&&!isNaN(+c.minConf))alertState.minConf=Math.max(50,Math.min(95,+c.minConf)); return sendJSON(res,{on:alertState.on,minConf:alertState.minConf}); }
     // static — tolerate index.html living in /public OR the repo root
@@ -2126,7 +2151,7 @@ module.exports={IND,computeSignal,buildSetup,buildReasons,confidenceOf,alertElig
   backtestSeries,scoreSeriesArr,backtest,processAsset,blendResearch,assetBtScore,cdxLiveInr,cdxUsdtInr,topMovers,ticker24,
   trackSetups,sweepSetups,updateSetupWithPrice,setupStats,markReversals,realizedPct,volMetrics,priceRate,priceRateSrc,
   planTrackables,fmtPlanAlert,dumpBounceAlerts,
-  resolveAsset,positionSignal,positionsSweep,addPosition,fmtPosAlert,posPnl,
+  resolveAsset,positionSignal,positionsSweep,addPosition,fmtPosAlert,posPnl,allRecipients,
   __getPositions:()=>POSITIONS,__resetPositions:()=>{POSITIONS=[];},
   zigzag,listingProfile,bumpProfile,tradePlan,planNowFor,backtestPlan,forwardStats,dumpBounce,sparkline,synthListing,synthBump,cleanSeries,cleanOHLC,
   __setFx:(r)=>{fxRate=r;fxAt=Date.now();},__setMode:(m)=>{cryptoMode=m;},

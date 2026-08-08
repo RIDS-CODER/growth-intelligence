@@ -144,3 +144,44 @@ test("the confirmation and recovery messages exist and are distinct",()=>{
   assert.match(back,/\+20%/);
   assert.notStrictEqual(watch,back);
 });
+
+/* ---------------- recipients: ONE list, shared with Quick Trades ---------------- */
+
+test("allRecipients returns the same people Quick Trades alerts, configured ones first",async()=>{
+  // Position Watch used to offer only listChats() — people whose DMs are still inside Telegram's
+  // getUpdates retention. Anyone who had set TELEGRAM_CHAT_ID (which the Quick Trades panel tells
+  // you to do) therefore saw working scan alerts and an EMPTY recipient dropdown.
+  const list=await S.allRecipients();
+  assert.ok(Array.isArray(list));
+  for(const c of list){
+    assert.ok(c.id&&typeof c.id==='string');
+    assert.ok(c.name,'every recipient needs a label, even one we only know by id');
+    assert.ok(['alerts','messaged'].includes(c.src));
+  }
+  const ids=list.map(c=>c.id);
+  assert.strictEqual(new Set(ids).size,ids.length,'a person listed twice would double-send');
+  // Whatever Quick Trades would send to must be offered, and offered first.
+  const idx=list.findIndex(c=>c.src==='messaged');
+  const lastAlerts=list.map(c=>c.src).lastIndexOf('alerts');
+  if(idx>=0&&lastAlerts>=0)assert.ok(lastAlerts<idx,'configured recipients must sort before DM-only ones');
+});
+
+/* ---------------- currency: entries are stored in ₹, whatever you typed ---------------- */
+
+test("a crypto alert quotes BOTH currencies; anything else stays ₹-only",()=>{
+  S.__setFx(88.5);
+  const coin=S.fmtPosAlert({sym:'XAIUSDT',tk:'XAI',side:1,entry:0.59,tf:'4h',cls:'Crypto'},'reversed',0.55,'SELL');
+  assert.match(coin,/\$0\.0067/,'a phone alert saying only ₹0.59 is unrecognisable to a CoinDCX trader');
+  assert.match(coin,/₹0\.5900/,'…and dropping ₹ would break it for anyone pricing in rupees');
+  const stock=S.fmtPosAlert({sym:'RELIANCE',tk:'RELIANCE',side:1,entry:2900,tf:'daily',cls:'Stock'},'reversed',2800,'SELL');
+  assert.match(stock,/₹2900\.00/);
+  assert.ok(!/\$/.test(stock),'a USD figure on an NSE stock would be meaningless');
+});
+
+test("P&L is unaffected by which currency it is displayed in",()=>{
+  // Both sides of the ratio move together, so the percentage is the invariant. This is why the
+  // fix is a display/input conversion and never a change to stored numbers.
+  const r=88.5;
+  assert.strictEqual(S.posPnl({side:1,entry:100},110),S.posPnl({side:1,entry:100*r},110*r));
+  assert.strictEqual(S.posPnl({side:-1,entry:250},200),S.posPnl({side:-1,entry:250*r},200*r));
+});
