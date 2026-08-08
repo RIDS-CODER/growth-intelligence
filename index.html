@@ -174,6 +174,7 @@
     <button class="btn" id="researchBtn" onclick="toggleResearch()" style="border-color:#a78bfa;background:rgba(167,139,250,.14);color:#ddd6fe">🔎 Research a coin</button>
     <button class="btn" id="quickBtn" onclick="toggleQuick()" style="border-color:#f59e0b;background:rgba(245,158,11,.15);color:#fde68a">⚡ Quick Trades</button>
     <button class="btn" id="moversBtn" onclick="toggleMovers()" style="border-color:#fb7185;background:rgba(251,113,133,.14);color:#fecdd3">🔥 Volume Movers</button>
+    <button class="btn" id="listBtn" onclick="toggleListings()" style="border-color:#c084fc;background:rgba(192,132,252,.14);color:#e9d5ff">🎢 New Listings</button>
     <button class="btn" id="paperBtn" onclick="togglePaper()" style="border-color:#34d399;background:rgba(52,211,153,.14);color:#a7f3d0">🤖 Paper Bot</button>
     <span class="pstat" id="filterNote"></span>
   </div>
@@ -182,6 +183,7 @@
   <div id="btcNote" style="display:none"></div>
   <div id="quickPanel" style="display:none"></div>
   <div id="moversPanel" style="display:none"></div>
+  <div id="listPanel" style="display:none"></div>
   <div id="researchPanel" style="display:none"></div>
   <div id="paperPanel" style="display:none"></div>
   <div id="tradesPanel" style="display:none"></div>
@@ -893,7 +895,7 @@ function scalpPriceNote(){
   if(scalpRateSrc==='coindcx')return `<span class="sub" style="color:var(--buy)">✅ CoinDCX live · $ and ₹ both match your CoinDCX screen (1 USDT = ₹${usdtInr.toFixed(2)})</span>`;
   return `<span class="sub" style="color:#fbbf24" title="This server can't reach CoinDCX, so ₹ is built from the global price × a plain USD/INR rate. CoinDCX charges an India premium over that, so its ₹ screen reads slightly higher. Every % — entry, stop, targets, R:R — is unaffected.">⚠ Global feed · <b>$ prices are exact</b>; ₹ runs ~1–4% under CoinDCX (India premium) — use the $ view to match your screen</span>`;
 }
-function setScalpCcy(c){scalpCcy=c;if(quickState.open)renderQuickShell();if(moversState.open)renderMoversShell();}
+function setScalpCcy(c){scalpCcy=c;if(quickState.open)renderQuickShell();if(moversState.open)renderMoversShell();if(typeof listState!=='undefined'&&listState.open)renderListShell();}
 const scalpCcyTabs=(tab)=>!isCryptoTab(tab||'Crypto')?'':`<span class="sub" style="margin-left:8px">Show in:</span>
   <div class="rztab ${scalpCcy==='USDT'?'on':''}" onclick="setScalpCcy('USDT')">$ USDT</div>
   <div class="rztab ${scalpCcy==='INR'?'on':''}" onclick="setScalpCcy('INR')">₹ INR</div>`;
@@ -1124,6 +1126,136 @@ function renderMoversList(){
   if(moversState.actionOnly)list=list.filter(m=>m.verdict!=='HOLD'&&m.action&&MOVER_ACTIONABLE.includes(m.action.kind));
   if(!list.length){el.innerHTML='<div class="empty">No big volume movers in '+moversState.tab+' on '+moversState.tf+' right now'+(moversState.actionOnly?' with a tradeable setup — turn off “Tradeable now only” to watch the raw movers.':' — the market is quiet; check back in a few minutes.')+'</div>';return;}
   el.innerHTML='<div class="cards">'+list.map(moverCard).join('')+'</div>';
+}
+
+/* ============================================================
+   🎢 NEW LISTINGS — coins inside the post-listing cycle: list, bleed on unlock supply,
+   bounce hard, bleed again. The panel's job is NOT to promise the next bounce. It is to say
+   (a) where in that cycle the coin sits right now, (b) how big and how long this coin's own
+   bounces have actually been, and (c) what buying a dip like today's has actually returned
+   compared with buying on any random day. When (c) says there is no edge, the card says so
+   in the same size type as everything else.
+   ============================================================ */
+let listState={open:false,data:null,loading:false,err:'',phase:'all'};
+const NL_PCOL={buy:'var(--buy)',sell:'var(--sell)',muted:'var(--muted)'};
+const nlPct=(v,d)=>v==null||!isFinite(v)?'—':(v>=0?'+':'')+(+v).toFixed(d==null?1:d)+'%';
+function toggleListings(){const el=document.getElementById('listPanel');listState.open=el.style.display==='none';
+  el.style.display=listState.open?'block':'none';
+  if(listState.open){renderListShell();if(!listState.data)loadListings();}}
+function setListPhase(p){listState.phase=p;renderListShell();}
+async function loadListings(force){
+  listState.loading=true;listState.err='';renderListShell();
+  try{ const d=await(await fetch('/api/newlistings'+(force?'?force=1':''))).json();
+    if(d.error)throw new Error(d.error);
+    if(d.usdtInr>0){usdtInr=d.usdtInr;scalpRateSrc=d.rateSrc||scalpRateSrc;}
+    listState.data=d; }
+  catch(e){ listState.err=String(e.message||e); }
+  listState.loading=false; renderListShell();
+}
+// Log scale, always. These coins run −95% from the peak; on a linear axis the whole post-crash
+// life — which is the part you would actually be trading — collapses into a flat line.
+function nlSpark(a,peakPos){
+  if(!a||a.length<2)return '';
+  const L=a.map(v=>Math.log(Math.max(1e-12,v))),W=340,H=64,lo=Math.min(...L),hi=Math.max(...L),sp=(hi-lo)||1;
+  const x=i=>(i*W/(a.length-1)),y=v=>H-(v-lo)/sp*(H-4)-2;
+  const pts=L.map((v,i)=>x(i).toFixed(1)+','+y(v).toFixed(1)).join(' ');
+  const px=x((peakPos||0)*(a.length-1));
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:64px;display:block;margin:6px 0;background:rgba(255,255,255,.03);border-radius:6px">
+    <line x1="${px.toFixed(1)}" y1="0" x2="${px.toFixed(1)}" y2="${H}" stroke="rgba(251,113,133,.5)" stroke-width="1" stroke-dasharray="3 3"/>
+    <polyline points="${pts}" fill="none" stroke="#c084fc" stroke-width="1.5" vector-effect="non-scaling-stroke"/></svg>`;
+}
+/* The verdict that keeps this feature honest. `edge` = win rate after a dip like today's MINUS
+   the win rate of buying on any day over the same horizon. Near zero means the dip told you
+   nothing — you were just holding a volatile coin. */
+function nlEdge(f){
+  if(!f||f.n<8)return {txt:`Only ${f?f.n:0} comparable dips in this coin's whole history — too few to measure. Treat this as <b>unknown</b>, not as good.`,col:'var(--muted)'};
+  const e=f.edge,w=f.win,b=f.baseWin;
+  if(e==null)return {txt:'Not enough history to compare against a random entry.',col:'var(--muted)'};
+  if(e>=10)return {txt:`Buying a dip like this won <b>${w}%</b> of the time vs <b>${b}%</b> for buying on any random day — <b>${e>0?'+':''}${e} points</b> better. That gap is the only real argument for this trade.`,col:'var(--buy)'};
+  if(e<=-5)return {txt:`Buying a dip like this won <b>${w}%</b> of the time — <b>WORSE</b> than the <b>${b}%</b> you got buying on any random day (${e} points). On this coin the dip is not a signal.`,col:'var(--sell)'};
+  return {txt:`Buying a dip like this won <b>${w}%</b> of the time vs <b>${b}%</b> buying on any random day — a gap of ${e>0?'+':''}${e} points, which is noise. You would just be holding a volatile coin.`,col:'#fbbf24'};
+}
+function nlCard(r,i){
+  const ph=r.phaseInfo||{}, pcol=NL_PCOL[ph.col]||'var(--muted)', ed=nlEdge(r.fwd), f=r.fwd||{};
+  const P=v=>scalpPrice(v,'Crypto');
+  const legTxt=r.leg?(r.leg.dir>0
+      ? `Up <b>${nlPct(r.leg.pct)}</b> over <b>${r.leg.days}d</b> from the last swing low`
+      : `Down <b>${nlPct(r.leg.pct)}</b> over <b>${r.leg.days}d</b> from the last swing high`):'No confirmed swing yet';
+  const cyc=(r.rally.medPct!=null&&r.drop.medPct!=null)
+    ? `Its bounces have typically run <b style="color:var(--buy)">${nlPct(r.rally.medPct)} over ~${r.rally.medDays} days</b> (${r.rally.n} of them);
+       its falls <b style="color:var(--sell)">${nlPct(r.drop.medPct)} over ~${r.drop.medDays} days</b> (${r.drop.n}).`
+    : 'Not enough completed swings to describe a typical cycle yet.';
+  const thin=(r.rally.n||0)<3;
+  return `<div class="tc">
+    <div class="hd" onclick="this.parentNode.classList.toggle('open')" style="cursor:pointer">
+      <div class="l"><div class="name">#${i+1} ${r.name}</div>
+        <div class="sub">${r.tk} · listed ~<b>${r.ageDays}d</b> ago · <span style="color:var(--sell)">−${r.ddPct}%</span> from its listing high · <span style="color:var(--accent2)">▾ cycle &amp; base rate</span></div></div>
+      <div class="r"><span class="verdict" style="background:rgba(192,132,252,.14);color:${pcol};white-space:nowrap;font-size:10px;padding:4px 8px">${ph.icon||''} ${ph.label||'—'}</span>
+        <div class="btmini" style="border-color:#c084fc;color:#e9d5ff;margin-top:6px" title="Pattern fit (0–100): how closely this matches the listed-then-bled shape — depth off the listing high, how early it peaked, how many complete cycles, how big the bounces are, and whether each low is lower. It is a PATTERN gauge, not a buy signal and not a win probability.">🎢 ${r.score}</div></div></div>
+    <div class="bd">
+      ${nlSpark(r.spark,r.peakPos)}
+      <div class="sub" style="margin-top:-2px">Whole life on this exchange, log scale · dashed line = the listing high · live <b>${P(r.price)}</b>${r.qv>0?' · 24h vol '+fmtQv(r.qv):''}</div>
+
+      <div style="margin:9px 0 6px;padding:8px 10px;border-radius:9px;background:rgba(192,132,252,.08);border:1px solid rgba(192,132,252,.32)">
+        <div style="font-size:13px;font-weight:700;color:${pcol}">${ph.icon||''} ${ph.label||''}</div>
+        <div class="sub" style="margin-top:3px;line-height:1.5;color:var(--txt)">${ph.what||''}</div>
+        <div class="sub" style="margin-top:4px">${legTxt} · currently <b>${nlPct(r.off30)}</b> above its 30-day low.</div>
+      </div>
+
+      <div class="qlevels">
+        <div class="lv t1"><div class="k">Typical bounce</div><div class="v">${r.rally.medPct!=null?nlPct(r.rally.medPct):'—'}</div><div class="r">~${r.rally.medDays||'—'} days · ${r.rally.n} seen</div></div>
+        <div class="lv stop"><div class="k">Typical fall</div><div class="v">${r.drop.medPct!=null?nlPct(r.drop.medPct):'—'}</div><div class="r" style="color:var(--sell)">~${r.drop.medDays||'—'} days · ${r.drop.n} seen</div></div>
+        <div class="lv"><div class="k">Since listing</div><div class="v" style="color:var(--sell)">${nlPct(r.driftPct)}</div><div class="r" style="color:var(--muted)">${r.cycles} full cycle${r.cycles===1?'':'s'}</div></div>
+      </div>
+      <div class="sub" style="line-height:1.5">${cyc}${thin?' <b style="color:#fbbf24">Only '+r.rally.n+' bounce'+(r.rally.n===1?'':'es')+' to average — that is an anecdote, not a pattern.</b>':''}</div>
+
+      <div style="margin:9px 0;padding:8px 10px;border-radius:9px;background:rgba(255,255,255,.03);border:1px solid var(--line)">
+        <div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);font-weight:700">📉 What actually happened last time</div>
+        <div class="sub" style="margin-top:4px;line-height:1.55;color:${ed.col}">${ed.txt}</div>
+        ${f.n>=8?`<div class="sub" style="margin-top:4px">Measured on <b>${f.n}</b> past days this coin sat ≥${f.dipPct}% below its 20-day high, held <b>${f.horizon} days</b>. Median result <b style="color:${(f.med||0)>=0?'var(--buy)':'var(--sell)'}">${nlPct(f.med)}</b> vs <b>${nlPct(f.baseMed)}</b> for any random day.
+          ${(f.med!=null&&f.med<0)?'<b style="color:var(--sell)">Note the median is negative — even the winning-ish setup lost money on a typical try.</b>':''}</div>`:''}
+      </div>
+
+      <div class="sub" style="line-height:1.5;padding:7px 9px;border-radius:8px;background:rgba(245,158,11,.09);border:1px solid rgba(245,158,11,.32);color:#fbbf24">
+        ⚠ <b>This coin is down ${nlPct(r.driftPct)} since it listed.</b> That drift is the trade you are fighting: unlock supply keeps arriving and the bounces are counter-trend inside it. Size for a full stop-out, and take the bounce — do not marry it.
+      </div>
+      <div class="sub" style="margin-top:5px">${r.sym}${r.tk?' · <a style="color:var(--accent2);cursor:pointer" onclick="event.stopPropagation();openResearchFor(\''+r.tk+'\',\'short\')">🔎 research</a>':''} · <a style="color:var(--accent2);cursor:pointer" onclick="event.stopPropagation();toggleQuick()">⚡ Quick Trades has the entry/stop/target plan</a></div>
+    </div></div>`;
+}
+const NL_FILTERS=[['all','All'],['bounce','👀 Bounce zone'],['rallying','🚀 Rallying'],['mature','⚠️ Rally mature'],['falling','🩸 Still falling']];
+function renderListShell(){
+  const el=document.getElementById('listPanel'); if(!el)return;
+  const d=listState.data;
+  const tabs=NL_FILTERS.map(([k,l])=>`<div class="rztab ${k===listState.phase?'on':''}" onclick="setListPhase('${k}')">${l}</div>`).join('');
+  el.innerHTML=`<div class="tradespanel" style="border-color:rgba(192,132,252,.45)">
+    <h3>🎢 New Listings <span class="sub">— coins still inside the post-listing cycle</span>
+      <button class="btn" style="padding:2px 9px;font-size:11px" onclick="loadListings(1)">↻ rescan</button>
+      <span class="sub">${d&&d.ts?'· updated '+new Date(d.ts).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true}):''}${d?' · '+d.found+' of '+d.scanned+' coins qualify':''}</span></h3>
+    <div class="sub" style="line-height:1.55;margin:2px 0 8px">
+      Coins like <b>COOKIE</b>, <b>XAI</b> and <b>VANA</b> list, sell off for months, rally hard, then sell off again.
+      That shape is not fraud — these are real projects with a <b>small circulating float against a huge total supply</b>, so
+      every unlock lands on a thin order book. This finds coins whose price history is <i>still in that phase</i>,
+      measures each one's own bounce and fall, and — the part that matters — reports
+      <b>what buying that dip actually returned</b> versus buying on a random day. Daily bars, rescanned every 30 minutes.
+    </div>
+    <div style="display:flex;gap:5px;flex-wrap:wrap;margin:4px 0 8px;align-items:center">${tabs}${scalpCcyTabs('Crypto')}</div>
+    <div id="listBody"></div></div>`;
+  renderListBody();
+}
+function renderListBody(){
+  const el=document.getElementById('listBody'); if(!el)return;
+  if(listState.loading){el.innerHTML='<div class="sub" style="padding:14px">⏳ Reading the full daily history of every coin in the universe — this one takes ~30s the first time, then it is cached for 30 minutes.</div>';return;}
+  if(listState.err){el.innerHTML='<div class="sub" style="padding:14px;color:var(--sell)">Couldn’t scan: '+listState.err+'</div>';return;}
+  const d=listState.data; if(!d){el.innerHTML='<div class="sub" style="padding:14px">—</div>';return;}
+  let rows=d.rows||[];
+  if(listState.phase!=='all')rows=rows.filter(r=>r.phase===listState.phase);
+  if(!rows.length){
+    el.innerHTML='<div class="empty">'+(d.found
+      ? 'No coin is in that part of the cycle right now — try another filter.'
+      : 'No coin in the universe is currently inside a post-listing cycle. That is a normal result, not a failure: it needs a coin listed '+d.cfg.minAgeDays+'–'+d.cfg.maxAgeDays+' days ago, at least '+d.cfg.minDrawdown+'% off its listing high, with bounces of '+d.cfg.minRally+'%+. Scanned '+d.scanned+' coins.')+'</div>';
+    return;}
+  el.innerHTML='<div class="cards">'+rows.map(nlCard).join('')+'</div>'
+    +'<div class="sub" style="margin-top:10px;line-height:1.55">🎢 <b>Pattern fit is not a buy signal.</b> A 95 means the coin matches the listed-then-bled shape closely — which is a description of a <i>falling</i> asset. The tradeable claim, if there is one, is in the base-rate box on each card, and on several coins it will tell you there is no edge. Every number here is measured on that coin\'s own history with no look-ahead; past behaviour of a supply schedule is not a promise about the next unlock. Remember Indian VDA tax: 30% + 4% cess on gains, <b>with no offset for losses</b>.</div>';
 }
 
 /* ============ 📌 TRACKED SETUPS — every recommendation is followed to its outcome, even after it leaves the live list ============ */

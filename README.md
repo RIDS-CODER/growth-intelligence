@@ -167,6 +167,64 @@ Together these build a **forward record** — a measured, real-time hit rate of 
 themselves, distinct from the backtest. Statuses are sampled ~once a minute (state survives restarts via
 `setups.json`). API: `GET /api/setups` (`?tf=`, `?limit=`).
 
+## 🎢 New Listings — coins still inside the post-listing cycle
+
+Click **🎢 New Listings** for the pattern behind coins like **COOKIE, XAI and VANA**: they list, sell off
+for months, rally hard, then sell off again.
+
+**That shape is not fraud, and the panel doesn't call it that.** These are real projects with a small
+**circulating float against a huge total supply**, so every unlock lands on a thin order book. Naming the
+mechanism is the useful part — "fake coin" would be an accusation this app can't support, and it would hide
+the thing you can actually trade.
+
+The scanner reads the **full daily history** of every coin in the crypto universe and keeps the ones that are
+provably still in that phase:
+
+| Filter | Why |
+|---|---|
+| History starts at the listing | An exchange serves candles only from listing day. If the series hits the 400-bar fetch cap we **can't prove** bar 0 is the listing, so the coin is dropped rather than guessed at. |
+| ≥ 21 days old | Below that there's nothing to measure. |
+| ≥ 40% off its listing high | A coin near its listing price isn't in this regime. |
+| Peaked in the first 60% of its life | Peaked late = a recent runner, a different (and less predictable) animal. |
+| ≥ 1 complete cycle, bounces ≥ 15% | Needs repeated behaviour, and bounces big enough to be worth trading. |
+
+Each card then answers **where in the cycle it is right now**, from swing pivots (a leg only turns on a 15%
+reversal, so noise can't manufacture fake cycles):
+
+- **👀 BOUNCE ZONE** — the fall has already run as deep or as long as this coin's own typical down-leg. Where past bounces *started*.
+- **🚀 RALLYING** — up off the last low but still short of its typical bounce. Past bounces from here had room left.
+- **⚠️ RALLY MATURE** — this bounce has matched its typical size or length. Where past bounces *ended*.
+- **🩸 STILL FALLING** — in a down-leg that hasn't run its usual course. Buying here has usually meant more downside first.
+
+alongside that coin's own measured cycle — median bounce and fall, in **% and in days**, with the number of
+legs each median is built from (fewer than 3 gets flagged as *an anecdote, not a pattern*).
+
+### The part that keeps this honest
+
+These coins have a structural **downward drift** — unlock supply keeps arriving — and the rallies are
+counter-trend bounces inside it. So every card reports **what buying a dip like today's actually returned**:
+
+- the win rate and median return after past dips of the same depth, held for as long as this coin's bounces usually run, **versus**
+- the same horizon bought on **any random day**.
+
+If those two numbers match, the dip told you nothing and the card says exactly that — you'd just be holding a
+volatile coin. Several rows will say it. The gap between them (`edge`) is withheld entirely below 8 samples,
+because a five-sample "edge" is noise dressed up as a statistic.
+
+Both numbers are computed **causally** — the dip test compares each bar to its *trailing* 20-day high, never a
+future one — and deliberately **not** from the swing pivots, because every pivot low is followed by a rally
+*by construction*, which would make any coin look like a money printer.
+
+**🎢 Pattern fit (0–100) is not a buy signal.** A high score means the coin closely matches the
+listed-then-bled shape, which is a description of a *falling* asset. Depth off the listing high (25%), how
+early it peaked (20%), complete cycles (20%), bounce size (20%), and whether each low is lower (15%).
+
+Daily bars, cached 30 minutes (**↻ rescan** forces a refresh). Crypto only — the pattern is about token
+unlock schedules, which have no equivalent in an index or an NSE stock.
+API: `GET /api/newlistings` · settings: `newListingTop`, `newListingMinDrawdown`, `newListingMinRally`,
+`newListingMinQv`, `newListingZigzag` in `config.json` (or env `NL_TOP`, `NL_MIN_DD`, `NL_MIN_RALLY`,
+`NL_MIN_QV`, `NL_ZIGZAG`).
+
 ## How prices stay accurate
 
 - **Stocks/ETFs/indices:** Upstox real-time last-traded price (LTP), refreshed every few seconds, plus

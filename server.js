@@ -994,6 +994,197 @@ async function topMovers(tab,tf){
 }
 
 /* ============================================================
+   🎢 NEW LISTINGS — the post-listing cycle. A coin lists, sells off for months as
+   unlock supply hits a thin book, and rallies hard in between. This finds coins
+   currently INSIDE that regime, measures how big and how long their bounces have
+   actually been, and says where in the cycle price sits right now.
+
+   Why this is not called "fake coins": COOKIE, XAI and VANA are real projects. The
+   shape comes from a small circulating float against a huge fully-diluted supply, so
+   every unlock lands on a thin order book. Calling them fake would be an accusation
+   this app cannot support, and it would hide the actual mechanism — which is the part
+   you can trade.
+
+   HONESTY, built into every row: these coins carry a structural DOWNWARD drift, and
+   the rallies are counter-trend bounces inside it. So each card reports
+     · what happened historically after a dip like today's (`fwd.win`), AND
+     · what happened buying on ANY random day over the same horizon (`fwd.baseWin`).
+   If those two numbers are the same, "buy the dip here" has no edge — it is just this
+   coin's volatility, and the card says so. Both are computed causally (trailing highs
+   only, never a future bar), and deliberately NOT from the zigzag pivots: every zigzag
+   low is followed by a rally BY CONSTRUCTION, so scoring off pivots would make any
+   coin look like a money printer.
+   ============================================================ */
+const NL_BAR_CAP=400;                                          // daily bars the crypto loaders request
+const NL_TRUNC=NL_BAR_CAP-20;                                  // at/above this, history may predate the first bar → can't call it new
+const NL_MIN_AGE=21;                                           // below this there is nothing measurable
+const NL_ZZ_PCT=parseFloat(process.env.NL_ZIGZAG)||parseFloat(CFG.newListingZigzag)||15;      // % reversal that defines one leg
+const NL_MIN_DD=parseFloat(process.env.NL_MIN_DD)||parseFloat(CFG.newListingMinDrawdown)||40; // % off the listing peak to qualify
+const NL_MIN_RALLY=parseFloat(process.env.NL_MIN_RALLY)||parseFloat(CFG.newListingMinRally)||15; // a bounce big enough to be worth trading
+const NL_MIN_QV=parseFloat(process.env.NL_MIN_QV)||parseFloat(CFG.newListingMinQv)||1e7;      // ₹1 Cr / 24h liquidity floor
+const NL_TOP=parseInt(process.env.NL_TOP)||parseInt(CFG.newListingTop)||12;
+const NL_TTL=30*60*1000;                                       // daily bars — pointless to refetch on the 45s panel timer
+const med=a=>{if(!a||!a.length)return null;const s=a.slice().sort((x,y)=>x-y),m=s.length>>1;return s.length%2?s[m]:(s[m-1]+s[m])/2;};
+
+// Alternating swing pivots. A leg only turns once price reverses `pct` from the running
+// extreme, so noise inside a trend cannot manufacture fake cycles. Returns CONFIRMED pivots
+// oldest-first ({i, px, k:1 high | -1 low}); the leg still in progress is excluded on purpose,
+// because its end is not known yet — that leg is what the phase logic reads instead.
+function zigzag(close,pct){
+  const n=close.length; if(!(n>2))return [];
+  const th=Math.max(0.005,(+pct||10)/100), piv=[];
+  let dir=0, hi=close[0], hiI=0, lo=close[0], loI=0;
+  for(let i=1;i<n;i++){
+    const p=close[i]; if(!(p>0))continue;
+    if(p>hi){hi=p;hiI=i;}
+    if(p<lo){lo=p;loI=i;}
+    if(dir>=0 && p<=hi*(1-th)){ piv.push({i:hiI,px:hi,k:1});  dir=-1; lo=p; loI=i; }
+    else if(dir<=0 && p>=lo*(1+th)){ piv.push({i:loI,px:lo,k:-1}); dir=1; hi=p; hiI=i; }
+  }
+  return piv;
+}
+// Downsample a series to ~m points for the card sparkline (keeps first and last bar).
+function sparkline(cl,m){
+  m=m||64; if(cl.length<=m)return cl.map(v=>+v.toPrecision(6));
+  const out=[]; for(let i=0;i<m;i++)out.push(+cl[Math.round(i*(cl.length-1)/(m-1))].toPrecision(6));
+  return out;
+}
+// Shape of one coin's whole life on this exchange, from daily closes.
+// An exchange serves candles only from the listing date, so bar 0 IS the listing — unless the
+// fetch limit truncated the series, which is flagged (`truncated`) and rejected by the scanner.
+function listingProfile(close,zzPct){
+  const cl=(close||[]).filter(v=>v>0&&isFinite(v));
+  const n=cl.length; if(n<NL_MIN_AGE)return null;
+  const price=cl[n-1];
+  let peak=cl[0],peakI=0,trough=cl[0],troughI=0;
+  for(let i=1;i<n;i++){ if(cl[i]>peak){peak=cl[i];peakI=i;} if(cl[i]<trough){trough=cl[i];troughI=i;} }
+  const piv=zigzag(cl,zzPct||NL_ZZ_PCT);
+  const ups=[],downs=[];
+  for(let k=1;k<piv.length;k++){
+    const a=piv[k-1],b=piv[k],pct=(b.px/a.px-1)*100,days=b.i-a.i;
+    if(!(days>0)||!isFinite(pct))continue;
+    (b.k===1?ups:downs).push({pct,days});                       // a leg ENDING at a high is a rally
+  }
+  const rally={medPct:med(ups.map(x=>x.pct)),medDays:med(ups.map(x=>x.days)),n:ups.length};
+  const drop={medPct:med(downs.map(x=>x.pct)),medDays:med(downs.map(x=>x.days)),n:downs.length};
+  // Lower lows are the unlock-supply signature: every bounce fails from a lower base.
+  const lows=piv.filter(p=>p.k===-1);
+  let ll=0; for(let k=1;k<lows.length;k++) if(lows[k].px<lows[k-1].px) ll++;
+  const lowerLows=lows.length>1?ll/(lows.length-1):0;
+  const cycles=Math.min(ups.length,downs.length);
+  // WHERE WE ARE NOW — the unfinished leg, measured from the last confirmed pivot.
+  const last=piv.length?piv[piv.length-1]:null;
+  const leg=last?{dir:last.k===-1?1:-1,days:(n-1)-last.i,pct:+((price/last.px-1)*100).toFixed(1),from:last.px}:null;
+  let phase='unclear';
+  if(leg&&leg.dir>0)                                            // rising off the last pivot low
+    phase=((rally.medPct!=null&&leg.pct>=0.8*rally.medPct)||(rally.medDays!=null&&leg.days>=rally.medDays))?'mature':'rallying';
+  else if(leg)                                                  // falling from the last pivot high
+    phase=((drop.medPct!=null&&leg.pct<=0.8*drop.medPct)||(drop.medDays!=null&&leg.days>=drop.medDays))?'bounce':'falling';
+  const ddPct=peak>0?(1-price/peak)*100:0;
+  const peakPos=n>1?peakI/(n-1):0;                              // 0 = peaked on listing day
+  // How far above the RECENT floor price sits — the difference between "at the bottom of this
+  // fall" and "already 20% into the bounce", which the leg % alone does not tell you.
+  let lo30=cl[n-1]; for(let i=Math.max(0,n-30);i<n;i++) if(cl[i]<lo30)lo30=cl[i];
+  // How well this matches the listed-then-bled shape. Not a buy signal — a pattern-fit gauge.
+  const mEarly=peakPos<=0.15?1:Math.max(0,(0.5-peakPos)/0.35);
+  const score=Math.round(100*(0.25*Math.min(1,ddPct/70)+0.20*mEarly+0.20*Math.min(1,cycles/3)
+    +0.20*(rally.medPct!=null?Math.min(1,rally.medPct/40):0)+0.15*lowerLows));
+  return {ageDays:n,truncated:n>=NL_TRUNC,price,peak,peakI,peakPos:+peakPos.toFixed(2),trough,troughI,
+    ddPct:+ddPct.toFixed(1), fromLow:trough>0?+((price/trough-1)*100).toFixed(1):null,
+    off30:lo30>0?+((price/lo30-1)*100).toFixed(1):null,          // % above the lowest close of the last 30 bars
+    driftPct:cl[0]>0?+((price/cl[0]-1)*100).toFixed(1):null,     // total return since the first served bar
+    rally:{medPct:rally.medPct!=null?+rally.medPct.toFixed(1):null,medDays:rally.medDays!=null?Math.round(rally.medDays):null,n:rally.n},
+    drop:{medPct:drop.medPct!=null?+drop.medPct.toFixed(1):null,medDays:drop.medDays!=null?Math.round(drop.medDays):null,n:drop.n},
+    lowerLows:+lowerLows.toFixed(2),cycles,pivots:piv.length,leg,phase,score};
+}
+// THE HONESTY LAYER. For every past bar that looked like today — at least `dipPct` below its
+// TRAILING `lookback`-day high, computed with past bars only — what did the next `horizon` days
+// do? `base*` is the same horizon bought on ANY day. When win ≈ baseWin the dip is not an edge.
+function forwardStats(close,dipPct,horizon,lookback){
+  const cl=(close||[]).filter(v=>v>0&&isFinite(v));
+  const n=cl.length,h=Math.max(1,Math.round(horizon||7)),lb=Math.max(5,Math.round(lookback||20)),th=(dipPct||20)/100;
+  const dip=[],all=[];
+  for(let i=lb;i+h<n;i++){
+    const fwd=(cl[i+h]/cl[i]-1)*100; if(!isFinite(fwd))continue;
+    all.push(fwd);
+    let hh=0; for(let j=i-lb;j<=i;j++) if(cl[j]>hh)hh=cl[j];    // trailing high — no future bar is read
+    if(hh>0 && cl[i]<=hh*(1-th)) dip.push(fwd);
+  }
+  const win=a=>a.length?Math.round(100*a.filter(v=>v>0).length/a.length):null;
+  const r=a=>{const m=med(a);return m!=null?+m.toFixed(1):null;};
+  return {n:dip.length,win:win(dip),med:r(dip),baseN:all.length,baseWin:win(all),baseMed:r(all),
+    horizon:h,dipPct:+(+(dipPct||20)).toFixed(0),
+    edge:(dip.length>=8&&win(dip)!=null&&win(all)!=null)?win(dip)-win(all):null};
+}
+const NL_PHASE={
+  bounce:  {icon:'👀',label:'BOUNCE ZONE',col:'buy',
+    what:"The fall has already run as deep or as long as this coin's own typical down-leg. This is WHERE past bounces started — it is not proof one starts now."},
+  rallying:{icon:'🚀',label:'RALLYING',col:'buy',
+    what:"Up off the last low but still short of this coin's typical bounce. Past bounces from this point still had room left."},
+  mature:  {icon:'⚠️',label:'RALLY MATURE',col:'sell',
+    what:"This bounce has already matched this coin's typical size or length. This is WHERE past bounces ended and the next leg down began."},
+  falling: {icon:'🩸',label:'STILL FALLING',col:'sell',
+    what:"In a down-leg that has not yet run its usual course. Buying here has usually meant more downside first."},
+  unclear: {icon:'•',label:'NO CLEAR LEG',col:'muted',
+    what:"Not enough confirmed swings yet to say where in the cycle this sits."}
+};
+// DEMO only: a synthetic low-float listing — pump on day one, structural decay, periodic bounces.
+function synthListing(seed){
+  let s=Math.abs(seed||1)%2147483647||1; const r=()=>{s=(s*16807)%2147483647;return s/2147483647;};
+  const n=45+Math.floor(r()*200),close=[],high=[],low=[],vol=[];
+  let x=40+r()*400,ph=r()*6.28,per=7+r()*10;
+  for(let i=0;i<n;i++){
+    const mv=(i<3?0.11:-0.013)+0.032*Math.sin(i/per+ph)+(r()-0.5)*0.05;
+    x=Math.max(0.01,x*(1+mv));
+    close.push(x);high.push(x*1.05);low.push(x*0.95);vol.push(1e6*(1+Math.abs(mv)*25+r()));
+  }
+  const now=Date.now();
+  return {close,high,low,vol,times:close.map((_,i)=>now-(n-1-i)*864e5),price:close[close.length-1],mtime:now};
+}
+let nlInflight=null;
+async function freshListings(force){
+  const ck="newlistings";
+  if(!force){const hit=cGet(ck,NL_TTL);if(hit)return {...hit,cached:true};}
+  if(nlInflight)return nlInflight;                              // one scan at a time — 120 daily-candle fetches is not cheap
+  nlInflight=(async()=>{
+    try{
+      if(!DEMO)try{await ensureCryptoUniverse();}catch(e){}
+      const uni=universeFor("Crypto");
+      let t24={};try{if(!DEMO)t24=await ticker24();}catch(e){}
+      const haveQv=Object.keys(t24).length>0;
+      const res=await mapLimit(uni,6,async a=>({a,d:DEMO?synthListing(hashStr(a.sym)):await loadCrypto(a,"daily")}));
+      const rows=[],skip={err:0,short:0,truncated:0,shallow:0,shape:0,cycles:0,smallBounce:0,illiquid:0};
+      for(const r of res){
+        if(!r||r.__err||!r.d){skip.err++;continue;}
+        const cl=(r.d.close||[]).filter(v=>v>0&&isFinite(v));
+        const p=listingProfile(cl);
+        if(!p){skip.short++;continue;}
+        if(p.truncated){skip.truncated++;continue;}              // series hit the fetch cap → can't prove it starts at the listing
+        if(p.ddPct<NL_MIN_DD){skip.shallow++;continue;}
+        if(p.peakPos>0.6){skip.shape++;continue;}                // peaked late = a recent runner, not a listed-then-bled coin
+        if(p.cycles<1){skip.cycles++;continue;}
+        if(!(p.rally.medPct>=NL_MIN_RALLY)){skip.smallBounce++;continue;}
+        const qv=(haveQv&&t24[r.a.tk]&&t24[r.a.tk].qv)||0;
+        if(haveQv&&qv>0&&qv<NL_MIN_QV){skip.illiquid++;continue;}
+        // Condition the base rate on a dip the size this coin actually makes, over the
+        // horizon its bounces actually take — so the number answers THIS card's question.
+        const dipTh=Math.min(35,Math.max(12,Math.abs(p.drop.medPct||20)*0.8));
+        const fwd=forwardStats(cl,dipTh,Math.max(3,Math.min(30,p.rally.medDays||7)),20);
+        rows.push({sym:r.a.sym,tk:r.a.tk||"",name:r.a.name||r.a.tk||r.a.sym,cls:"Crypto",qv,
+          ...p,fwd,spark:sparkline(cl),phaseInfo:NL_PHASE[p.phase]||NL_PHASE.unclear});
+      }
+      rows.sort((a,b)=>b.score-a.score);
+      const out={rows:rows.slice(0,NL_TOP),found:rows.length,scanned:res.length,skip,ts:Date.now(),demo:DEMO,cryptoMode,
+        usdtInr:priceRate(),rateSrc:priceRateSrc(),
+        cfg:{minAgeDays:NL_MIN_AGE,maxAgeDays:NL_TRUNC,minDrawdown:NL_MIN_DD,minRally:NL_MIN_RALLY,zigzag:NL_ZZ_PCT,minQv:NL_MIN_QV}};
+      if(res.length)cSet(ck,out);
+      return out;
+    }finally{nlInflight=null;}
+  })();
+  return nlInflight;
+}
+
+/* ============================================================
    📌 SETUP TRACKER — every scalp the panels recommend is snapshotted and then
    FOLLOWED to its outcome (filled → target/stop, or expired unfilled), even after
    it drops out of the live list. Fixes "I took the trade and the card vanished":
@@ -1321,6 +1512,8 @@ async function handler(req,res){
       return sendJSON(res,cryptoSignalsFrom(payload));}
     if(p==="/api/movers"){   // 🔥 biggest volume-backed movement right now, scalp plan attached
       return sendJSON(res,await topMovers(u.searchParams.get("tab")||"Crypto",u.searchParams.get("tf")||"5m"));}
+    if(p==="/api/newlistings"){   // 🎢 coins inside the post-listing dump-and-bounce cycle, with their measured base rate
+      return sendJSON(res,await freshListings(u.searchParams.get("force")==="1"));}
     if(p==="/api/setups"){   // 📌 tracked setups: every recommendation followed to its outcome + forward hit-rate
       const tfq=u.searchParams.get("tf")||null, lim=Math.min(200,parseInt(u.searchParams.get("limit"))||40);
       const active=SETUPS.active.filter(x=>!tfq||x.tf===tfq).slice().sort((a,b)=>b.born-a.born).slice(0,60)
@@ -1385,6 +1578,7 @@ module.exports={IND,computeSignal,buildSetup,buildReasons,confidenceOf,alertElig
   loadBinance,loadCoinDCX,loadCrypto,ensureCryptoUniverse,usdInr,resampleSeries,tfCfg,getCRYPTO:()=>CRYPTO,getMode:()=>cryptoMode,
   backtestSeries,scoreSeriesArr,backtest,processAsset,blendResearch,assetBtScore,cdxLiveInr,cdxUsdtInr,topMovers,ticker24,
   trackSetups,sweepSetups,updateSetupWithPrice,setupStats,markReversals,realizedPct,volMetrics,priceRate,priceRateSrc,
+  zigzag,listingProfile,forwardStats,freshListings,sparkline,synthListing,
   __setFx:(r)=>{fxRate=r;fxAt=Date.now();},__setMode:(m)=>{cryptoMode=m;},
   __getSetups:()=>SETUPS,__resetSetups:()=>{SETUPS={active:[],resolved:[]};},
   btcStateFromSeries,__setBtc:(s)=>{BTC_STATE=s;},
