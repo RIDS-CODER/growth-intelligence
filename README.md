@@ -350,10 +350,17 @@ trade and, the moment the signal **turns against you**, sends **one Telegram mes
 you name** — and one more when it comes back onside. Nothing in between, so a trade that sits
 reversed doesn't spam you.
 
-- **Pick the recipient per trade.** The dropdown lists everyone who has DM'd your bot, so a trade
-  placed by one person alerts **only that person** — never the broadcast list the scan alerts use.
-  A confirmation message goes out the moment you add it, which proves the route works before it
-  matters. (Nobody in the list? Open the bot in Telegram, send it "hi", reopen the panel.)
+- **Pick the recipient per trade.** The dropdown is the **same recipient list ⚡ Quick Trades uses** —
+  anyone in `TELEGRAM_CHAT_ID` first (marked *gets scan alerts*), then anyone who has DM'd the bot.
+  The trade alerts **only the person you pick**, never the whole broadcast list. A confirmation
+  message goes out the moment you add it, which proves the route works before it matters.
+  (List empty? Set `TELEGRAM_CHAT_ID`, or have the person send the bot "hi", then reopen the panel.)
+- **Type the entry in the currency you actually traded in.** The panel carries the same
+  **$ USDT / ₹ INR** toggle as the other panels, and the box is labelled with the active one — `$ USDT`
+  for a coin, `₹` for an NSE stock, following the symbol as you type it. Prices are stored in ₹
+  internally and converted on the way in, so a CoinDCX fill typed as `0.0067` is not silently read as
+  ₹0.0067. Telegram messages quote crypto in **both** currencies, since an alert that says only
+  "₹0.59" is unrecognisable on a phone.
 - **HOLD is not a reversal.** The engine having no opinion is not the same as it disagreeing with
   you, so only an explicitly opposite verdict raises the flag.
 - Checked **every 2 minutes** server-side; the panel refreshes every 30s while open.

@@ -897,7 +897,7 @@ function scalpPriceNote(){
   if(scalpRateSrc==='coindcx')return `<span class="sub" style="color:var(--buy)">✅ CoinDCX live · $ and ₹ both match your CoinDCX screen (1 USDT = ₹${usdtInr.toFixed(2)})</span>`;
   return `<span class="sub" style="color:#fbbf24" title="This server can't reach CoinDCX, so ₹ is built from the global price × a plain USD/INR rate. CoinDCX charges an India premium over that, so its ₹ screen reads slightly higher. Every % — entry, stop, targets, R:R — is unaffected.">⚠ Global feed · <b>$ prices are exact</b>; ₹ runs ~1–4% under CoinDCX (India premium) — use the $ view to match your screen</span>`;
 }
-function setScalpCcy(c){scalpCcy=c;if(quickState.open)renderQuickShell();if(moversState.open)renderMoversShell();if(typeof listState!=='undefined'&&listState.open)renderListShell();}
+function setScalpCcy(c){scalpCcy=c;if(quickState.open)renderQuickShell();if(moversState.open)renderMoversShell();if(typeof listState!=='undefined'&&listState.open)renderListShell();if(typeof posState!=='undefined'&&posState.open)renderPosShell();}
 const scalpCcyTabs=(tab)=>!isCryptoTab(tab||'Crypto')?'':`<span class="sub" style="margin-left:8px">Show in:</span>
   <div class="rztab ${scalpCcy==='USDT'?'on':''}" onclick="setScalpCcy('USDT')">$ USDT</div>
   <div class="rztab ${scalpCcy==='INR'?'on':''}" onclick="setScalpCcy('INR')">₹ INR</div>`;
@@ -1362,6 +1362,25 @@ function nlCard(r,i){
    ============================================================ */
 let posState={open:false,data:null,loading:false,err:'',msg:'',uni:null,form:{side:'long',tf:'1h'}};
 let posTimer=null;
+// The panel shares the ₹/$ toggle with Quick Trades and Volume Movers, so one switch moves them all.
+const posCcy=()=>scalpCcy;
+function posIsCrypto(sym){
+  const q=String(sym||'').toUpperCase();
+  if(!q)return true;                                             // nothing typed yet — assume crypto, as scalpPrice does
+  const u=posState.uni; if(!u)return true;                       // universe not loaded yet
+  return u.crypto.some(a=>a.sym.toUpperCase()===q||String(a.tk).toUpperCase()===q);
+}
+function posEntryLabel(sym){
+  return (posCcy()==='USDT'&&usdtInr>0&&posIsCrypto(sym))?'Entry in $ USDT':'Entry in ₹';
+}
+/* The label has to follow the SYMBOL as it is typed: the same box means USDT for a coin and ₹ for
+   an NSE stock, and getting that wrong is exactly the mistake that produced garbage P&L. */
+function updatePosCcyHint(){
+  const sym=(document.getElementById('posSym')||{}).value;
+  const lbl=posEntryLabel(sym), box=document.getElementById('posEntry'), hint=document.getElementById('posCcyHint');
+  if(box)box.placeholder=lbl;
+  if(hint)hint.textContent=lbl.replace('Entry in ','');
+}
 function togglePositions(){const el=document.getElementById('posPanel');posState.open=el.style.display==='none';
   el.style.display=posState.open?'block':'none';
   if(posState.open){ renderPosShell(); loadPositions(); loadUniverse();
@@ -1382,10 +1401,16 @@ async function loadPositions(quiet){
 }
 async function addPosition(){
   const g=id=>(document.getElementById(id)||{}).value;
-  const body={sym:g('posSym'),side:g('posSide'),entry:+g('posEntry'),qty:+g('posQty')||null,tf:g('posTf'),
+  const typed=+g('posEntry');
+  if(!g('posSym')){posState.msg='⚠ Pick a symbol first.';return renderPosBody();}
+  if(!(typed>0)){posState.msg='⚠ Enter the price you actually got filled at.';return renderPosBody();}
+  /* THE ACCURACY BUG THIS FIXES: the server stores every price in ₹, but a CoinDCX trader types
+     their fill in USDT. Sending the raw number made a $0.0067 entry land as ₹0.0067 and every
+     P&L after it was nonsense. Convert here, using the same rate the server priced with. */
+  const asUsdt = posCcy()==='USDT' && usdtInr>0 && posIsCrypto(g('posSym'));
+  const body={sym:g('posSym'),side:g('posSide'),entry:asUsdt?typed*usdtInr:typed,
+    qty:+g('posQty')||null,tf:g('posTf'),
     chat:g('posChat'), chatName:(document.getElementById('posChat')||{}).selectedOptions?.[0]?.textContent||''};
-  if(!body.sym){posState.msg='⚠ Pick a symbol first.';return renderPosBody();}
-  if(!(body.entry>0)){posState.msg='⚠ Enter the price you actually got filled at.';return renderPosBody();}
   posState.msg='⏳ Adding…'; renderPosBody();
   try{
     const d=await(await fetch('/api/positions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
@@ -1408,7 +1433,8 @@ function posStatus(p){
   return {txt:'✅ signal still agrees ('+p.verdict+')',col:'var(--buy)'};
 }
 function posRow(p){
-  const dec=p.entry<5?4:2, f=v=>v==null||!isFinite(v)?'—':'₹'+(+v).toFixed(dec);
+  // Same ₹/$ toggle every other panel uses. Entries are STORED in ₹; this only changes the view.
+  const f=v=>scalpPrice(v,p.cls);
   const st=posStatus(p), pnl=p.pnlPct;
   return `<div class="trow" style="border-color:${p.rev?'rgba(234,57,67,.5)':'var(--line)'}">
     <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:baseline">
@@ -1431,12 +1457,13 @@ function renderPosShell(){
   const chatSel=!d.hasToken
     ? `<div class="sub" style="color:#fbbf24">No Telegram bot token set on the server, so alerts can’t be sent. Positions are still watched and shown here.</div>`
     : chats.length
-      ? `<select id="posChat" class="editin" style="min-width:180px">${chats.map(c=>`<option value="${c.id}">${c.name||('chat …'+String(c.id).slice(-4))}</option>`).join('')}</select>`
-      : `<div class="sub" style="color:#fbbf24">Nobody has messaged the bot yet. Open it in Telegram, send it “hi”, then reopen this panel — you’ll then be able to pick who gets the alerts.</div>`;
+      ? `<select id="posChat" class="editin" style="min-width:200px" title="The same recipients ⚡ Quick Trades alerts. Anyone set in TELEGRAM_CHAT_ID is listed first; people who have DM'd the bot follow.">${chats.map(c=>`<option value="${c.id}">${c.name}${c.src==='alerts'?' — gets scan alerts':''}</option>`).join('')}</select>`
+      : `<div class="sub" style="color:#fbbf24">No recipients yet. Either set <code>TELEGRAM_CHAT_ID</code> (the same list ⚡ Quick Trades alerts), or have the person open the bot in Telegram and send it “hi”, then reopen this panel.</div>`;
   el.innerHTML=`<div class="tradespanel" style="border-color:rgba(244,114,182,.45)">
     <h3>🔔 Position Watch <span class="sub">— trades you placed, watched on the server</span>
       <button class="btn" style="padding:2px 9px;font-size:11px" onclick="loadPositions()">↻ refresh</button>
       <span class="sub">${d.ts?'· checked '+new Date(d.ts).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true}):''} · auto ⟳ 30s · server re-checks every 2 min</span></h3>
+    <div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center;margin:2px 0 6px">${scalpCcyTabs('Crypto')}</div>
     <div class="sub" style="line-height:1.55;margin:2px 0 8px">
       Tell it what you bought or shorted and at what price. It keeps reading the signal behind that trade and, the moment the signal
       <b>turns against you</b>, sends <b>one Telegram message to the person you name below</b> — and one more if it comes back onside.
@@ -1444,17 +1471,18 @@ function renderPosShell(){
       tab closed. It never places or closes anything on your exchange — it only tells you.
     </div>
     <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
-      <input id="posSym" class="editin" list="posUni" placeholder="Symbol (e.g. BTC)" style="width:150px">
+      <input id="posSym" class="editin" list="posUni" placeholder="Symbol (e.g. BTC)" style="width:150px" oninput="updatePosCcyHint()">
       <datalist id="posUni">${opts}</datalist>
       <select id="posSide" class="editin"><option value="long">LONG (bought)</option><option value="short">SHORT (sold)</option></select>
-      <input id="posEntry" class="editin" type="number" step="any" placeholder="Your entry price" style="width:140px">
+      <input id="posEntry" class="editin" type="number" step="any" placeholder="${posEntryLabel('')}" title="Type the fill price in the currency shown beside this box. It is converted and stored in ₹ either way." style="width:150px">
+      <b id="posCcyHint" class="sub" style="color:var(--accent2);font-family:var(--mono)">${posEntryLabel('').replace('Entry in ','')}</b>
       <input id="posQty" class="editin" type="number" step="any" placeholder="Qty (optional)" style="width:120px">
       <select id="posTf" class="editin">${['15m','30m','1h','4h','daily'].map(t=>`<option value="${t}"${t==='1h'?' selected':''}>${t} signal</option>`).join('')}</select>
       <span class="sub">alert:</span>${chatSel}
       <button class="btn go" style="padding:6px 14px" onclick="addPosition()">+ Watch this trade</button>
     </div>
     <div id="posBody"></div></div>`;
-  renderPosBody();
+  renderPosBody(); updatePosCcyHint();
 }
 function renderPosBody(){
   const el=document.getElementById('posBody'); if(!el)return;
