@@ -335,6 +335,34 @@ API: `GET /api/dumpbounce` (tracked plans appear in `GET /api/setups`) · settin
 `dumpBounceMinQv`, `dumpBounceZigzag`, `bumpZigzag`, `bumpMinPct`, `bumpMaxBars`, `bumpStopAtr`
 (or env `NL_TOP`, `NL_MIN_DD`, `NL_MIN_QV`, `NL_ZIGZAG`, `BUMP_ZIGZAG`, `BUMP_MIN_PCT`,
 `BUMP_MAX_BARS`, `BUMP_STOP_ATR`).
+## 🔔 Position Watch — your trades, and a Telegram ping when one turns
+
+Three things in this app look similar. They aren't:
+
+| | What it is |
+|---|---|
+| **📋 My Trades** | A browser-only P&L notebook. Lives in `localStorage`, dies with the tab, never touches Telegram. |
+| **📌 Tracked setups** | Recommendations **this app** made, snapshotted and followed to their outcome. Builds the forward hit rate. |
+| **🔔 Position Watch** | Trades **you** placed. Lives on the **server**, so the watch keeps running with the browser shut. |
+
+Tell it what you bought or shorted and at what price. It keeps re-reading the signal behind that
+trade and, the moment the signal **turns against you**, sends **one Telegram message to the person
+you name** — and one more when it comes back onside. Nothing in between, so a trade that sits
+reversed doesn't spam you.
+
+- **Pick the recipient per trade.** The dropdown lists everyone who has DM'd your bot, so a trade
+  placed by one person alerts **only that person** — never the broadcast list the scan alerts use.
+  A confirmation message goes out the moment you add it, which proves the route works before it
+  matters. (Nobody in the list? Open the bot in Telegram, send it "hi", reopen the panel.)
+- **HOLD is not a reversal.** The engine having no opinion is not the same as it disagreeing with
+  you, so only an explicitly opposite verdict raises the flag.
+- Checked **every 2 minutes** server-side; the panel refreshes every 30s while open.
+- It **never places or closes anything** on your exchange. It only tells you.
+- Works without Telegram too — you just get the panel instead of the pings.
+
+API: `GET/POST /api/positions` · state in `positions.json` (gitignored — it holds your entries and
+chat IDs).
+
 ## How prices stay accurate
 
 - **Stocks/ETFs/indices:** Upstox real-time last-traded price (LTP), refreshed every few seconds, plus
