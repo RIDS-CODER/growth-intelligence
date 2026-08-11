@@ -1790,7 +1790,7 @@ async function researchCoin(rawSym,horizon){
   return {sym:base,horizon,dec:per[0].dec,cryptoMode,consensus:blendResearch(per),ts:Date.now()};
 }
 // Paper-trading engine (simulation) — reuses this server's scan + live quotes. Never places real orders.
-const paper = require('./paper.js')({ scan, liveQuotes, dir:__dirname, rate:()=>cdxUsdtInr() });
+const paper = require('./paper.js')({ scan, liveQuotes, dir:__dirname, rate:()=>cdxUsdtInr(), topMovers, dumpBounce });
 
 /* ===== Telegram alerts — ping on a High-confidence quick scalp. Token lives ONLY on the server
    (env var or config.json); it is NEVER sent to the browser or committed to GitHub. Inert until set. ===== */

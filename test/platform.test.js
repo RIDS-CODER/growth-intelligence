@@ -122,8 +122,10 @@ test("the paper bot explains why it is holding nothing",()=>{
   // positions, no error — unless the bot reports what it rejected.
   const paper=fs.readFileSync(path.join(__dirname,"..","paper.js"),"utf8");
   assert.match(paper,/function whyIdle/);
-  assert.match(paper,/funnel\.notScalp\+\+/);
   assert.match(paper,/funnel\.noEdge\+\+/);
+  // The regime filter moved out of eligible() and became the desk picker, so the funnel now
+  // reports per-source counts instead of a scalp-only rejection bucket.
+  assert.match(paper,/funnel\.bySource/);
   assert.match(paper,/funnel:S\.funnel\|\|null, whyIdle:whyIdle\(\)/,"and publishes it in the state");
   assert.match(script,/s\.running&&s\.whyIdle/,"and the panel shows it while running");
 });

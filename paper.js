@@ -11,7 +11,7 @@
      • Halts for the day at the daily loss limit.
    Fees/slippage default to 0 so you can judge raw signal accuracy.
    ============================================================ */
-module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
+module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, dumpBounce }) {
   const fs = require('fs'), path = require('path');
   const FILE = path.join(dir, 'paper-state.json');
   const TF_MIN = {'5m':5,'15m':15,'30m':30,'1h':60,'4h':240,'6h':360,'12h':720,'daily':1440,'intraday':30};
@@ -26,7 +26,11 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
     timeframes:['5m','15m','30m','1h'],                 // the bot hunts across ALL of these itself — more scalp opportunities, same quality bar
     feeBps:0, slipBps:0, dayLossLimitPct:5, cooldownMin:20, maxConcurrent:20,
     allowShort:true, allowPending:true, allowAggressive:false,   // aggressive = market-enter the strongest near-zone setups (still R:R-guarded)
-    scalpOnly:true,           // only take quick/scalp regimes (range + correction), never trend/breakout
+    /* WHICH DESK THE BOT TRADES. Each maps to a panel you already read, so what the bot takes is
+       what you would have seen. `scalpOnly` used to be the only lever here — it is now just the
+       difference between `quick` and `normal`, and is migrated on load for older saved state. */
+    sources:{ quick:true, normal:false, movers:false, dump:false },
+    scalpOnly:true,           // legacy: kept so old saved state migrates cleanly
     minConfPct:68,            // and only at High confidence (68 = the High threshold) — quality over quantity
     requireEdge:true,         // and only if THIS coin+direction actually made money in its own backtest…
     minWinRate:50,            // …with a historical win rate ≥ this on that side…
@@ -42,9 +46,23 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
     startedAt:null, lastRun:null, lastError:null, dayAnchor:null, dayStartEquity:100000
   };
   let S = load();
+  // Belt and braces for a corrupt value; the real legacy migration happens in load().
+  if(!S.sources || typeof S.sources!=='object')
+    S.sources = {quick:true,normal:false,movers:false,dump:false};
+  const SOURCES=['quick','normal','movers','dump'];
+  const srcOn=k=>!!(S.sources&&S.sources[k]);
+  const isScalp=r=>!!(r&&r.setup&&(r.setup.regime==='range'||r.setup.regime==='correction'));
   let lastPrices = {};
 
-  function load(){ let st; try{ st=Object.assign({}, DEFAULTS, JSON.parse(fs.readFileSync(FILE,'utf8'))); }catch(e){ st=JSON.parse(JSON.stringify(DEFAULTS)); }
+  function load(){ let st, raw=null;
+    try{ raw=JSON.parse(fs.readFileSync(FILE,'utf8')); st=Object.assign({}, DEFAULTS, raw); }catch(e){ st=JSON.parse(JSON.stringify(DEFAULTS)); }
+    /* Migrate BEFORE the DEFAULTS merge can hide it. `sources` is in DEFAULTS now, so a state file
+       written by the old bot still comes back with sources set — and an existing bot running
+       scalpOnly:false (every regime) would have been silently narrowed to quick-only on upgrade.
+       Only the RAW file can tell us the user never chose desks, so the check lives here. */
+    if(raw && !raw.sources)
+      st.sources = raw.scalpOnly===false ? {quick:true,normal:true,movers:false,dump:false}
+                                         : {quick:true,normal:false,movers:false,dump:false};
     st.feeBps=0; st.slipBps=0;                                   // frictionless while validating raw accuracy (remove to re-enable costs)
     st.timeframes=DEFAULTS.timeframes.slice();                   // migrate to the current auto timeframe set
     return st; }
@@ -78,7 +96,7 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
     const entryFee=feeOf(qty*entry); S.cash-=entryFee;
     S.positions.push({ id:Date.now()+'_'+a.sym, sym:a.sym, name:a.name, tk:a.tk||'', cls:a.cls, dir, lev,
       entry, stop, initStop:stop, targets:targets.slice(0,3), qty, remQty:qty, taken:0,
-      openAt:Date.now(), lastPx:entry, feesPaid:entryFee, realized:0, tf:a.tf||S.tf, regime:a.regime||'trend' });
+      openAt:Date.now(), lastPx:entry, feesPaid:entryFee, realized:0, tf:a.tf||S.tf, regime:a.regime||'trend', src:a.src||'quick' });
     return true;
   }
   function reduce(p, qty, px, reason){
@@ -104,7 +122,7 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
       S.lossStreak=0;                                                        // a win breaks the streak
       S.cooldown[p.sym]=Date.now()+(S.cooldownMin||0)*60000;
     }
-    S.closed.unshift({ sym:p.sym, name:p.name, tk:p.tk, side:p.dir>0?'LONG':'SHORT', lev:p.lev, tf:p.tf, entry:p.entry, regime:p.regime||'trend',
+    S.closed.unshift({ sym:p.sym, name:p.name, tk:p.tk, side:p.dir>0?'LONG':'SHORT', lev:p.lev, tf:p.tf, entry:p.entry, regime:p.regime||'trend', src:p.src||'quick',
       openAt:p.openAt, closedAt:Date.now(), reason, pnl, pnlPct:cost?pnl/cost*100*(p.lev||1):0, holdMin:Math.round((Date.now()-p.openAt)/60000) });
     if(S.closed.length>500) S.closed.length=500;
   }
@@ -140,22 +158,81 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
     const eq=markEquity(lastPrices), qty=sizeQty(limit,stop,lev,eq); if(!(qty>0)) return;
     const exp=Math.min(FILL_BARS*tfMin(a.tf||'15m')*60000, 6*3600*1000);   // ~6 bars, but never rest more than 6 hours
     S.pending.push({ id:Date.now()+'_'+a.sym, sym:a.sym, name:a.name, tk:a.tk||'', cls:a.cls, dir, lev, limit, stop, targets:targets.slice(0,3), qty,
-      placedAt:Date.now(), expiresAt:Date.now()+exp, tf:a.tf||'15m', regime:a.regime||'trend' });
+      placedAt:Date.now(), expiresAt:Date.now()+exp, tf:a.tf||'15m', regime:a.regime||'trend', src:a.src||'quick' });
   }
 
   // --- strategic selection: rank by conviction, take only quality setups ---
   const kindDir = k => (k==='buynow'||k==='buybreak'||k==='waitdip') ? 1 : (k==='sellnow'||k==='sellbreak'||k==='waitbounce') ? -1 : 0;
+  /* ---------- WHERE CANDIDATES COME FROM ----------
+     Four desks, each mapping to a panel you already read, so what the bot takes is what you would
+     have seen yourself. They are normalised to one shape here; everything downstream (ranking,
+     the quality gates, sizing, management) is shared, so a Dump & Bounce trade is held to exactly
+     the same standard as a Quick Trade. */
+  function dumpCandidate(r){
+    const p=r&&r.plan; if(!p) return null;
+    if(p.now!=='buy' && p.now!=='short') return null;      // only LIVE plans, same as the panel
+    const s = p.now==='buy' ? p.long : p.short;
+    if(!s || !(s.targets||[]).length) return null;
+    const bt=r.planBt||{}, side=s.dir>0?bt.long:bt.short;
+    return {
+      asset:{sym:r.sym,tk:r.tk||'',name:r.name||r.tk||r.sym,cls:'Crypto',src:'cg'},
+      sig:{price:p.price,score:s.dir>0?20:-20,verdict:s.dir>0?'BUY':'SELL'},
+      action:{kind:s.dir>0?'buynow':'sellnow',cls:'now'},
+      setup:{dir:s.dir,entryLo:s.entryLo,entryHi:s.entryHi,entry:s.entry,stop:s.stop,
+        riskPct:s.riskPct,targets:(s.targets||[]).slice(0,3),ret:s.ret,rrr:s.rrr,regime:'dumpbounce'},
+      confidence:(side&&!side.thin&&side.winRate!=null)
+        ?{label:side.winRate>=50?'High':side.winRate>=35?'Medium':'Low',pct:side.winRate}:null,
+      /* The proven-edge gate reads btSide. Dump & Bounce carries its OWN backtest of these exact
+         levels, so the gate applies to it natively: a thin sample has winRate null and a losing
+         plan has a negative median, and both are rejected without any special-casing. */
+      btSide:{long: bt.long?{trades:bt.long.n,winRate:bt.long.winRate,avgRet:bt.long.medPct}:null,
+              short:bt.short?{trades:bt.short.n,winRate:bt.short.winRate,avgRet:bt.short.medPct}:null},
+      _tf:(r.bump&&r.bump.tf)||'4h', _src:'dump'
+    };
+  }
+  async function collect(){
+    const out=[], tfs=(S.timeframes&&S.timeframes.length)?S.timeframes:['15m'];
+    if(srcOn('quick')||srcOn('normal')||srcOn('movers')){
+      let scanned=[];
+      for(const tf of tfs){ try{ const d=await scan(S.tab,tf);
+        if(d&&Array.isArray(d.results)) for(const r of d.results) scanned.push({...r,_tf:tf}); }catch(e){} }
+      // Volume Movers is the same scan filtered to coins that passed the participation gate — taking
+      // it from there rather than from the movers payload keeps the backtest fields the gates need.
+      let moverSyms=null;
+      if(srcOn('movers')&&typeof topMovers==='function'){
+        moverSyms=new Set();
+        for(const tf of tfs){ try{ const m=await topMovers(S.tab,tf);
+          (m&&m.movers||[]).forEach(x=>moverSyms.add(x.sym)); }catch(e){} }
+      }
+      for(const r of scanned){
+        // A coin can qualify under several desks. Label it with the most specific one so the
+        // per-source P&L below attributes it once, not three times.
+        if(moverSyms&&moverSyms.has(r.asset.sym)){ out.push({...r,_src:'movers'}); continue; }
+        if(srcOn('quick')&&isScalp(r)){ out.push({...r,_src:'quick'}); continue; }
+        if(srcOn('normal')&&!isScalp(r)){ out.push({...r,_src:'normal'}); continue; }
+      }
+    }
+    if(srcOn('dump')&&typeof dumpBounce==='function'){
+      try{ const d=await dumpBounce(); for(const r of (d&&d.rows||[])){ const c=dumpCandidate(r); if(c) out.push(c); } }catch(e){}
+    }
+    return out;
+  }
+
   // Why the bot passed on everything. Without this, a correctly SELECTIVE bot and a broken one
   // look identical from the panel: equity flat, no positions, no error. Counts are per tick.
-  let funnel={seen:0,noDirection:0,shortsOff:0,pendingOff:0,notScalp:0,lowConf:0,noEdge:0,eligible:0};
+  const blankFunnel=()=>({seen:0,noDirection:0,shortsOff:0,pendingOff:0,notScalp:0,lowConf:0,noEdge:0,eligible:0,bySource:{}});
+  let funnel=blankFunnel();
   function eligible(r){
     funnel.seen++;
+    const sk=r&&r._src||'quick';
+    const fs_=funnel.bySource[sk]=funnel.bySource[sk]||{seen:0,eligible:0};
+    fs_.seen++;
     if(!r||!r.sig||!r.action||!r.setup) return false;
     const d=kindDir(r.action.kind); if(!d){ funnel.noDirection++; return false; }
     if(d<0 && !S.allowShort){ funnel.shortsOff++; return false; }
     if((r.action.kind==='waitdip'||r.action.kind==='waitbounce') && !S.allowPending){ funnel.pendingOff++; return false; }
     // SCALP-ONLY: only the quick/scalp regimes (range + correction) — never trend or breakout setups.
-    if(S.scalpOnly && !(r.setup.regime==='range' || r.setup.regime==='correction')){ funnel.notScalp++; return false; }
+    // (regime is decided by which desks are enabled — see collect())
     // HIGH-CONFIDENCE ONLY: take only setups at/above the confidence floor (default 68 = High). Fall back to a
     // score proxy if the richer confidence metric isn't on the result (older scan payloads) so the bot isn't bricked.
     const conf = (r.confidence && r.confidence.pct!=null) ? r.confidence.pct : Math.min(97, Math.abs(r.sig.score)*2.2);
@@ -167,12 +244,14 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
       const e = r.btSide && r.btSide[side];
       if(!e || !(e.trades>=(S.minEdgeTrades||0)) || !(e.winRate>=(S.minWinRate||0)) || !(e.avgRet>0)){ funnel.noEdge++; return false; }
     }
-    funnel.eligible++;
+    funnel.eligible++; fs_.eligible++;
     return true;
   }
   // Plain-English reason the bot is flat, built from the biggest rejection bucket.
   function whyIdle(){
-    const f=S.funnel; if(!f||!f.seen) return null;
+    if(!SOURCES.some(srcOn)) return 'No desks selected — tick at least one of Quick / Normal / Movers / Dump & Bounce.';
+    const f=S.funnel;
+    if(!f||!f.seen) return 'The enabled desks produced no candidates on this pass.';
     if(f.eligible) return null;
     const buckets=[[f.notScalp,'none were scalp setups (range/correction) — turn off ⚡ Scalp only to widen'],
       [f.noEdge,'none had a proven backtested edge on that side — lower 📊 Proven edge / Min hist win %'],
@@ -194,7 +273,7 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
       if(S.positions.length+S.pending.length >= S.maxConcurrent) break;
       if(held(r.asset.sym)) continue;   // state changes as we place — never double-commit a coin
       const k=r.action.kind, d=kindDir(r.action.kind), lev=levFor(r);
-      const base={ sym:r.asset.sym, name:r.asset.name, tk:r.asset.tk||'', cls:r.asset.cls, dir:d, stop:r.setup.stop, targets:(r.setup.targets||[]).slice(0,3), tf:(r._tf||(S.timeframes&&S.timeframes[0])||'15m'), regime:(r.setup.regime||'trend') };
+      const base={ sym:r.asset.sym, name:r.asset.name, tk:r.asset.tk||'', cls:r.asset.cls, dir:d, stop:r.setup.stop, targets:(r.setup.targets||[]).slice(0,3), tf:(r._tf||(S.timeframes&&S.timeframes[0])||'15m'), regime:(r.setup.regime||'trend'), src:(r._src||'quick') };
       if(base.targets.length<3) continue;
       const px0=(prices&&prices[r.asset.sym])||r.sig.price; if(!(px0>0)) continue;
       // aggressive = only the STRONGEST setups (MTF-confirmed AND score≥25) may skip the limit and enter at market,
@@ -230,10 +309,8 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
       if(eq <= S.dayStartEquity*(1 - S.dayLossLimitPct/100)) S.halted=true;                                                 // 🛑 daily loss limit
       const paused = Date.now() < (S.pauseUntil||0);                                                                        // ⏸ standing down after a loss streak
       if(!S.halted && !S.goalHit && !paused && (S.positions.length+S.pending.length) < S.maxConcurrent){
-        const tfs=(S.timeframes&&S.timeframes.length)?S.timeframes:['15m'];
-        let all=[];                                                   // hunt across ALL timeframes, then rank the best
-        for(const tf of tfs){ try{ const d=await scan(S.tab,tf); if(d&&Array.isArray(d.results)){ for(const r of d.results) r._tf=tf; all=all.concat(d.results); } }catch(e){} }
-        funnel={seen:0,noDirection:0,shortsOff:0,pendingOff:0,notScalp:0,lowConf:0,noEdge:0,eligible:0};
+        const all=await collect();          // every enabled desk, across every timeframe, one shape
+        funnel=blankFunnel();
         if(all.length) openFromScan(all, prices);
         S.funnel=funnel;
       }
@@ -255,19 +332,29 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate }) {
     const benched=Object.keys(S.stopOuts||{}).filter(s=>(S.stopOuts[s]||0)>=(S.maxStopOutsPerCoin||99));
     return { running:S.running, halted:S.halted, goalHit:S.goalHit, tab:S.tab, timeframes:S.timeframes, usdtInr:(typeof rate==='function'?(rate()||0):0),
       paused:(Date.now()<(S.pauseUntil||0)), pauseUntil:S.pauseUntil||0, lossStreak:S.lossStreak||0, benched,
-      funnel:S.funnel||null, whyIdle:whyIdle(),
+      funnel:S.funnel||null, whyIdle:whyIdle(), sources:{...S.sources},
+      /* WHICH DESK ACTUALLY MAKES MONEY. The point of choosing sources is being able to switch
+         off the one that loses, so every closed trade is attributed and totalled here. */
+      bySource:(()=>{ const o={};
+        for(const k of SOURCES) o[k]={trades:0,wins:0,pnl:0,open:0,winRate:null};
+        for(const t of S.closed){ const k=o[t.src||'quick']||o.quick; k.trades++; if(t.pnl>0)k.wins++; k.pnl+=t.pnl; }
+        for(const p of S.positions){ const k=o[p.src||'quick']||o.quick; k.open++; }
+        for(const k of SOURCES) if(o[k].trades) o[k].winRate=Math.round(100*o[k].wins/o[k].trades);
+        return o; })(),
       config:{capital:S.capital,riskPct:S.riskPct,dailyTargetPct:S.dailyTargetPct,maxLev:S.maxLev,feeBps:S.feeBps,slipBps:S.slipBps,dayLossLimitPct:S.dayLossLimitPct,allowShort:S.allowShort,allowPending:S.allowPending,allowAggressive:S.allowAggressive,scalpOnly:S.scalpOnly,minConfPct:S.minConfPct,requireEdge:S.requireEdge,minWinRate:S.minWinRate,minEdgeTrades:S.minEdgeTrades,minStopPct:S.minStopPct,stopCooldownMin:S.stopCooldownMin,maxStopOutsPerCoin:S.maxStopOutsPerCoin,lossStreakPause:S.lossStreakPause,streakPauseMin:S.streakPauseMin},
       cash:S.cash, equity:eq, startEquity:S.capital, retPct:(eq/S.capital-1)*100,
       dayStartEquity:S.dayStartEquity, dayRetPct:S.dayStartEquity?(eq/S.dayStartEquity-1)*100:0, targetEquity:S.dayStartEquity*(1+S.dailyTargetPct/100),
       marginUsed:grossMargin(), openCount:S.positions.length, pendingCount:S.pending.length,
-      positions:S.positions.map(p=>({sym:p.sym,name:p.name,tk:p.tk,side:p.dir>0?'LONG':'SHORT',lev:p.lev,tf:p.tf,regime:p.regime||'trend',entry:p.entry,stop:p.stop,targets:p.targets,remQty:p.remQty,qty:p.qty,taken:p.taken,lastPx:p.lastPx,uPnl:uPnl(p,(P&&P[p.sym])||p.lastPx)})),
-      pending:S.pending.map(o=>({sym:o.sym,name:o.name,side:o.dir>0?'LONG':'SHORT',lev:o.lev,qty:o.qty,limit:o.limit,stop:o.stop,tf:o.tf,expiresAt:o.expiresAt})),
+      positions:S.positions.map(p=>({sym:p.sym,name:p.name,tk:p.tk,side:p.dir>0?'LONG':'SHORT',lev:p.lev,tf:p.tf,regime:p.regime||'trend',src:p.src||'quick',entry:p.entry,stop:p.stop,targets:p.targets,remQty:p.remQty,qty:p.qty,taken:p.taken,lastPx:p.lastPx,uPnl:uPnl(p,(P&&P[p.sym])||p.lastPx)})),
+      pending:S.pending.map(o=>({sym:o.sym,name:o.name,side:o.dir>0?'LONG':'SHORT',lev:o.lev,qty:o.qty,limit:o.limit,stop:o.stop,tf:o.tf,src:o.src||'quick',expiresAt:o.expiresAt})),
       closed:S.closed.slice(0,100), stats:{trades:tot,wins,losses:tot-wins,winRate:tot?wins/tot*100:0,realizedPnl:S.closed.reduce((a,t)=>a+t.pnl,0),avgWin,avgLoss,expectancy,profitFactor},
       startedAt:S.startedAt, lastRun:S.lastRun, lastError:S.lastError };
   }
 
   function setConfig(c){
     ['capital','riskPct','dailyTargetPct','maxLev','feeBps','slipBps','dayLossLimitPct','cooldownMin','maxConcurrent','minStopPct','stopCooldownMin','maxStopOutsPerCoin','lossStreakPause','streakPauseMin','minConfPct','minWinRate','minEdgeTrades'].forEach(k=>{ if(c[k]!=null&&!isNaN(+c[k])) S[k]=+c[k]; });
+    if(c.sources&&typeof c.sources==='object'){ S.sources=S.sources||{};
+      for(const k of SOURCES) if(c.sources[k]!=null) S.sources[k]=!!c.sources[k]; }
     if(c.tab)S.tab=c.tab; if(c.tf)S.tf=c.tf;
     if(c.allowShort!=null)S.allowShort=!!c.allowShort;
     if(c.allowPending!=null)S.allowPending=!!c.allowPending;
