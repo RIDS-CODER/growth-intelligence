@@ -168,11 +168,26 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, 
      have seen yourself. They are normalised to one shape here; everything downstream (ranking,
      the quality gates, sizing, management) is shared, so a Dump & Bounce trade is held to exactly
      the same standard as a Quick Trade. */
+  /* THE SIMPLE TWO ONLY: "long the rally" and "short the failure".
+     A live plan alone is not enough. Checked against real output, every Dump & Bounce trade the
+     bot would have taken was a BUY while the 4h bump was still FADING — buying the floor with
+     price down 28-82% on the current leg and still rolling over. That is catching a knife, not
+     trading the pattern, and it is the single worst variant of this setup.
+     So the fast chart has to CONFIRM the direction before the bot will act:
+       long  — only when the bump is `running` (a move is underway) or `building` (the fall has
+               stopped and it is basing). Never while it is still fading.
+       short — only when the bump is `late` (already matched its typical size) or `fading` (rolling
+               over). That is what "the failure" means.
+     Anything else is a plan without a trigger, and is left to you to read on the panel. */
+  const DUMP_OK={ long:['running','building'], short:['late','fading'] };
   function dumpCandidate(r){
     const p=r&&r.plan; if(!p) return null;
     if(p.now!=='buy' && p.now!=='short') return null;      // only LIVE plans, same as the panel
     const s = p.now==='buy' ? p.long : p.short;
     if(!s || !(s.targets||[]).length) return null;
+    const st=(r.bump&&r.bump.state)||'quiet';
+    const want=p.now==='buy'?DUMP_OK.long:DUMP_OK.short;
+    if(!want.includes(st)){ funnel.dumpUnconfirmed++; return null; }
     const bt=r.planBt||{}, side=s.dir>0?bt.long:bt.short;
     return {
       asset:{sym:r.sym,tk:r.tk||'',name:r.name||r.tk||r.sym,cls:'Crypto',src:'cg'},
@@ -220,7 +235,7 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, 
 
   // Why the bot passed on everything. Without this, a correctly SELECTIVE bot and a broken one
   // look identical from the panel: equity flat, no positions, no error. Counts are per tick.
-  const blankFunnel=()=>({seen:0,noDirection:0,shortsOff:0,pendingOff:0,notScalp:0,lowConf:0,noEdge:0,eligible:0,bySource:{}});
+  const blankFunnel=()=>({seen:0,noDirection:0,shortsOff:0,pendingOff:0,notScalp:0,lowConf:0,noEdge:0,dumpUnconfirmed:0,eligible:0,bySource:{}});
   let funnel=blankFunnel();
   function eligible(r){
     funnel.seen++;
@@ -251,9 +266,14 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, 
   function whyIdle(){
     if(!SOURCES.some(srcOn)) return 'No desks selected — tick at least one of Quick / Normal / Movers / Dump & Bounce.';
     const f=S.funnel;
+    // A candidate rejected inside collect() never reaches eligible(), so `seen` stays 0 while the
+    // real reason sits in dumpUnconfirmed. Check that before concluding "nothing was found".
+    if(f&&!f.seen&&f.dumpUnconfirmed)
+      return `Scanned ${f.dumpUnconfirmed} Dump & Bounce plans, took none: no confirmation on the 4h chart — it only longs a rally that is running or basing, and only shorts a bump that is late or rolling over, never a floor that is still falling.`;
     if(!f||!f.seen) return 'The enabled desks produced no candidates on this pass.';
     if(f.eligible) return null;
-    const buckets=[[f.notScalp,'none were scalp setups (range/correction) — turn off ⚡ Scalp only to widen'],
+    const buckets=[[f.dumpUnconfirmed,'the Dump & Bounce plans had no confirmation on the 4h chart — it only longs a rally that is running or basing, and only shorts a bump that is late or rolling over, never a floor that is still falling'],
+      [f.notScalp,'none were scalp setups (range/correction) — turn off ⚡ Scalp only to widen'],
       [f.noEdge,'none had a proven backtested edge on that side — lower 📊 Proven edge / Min hist win %'],
       [f.lowConf,'none reached the confidence floor — lower Min conf %'],
       [f.noDirection,'the engine had no actionable entry on any of them'],
@@ -309,8 +329,10 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, 
       if(eq <= S.dayStartEquity*(1 - S.dayLossLimitPct/100)) S.halted=true;                                                 // 🛑 daily loss limit
       const paused = Date.now() < (S.pauseUntil||0);                                                                        // ⏸ standing down after a loss streak
       if(!S.halted && !S.goalHit && !paused && (S.positions.length+S.pending.length) < S.maxConcurrent){
-        const all=await collect();          // every enabled desk, across every timeframe, one shape
+        // Reset BEFORE collecting: collect() records its own rejections (e.g. Dump & Bounce plans
+        // with no 4h confirmation), and blanking afterwards threw those counts away.
         funnel=blankFunnel();
+        const all=await collect();          // every enabled desk, across every timeframe, one shape
         if(all.length) openFromScan(all, prices);
         S.funnel=funnel;
       }

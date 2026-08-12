@@ -13,8 +13,20 @@ const mk=over=>createPaper({scan:S.scan,liveQuotes:async()=>({}),dir:os.tmpdir()
   topMovers:S.topMovers,dumpBounce:S.dumpBounce,...over});
 const only=k=>({quick:false,normal:false,movers:false,dump:false,[k]:true});
 
+/* DEMO only ever produces knife-catches (buy into a fading bump), which the desk now refuses by
+   design — so a CONFIRMED plan has to be injected to exercise anything downstream of that rule. */
+function fakeDump({side='short',state='fading',bt={n:20,winRate:60,medPct:3.2}}={}){
+  const long ={dir:1, entryLo:90,entryHi:95,entry:92.5,stop:85,riskPct:8,targets:[105,115,130],ret:[13,24,40],rrr:2.1};
+  const short={dir:-1,entryLo:105,entryHi:110,entry:107.5,stop:118,riskPct:9,targets:[95,88,80],ret:[11,18,25],rrr:1.9};
+  return async()=>({rows:[{sym:'FAKEUSDT',tk:'FAKE',name:'Fake',ddPct:70,peakAgeDays:120,
+    bump:{state,tf:'4h'},
+    plan:{now:side==='short'?'short':'buy',price:side==='short'?108:92,long,short},
+    planBt:{long:side==='short'?{n:2,winRate:null,medPct:0,thin:true}:{...bt,thin:false},
+            short:side==='short'?{...bt,thin:false}:{n:2,winRate:null,medPct:0,thin:true}}}]});
+}
+
 test("every desk is reachable and produces its own candidates",async()=>{
-  for(const desk of ["quick","normal","movers","dump"]){
+  for(const desk of ["quick","normal","movers"]){
     const p=mk(); p.reset();
     p.setConfig({sources:only(desk),requireEdge:false,minConfPct:0,minStopPct:0});
     p.start(); const st=await p.tick(); p.stop();
@@ -22,6 +34,14 @@ test("every desk is reachable and produces its own candidates",async()=>{
     assert.ok(st.funnel.bySource[desk],desk+": candidates were not attributed to it");
     assert.strictEqual(Object.keys(st.funnel.bySource).length,1,desk+": leaked candidates from another desk");
   }
+  // The dump desk is reached too — it just refuses DEMO's knife-catches, so prove it with a
+  // confirmed plan rather than by loosening the rule.
+  const p=mk({dumpBounce:fakeDump({side:'short',state:'fading'})}); p.reset();
+  p.setConfig({sources:only("dump"),requireEdge:false,minConfPct:0,minStopPct:0});
+  p.start(); const st=await p.tick(); p.stop();
+  assert.ok(st.funnel.seen>0,"dump: a confirmed plan must reach the gates");
+  assert.ok(st.funnel.bySource.dump,"dump: not attributed");
+  assert.strictEqual(Object.keys(st.funnel.bySource).length,1,"dump: leaked from another desk");
 });
 
 test("no desks selected is stated, not silently idle",async()=>{
@@ -33,23 +53,34 @@ test("no desks selected is stated, not silently idle",async()=>{
 });
 
 test("the proven-edge gate applies to Dump & Bounce using ITS OWN backtest",async()=>{
-  // The point: arriving from a different panel earns no exemption. Dump & Bounce carries a
-  // backtest of its exact levels, so the gate reads that — and in DEMO those plans lose money,
-  // so the bot must refuse every one of them while still taking them with the gate off.
-  const d=await S.dumpBounce();
-  const live=d.rows.filter(r=>r.plan&&(r.plan.now==="buy"||r.plan.now==="short"));
-  assert.ok(live.length>0,"fixture check: needs live plans to judge");
+  // Arriving from a different panel earns no exemption. Dump & Bounce carries a backtest of its
+  // exact levels, so the gate reads that — a profitable side passes, a losing one is refused,
+  // with no special-casing anywhere.
+  const good=mk({dumpBounce:fakeDump({side:'short',state:'fading',bt:{n:20,winRate:60,medPct:3.2}})});
+  good.reset(); good.setConfig({sources:only("dump"),requireEdge:true,minWinRate:50,minEdgeTrades:8,minConfPct:0,minStopPct:0});
+  good.start(); const a=await good.tick(); good.stop();
+  assert.strictEqual(a.funnel.eligible,1,"a side its own backtest says makes money must be tradeable");
 
-  const off=mk(); off.reset();
-  off.setConfig({sources:only("dump"),requireEdge:false,minConfPct:0,minStopPct:0});
-  off.start(); const a=await off.tick(); off.stop();
-  assert.ok(a.funnel.eligible>0,"with the gate off the plans are tradeable");
-
-  const on=mk(); on.reset();
-  on.setConfig({sources:only("dump"),requireEdge:true,minWinRate:50,minEdgeTrades:8,minConfPct:0,minStopPct:0});
-  on.start(); const b=await on.tick(); on.stop();
+  const bad=mk({dumpBounce:fakeDump({side:'short',state:'fading',bt:{n:20,winRate:22,medPct:-4.1}})});
+  bad.reset(); bad.setConfig({sources:only("dump"),requireEdge:true,minWinRate:50,minEdgeTrades:8,minConfPct:0,minStopPct:0});
+  bad.start(); const b=await bad.tick(); bad.stop();
   assert.strictEqual(b.funnel.eligible,0,"a plan its own backtest says loses money must not be traded");
   assert.match(b.whyIdle||"",/proven backtested edge/);
+
+  const thin=mk({dumpBounce:fakeDump({side:'short',state:'fading',bt:{n:3,winRate:null,medPct:9}})});
+  thin.reset(); thin.setConfig({sources:only("dump"),requireEdge:true,minWinRate:50,minEdgeTrades:8,minConfPct:0,minStopPct:0});
+  thin.start(); const c=await thin.tick(); thin.stop();
+  assert.strictEqual(c.funnel.eligible,0,"a 3-trade sample is not evidence");
+});
+
+test("a confirmed rally is longed and a confirmed failure is shorted",async()=>{
+  for(const [side,state,want] of [['short','fading',1],['short','late',1],['short','running',0],
+                                  ['buy','running',1],['buy','building',1],['buy','fading',0]]){
+    const p=mk({dumpBounce:fakeDump({side,state})}); p.reset();
+    p.setConfig({sources:only("dump"),requireEdge:false,minConfPct:0,minStopPct:0});
+    p.start(); const st=await p.tick(); p.stop();
+    assert.strictEqual(st.funnel.eligible,want,`${side} while the bump is ${state}`);
+  }
 });
 
 test("a thin or losing backtest cannot pass the edge gate",()=>{
@@ -106,4 +137,60 @@ test("the picker and per-desk P&L are actually in the page",()=>{
   assert.match(html,/Which desk is making the money/,"per-desk P&L table");
   const srcTagAt=html.indexOf("const srcTag="), posAt=html.indexOf("const pos=(s.positions");
   assert.ok(srcTagAt>-1&&srcTagAt<posAt,"srcTag must be declared before use, or it throws in the TDZ");
+});
+
+/* ---------------- 🎢 the simple two: long the rally, short the failure ---------------- */
+
+test("the dump desk refuses to buy a floor that is still falling",async()=>{
+  // Checked against real output: EVERY Dump & Bounce trade the bot would have taken was a BUY
+  // while the 4h bump was FADING — price down 28-82% on the current leg and still rolling over.
+  // That is catching a knife, and it was the only thing this desk ever did.
+  const d=await S.dumpBounce();
+  const live=d.rows.filter(r=>r.plan&&(r.plan.now==="buy"||r.plan.now==="short"));
+  assert.ok(live.length>0,"fixture check");
+  assert.ok(live.every(r=>((r.bump&&r.bump.state)||"quiet")==="fading"),
+    "fixture check: in DEMO every live plan is a buy into a fading bump");
+
+  const p=mk(); p.reset();
+  p.setConfig({sources:only("dump"),requireEdge:false,minConfPct:0,minStopPct:0});
+  p.start(); const st=await p.tick(); p.stop();
+  assert.strictEqual(st.funnel.eligible,0,"not one knife-catch may be taken");
+  assert.strictEqual(st.funnel.dumpUnconfirmed,live.length,"and each refusal is counted");
+  assert.match(st.whyIdle||"",/no confirmation on the 4h chart/);
+});
+
+test("the confirmation rule is exactly long-the-rally and short-the-failure",()=>{
+  // Long needs a move that is underway or basing; short needs one that is spent or rolling over.
+  const OK={buy:["running","building"],short:["late","fading"]};
+  const allow=(side,state)=>OK[side].includes(state);
+  assert.strictEqual(allow("buy","running"),true,"a rally that is running");
+  assert.strictEqual(allow("buy","building"),true,"or one that is basing off the low");
+  assert.strictEqual(allow("buy","fading"),false,"never while it is still falling");
+  assert.strictEqual(allow("buy","late"),false,"and not into an exhausted move");
+  assert.strictEqual(allow("short","late"),true,"a bump that has matched its typical size");
+  assert.strictEqual(allow("short","fading"),true,"or is rolling over — the failure");
+  assert.strictEqual(allow("short","running"),false,"never short a rally still running");
+  assert.strictEqual(allow("short","building"),false);
+  for(const s of ["quiet"]) for(const side of ["buy","short"])
+    assert.strictEqual(allow(side,s),false,"no read on the fast chart = no trade");
+});
+
+test("collect()'s own rejections survive into the funnel",()=>{
+  // The reset used to run AFTER collect(), so anything collect() rejected was wiped before it
+  // could be reported and the panel said "produced no candidates" instead of the real reason.
+  const paper=require("node:fs").readFileSync(require("node:path").join(__dirname,"..","paper.js"),"utf8");
+  const reset=paper.indexOf("funnel=blankFunnel();\n        const all=await collect()");
+  assert.ok(reset>-1,"the funnel must be blanked BEFORE collect() runs");
+  assert.match(paper,/f&&!f\.seen&&f\.dumpUnconfirmed/,
+    "and whyIdle must read it even when nothing reached eligible()");
+});
+
+test("every paper-bot tick-box applies on click, not on Save",()=>{
+  const html=require("node:fs").readFileSync(require("node:path").join(__dirname,"..","index.html"),"utf8");
+  for(const id of ["ppSrcQuick","ppSrcNormal","ppSrcMovers","ppSrcDump","ppShort","ppPend","ppAggr","ppEdge"]){
+    const m=html.match(new RegExp('id="'+id+'"[^>]*'));
+    assert.ok(m,"missing "+id);
+    assert.match(m[0],/onchange="paperSaveConfig\(\)"/,id+" does not apply until Save is pressed");
+  }
+  assert.match(html,/Save numbers/,"the button should say it is only for the typed fields");
 });

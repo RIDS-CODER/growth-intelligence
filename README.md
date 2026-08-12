@@ -418,8 +418,23 @@ seen yourself:
 | **🔥 Movers** | Only coins that passed the participation gate — real volume behind the move. |
 | **🎢 Dump & Bounce** | Live buy/short plans from the fall-bump-fall detector, using **its** levels. |
 
-Tick any combination. A coin that qualifies under several desks is attributed to the most specific
-one, so nothing is double-counted.
+**Tick any combination — each box applies the moment you click it**, no Save needed. (The Save
+button is only for the typed numbers: capital, risk %, target, leverage.) A coin that qualifies
+under several desks is attributed to the most specific one, so nothing is double-counted.
+
+### 🎢 What the Dump & Bounce desk will actually take
+
+Only the two clear ones — **long a rally** or **short a failure** — and the fast chart has to
+confirm the direction first:
+
+| | Taken when the 4h bump is… |
+|---|---|
+| **LONG** | `running` (a move is underway) or `building` (the fall has stopped, it's basing) |
+| **SHORT** | `late` (already matched its typical size) or `fading` (rolling over) — *the failure* |
+
+It will **not buy a floor that is still falling**. That matters: checked against real output, every
+trade this desk would otherwise have taken was a buy into a `fading` bump — price down 28–82% on the
+current leg and still rolling over. A live plan is not a trigger; the confirmation is.
 
 **The same quality gates apply to all four.** Arriving from a different panel earns no exemption —
 confidence floor, the proven-edge gate, the noise-floor stop guard, cooldowns and the loss-streak
