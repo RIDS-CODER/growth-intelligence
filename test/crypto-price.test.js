@@ -342,7 +342,7 @@ function staleGuard(){
   const vm=require("node:vm");
   const html=require("node:fs").readFileSync(require("node:path").join(__dirname,"..","index.html"),"utf8");
   const script=html.match(/<script>([\s\S]*)<\/script>/)[1];
-  const from=script.indexOf("function liveStale(r)"), to=script.indexOf("let _staleSig=");
+  const from=script.indexOf("const PENDING_ENTRY="), to=script.indexOf("let _staleSig=");
   assert.ok(from>0&&to>from,"could not locate the staleness block in index.html");
   const ctx=vm.createContext({});
   vm.runInContext(script.slice(from,to)+
@@ -353,8 +353,9 @@ function staleGuard(){
 const LONG={dir:1,entry:101,entryLo:100,entryHi:102,stop:96,targets:[110,115,120],rrr:1.8,atr:2};
 // short: zone 98–100, entry 99, stop 104, T1 90 -> advertised R:R 1.8
 const SHORT={dir:-1,entry:99,entryLo:98,entryHi:100,stop:104,targets:[90,85,80],rrr:1.8,atr:2};
-const long=px=>({sig:{price:px,verdict:"BUY"},setup:LONG});
-const short=px=>({sig:{price:px,verdict:"SELL"},setup:SHORT});
+// action.kind matters: a setup you were told to act on can be missed, one you are WAITING on cannot
+const long=(px,kind="buybreak")=>({sig:{price:px,verdict:"BUY"},setup:LONG,action:{kind}});
+const short=(px,kind="sellbreak")=>({sig:{price:px,verdict:"SELL"},setup:SHORT,action:{kind}});
 
 test("a setup whose price has already run PAST the entry is flagged, not shown as a live BUY",()=>{
   /* THE REGRESSION THIS PINS. liveStale only ever measured room to the STOP, so it caught a trade
@@ -384,7 +385,7 @@ test("the miss is judged against the card's OWN advertised R:R, not a fixed rati
      different setups, each priced so the SAME fraction of their advertised edge remains, must be
      judged the same way. */
   const c=staleGuard();
-  const mk=(lo,hi,t1,rrr)=>px=>({sig:{price:px,verdict:"BUY"},
+  const mk=(lo,hi,t1,rrr)=>px=>({sig:{price:px,verdict:"BUY"},action:{kind:"buybreak"},
     setup:{dir:1,entry:101,entryLo:lo,entryHi:hi,stop:96,targets:[t1,t1+5,t1+10],rrr,atr:2}});
   const wide=mk(100,102,110,1.8), tight=mk(100.5,101.5,104,0.6);
   //                        price   remaining R:R   as a share of advertised
@@ -398,11 +399,32 @@ test("the miss is judged against the card's OWN advertised R:R, not a fixed rati
     "the same 40% must read the same way on a tight setup");
 });
 
+test("WAITING is not MISSING — a pullback entry below price is the plan working",()=>{
+  /* THE REGRESSION THIS PINS. A pullback setup puts its entry at support, deliberately BELOW the
+     price: "⏳ WAIT for the dip — set a buy limit at ₹X, ~2% below now". Price sitting above that
+     zone is the plan working as intended, and such a setup's T1 can legitimately be on the near
+     side of the current price too. Judging those by distance-from-zone greyed almost the entire
+     board — measured clean=0 actionable setups on all six timeframes — which looks exactly like
+     the scanner having gone dead. Only a setup that was LIVE at scan time can be missed. */
+  const c=staleGuard();
+  // identical price and levels; only the entry style differs
+  assert.strictEqual(c.missedEntry(long(108,"buybreak")),true,"a breakout you were told to take: missed");
+  assert.strictEqual(c.missedEntry(long(108,"waitdip")),false,"the same numbers as a pending dip buy: NOT missed");
+  assert.strictEqual(c.liveStale(long(108,"waitdip")),false,"and it must stay on the board, ungreyed");
+  assert.strictEqual(c.missedEntry(short(92,"sellbreak")),true);
+  assert.strictEqual(c.missedEntry(short(92,"waitbounce")),false,"a short waiting for a bounce is pending, not late");
+  // a card that WAS live and has run past is still caught
+  assert.strictEqual(c.missedEntry(long(108,"buynow")),true,"price was in the zone at scan time and has left it");
+  // and with no action at all we must not guess
+  assert.strictEqual(c.missedEntry({sig:{price:108,verdict:"BUY"},setup:LONG}),false,
+    "unknown entry style must not grey a card");
+});
+
 test("running toward the stop is still caught, and HOLD is never flagged",()=>{
   const c=staleGuard();
   assert.strictEqual(c.liveStale(long(97)),true,"<½R from the stop");
   assert.strictEqual(c.liveStale(long(99)),true,"broke below the entry zone");
-  assert.strictEqual(c.liveStale({sig:{price:108,verdict:"HOLD"},setup:LONG}),false,
+  assert.strictEqual(c.liveStale({sig:{price:108,verdict:"HOLD"},setup:LONG,action:{kind:"buybreak"}}),false,
     "HOLD has no setup to be late for");
 });
 
