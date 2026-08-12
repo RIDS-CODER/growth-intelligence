@@ -104,3 +104,50 @@ test("resolveAsset refuses an ambiguous prefix rather than guessing",()=>{
   assert.strictEqual(S.resolveAsset("BTCUSDT").sym,"BTCUSDT");
   assert.strictEqual(S.resolveAsset("XYZZY"),null);
 });
+
+/* ---------------- the USDT rate must never be served stale ---------------- */
+
+test("a cached payload carries a LIVE rate, not the one frozen when it was built",async()=>{
+  /* The reported bug. Every heavy endpoint is cached — scan and movers 40s, backtest 10 min,
+     🎢 Dump & Bounce 30 MINUTES — and each baked `usdtInr` into the cached object. The browser
+     keeps one global rate on last-writer-wins, so a Dump & Bounce refresh could stamp a rate half
+     an hour old over a fresh one, and every panel then divided a CURRENT ₹ price by a STALE rate:
+     ₹ looked right while $ drifted. */
+  S.__setFx(88.50);
+  await S.topMovers("Crypto","5m");
+  await S.dumpBounce(true);
+  await S.scan("Crypto","5m");
+  S.__setFx(91.50);                                   // the market moves
+  const live=S.priceRate();
+  assert.strictEqual(live,91.50);
+  for(const [name,p] of [["movers",await S.topMovers("Crypto","5m")],
+                         ["dumpBounce",await S.dumpBounce()],
+                         ["scan",await S.scan("Crypto","5m")]]){
+    assert.ok(p.cached,name+": fixture check — this call must be a cache hit");
+    assert.strictEqual(p.usdtInr,live,name+" served a stale rate with a cached payload");
+    assert.ok(p.rateAt>0,name+" must timestamp the rate so the browser can order updates");
+  }
+});
+
+test("withLiveRate re-reads the rate every time",()=>{
+  S.__setFx(80);
+  const a=S.withLiveRate({x:1});
+  S.__setFx(95);
+  const b=S.withLiveRate({x:1});
+  assert.strictEqual(a.usdtInr,80);
+  assert.strictEqual(b.usdtInr,95);
+  assert.ok(b.rateAt>=a.rateAt);
+  assert.strictEqual(b.x,1,"it must not disturb the payload it wraps");
+});
+
+test("the browser refuses a rate reading older than the one it already has",()=>{
+  // Panels poll on different clocks (20s / 30s / 45s), so responses arrive out of order. Plain
+  // last-writer-wins would let a slow panel stamp an older rate over a newer one.
+  const html=require("node:fs").readFileSync(require("node:path").join(__dirname,"..","index.html"),"utf8");
+  const script=html.match(/<script>([\s\S]*)<\/script>/)[1];
+  assert.match(script,/function setRate\(d\)/,"one guarded entry point for the rate");
+  assert.match(script,/if\(at&&usdtInrAt&&at<usdtInrAt\)return;/,"an older reading must be dropped");
+  // and no panel may still assign the rate directly
+  const direct=[...script.matchAll(/if\(d\.usdtInr>0\)\s*\{?\s*usdtInr\s*=/g)];
+  assert.strictEqual(direct.length,0,"a payload writer bypassing setRate() reintroduces the bug");
+});

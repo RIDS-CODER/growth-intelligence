@@ -203,6 +203,22 @@
 <script>
 let activeTab="Stocks",timeframe="30m",lastResults=[],status={},refreshAt=0;
 let cryptoCcy="INR", usdtInr=0, cryptoSource="";       // ₹/USDT toggle + USDT→INR rate + active source label
+/* ONE rate, and only the FRESHEST one wins.
+   Panels refresh on different clocks (20s, 30s, 45s) and the server caches some payloads, so
+   responses arrive out of order. With plain last-writer-wins a slow panel could stamp an older
+   rate over a newer one — and since $ is ₹ divided by this, a stale rate makes every USDT price
+   drift while ₹ stays correct. `rateAt` says when the server read the rate; an older reading is
+   ignored. */
+let usdtInrAt=0;
+function setRate(d){
+  if(!d||!(d.usdtInr>0))return;
+  const at=+d.rateAt||0;
+  if(at&&usdtInrAt&&at<usdtInrAt)return;              // an older snapshot must not overwrite a newer one
+  usdtInr=d.usdtInr; usdtInrAt=at||Date.now();
+  if(d.rateSrc)scalpRateSrc=d.rateSrc;
+}
+// the browser's own CoinDCX fetch is by definition current at the moment it lands
+function markRateNow(){ usdtInrAt=Date.now(); }
 let lastCryptoMode="";                                  // 'coindcx' (browser) | 'server-coindcx' (India host) | 'global'
 function setBtcNote(btc){
   const el=document.getElementById('btcNote'); if(!el)return;
@@ -233,8 +249,8 @@ async function ensureRate(){
   if(usdtInr>0)return usdtInr;
   try{const t=await fetchT("https://api.coindcx.com/exchange/ticker",{},6000).then(r=>r.json());
     if(Array.isArray(t)){const bt=t.find(x=>x.market==='BTCINR'),bu=t.find(x=>x.market==='BTCUSDT'),ui=t.find(x=>x.market==='USDTINR');
-      if(bt&&bu&&+bu.last_price>0)usdtInr=+bt.last_price/+bu.last_price;else if(ui&&+ui.last_price>0)usdtInr=+ui.last_price;}}catch(e){}
-  if(!(usdtInr>0)){try{const j=await fetchT("https://open.er-api.com/v6/latest/USD",{},6000).then(r=>r.json());if(j&&j.rates&&j.rates.INR)usdtInr=j.rates.INR;}catch(e){}}
+      if(bt&&bu&&+bu.last_price>0)usdtInr=+bt.last_price/+bu.last_price;else if(ui&&+ui.last_price>0)usdtInr=+ui.last_price;markRateNow();}}catch(e){}
+  if(!(usdtInr>0)){try{const j=await fetchT("https://open.er-api.com/v6/latest/USD",{},6000).then(r=>r.json());if(j&&j.rates&&j.rates.INR){usdtInr=j.rates.INR;markRateNow();}}catch(e){}}
   return usdtInr;
 }
 const money=(v,d=2)=>v==null?'—':'₹'+Number(v).toLocaleString('en-IN',{minimumFractionDigits:d,maximumFractionDigits:d});
@@ -274,6 +290,7 @@ async function fetchCoinDCXCrypto(tf){
   const usdtBy={}; t.forEach(x=>{if(x.market&&x.market.endsWith('USDT'))usdtBy[x.market.slice(0,-4)]=+x.last_price;});
   const bt=t.find(x=>x.market==='BTCINR'),bu=t.find(x=>x.market==='BTCUSDT'),ui=t.find(x=>x.market==='USDTINR');
   if(bt&&bu&&+bu.last_price>0)usdtInr=+bt.last_price/+bu.last_price; else if(ui&&+ui.last_price>0)usdtInr=+ui.last_price;
+  markRateNow();
   const liveInr=base=>{const u=usdtBy[base];return (u>0&&usdtInr>0)?u*usdtInr:0;};
   const rows=t.filter(x=>x.market&&x.market.endsWith("INR"))
     .map(x=>{const base=x.market.slice(0,-3);const inrLast=+x.last_price;return {market:x.market,base,last:liveInr(base)||inrLast,vol:(+x.volume||0)*(inrLast||0)};})
@@ -677,7 +694,7 @@ async function runScan(){
     const d=await r.json();
     if(d.error==='login_required'){document.getElementById('pstat').textContent='Login required';drawLogin();render([]);scanning=false;document.getElementById('scanBtn').disabled=false;return;}
     if(d.error)throw new Error(d.error);
-    if(d.usdtInr>0)usdtInr=d.usdtInr;   // use the SERVER's exact CoinDCX USDT/INR so $ display matches CoinDCX
+    setRate(d);   // freshest-wins: see setRate()
     document.getElementById('pf').style.width='100%';
     render(d.results);
     const now=new Date();
@@ -724,6 +741,7 @@ async function pollQuotes(){
         const usdtBy={};t.forEach(x=>{if(x.market&&x.market.endsWith('USDT'))usdtBy[x.market.slice(0,-4)]=+x.last_price;});
         const bt=t.find(x=>x.market==='BTCINR'),bu=t.find(x=>x.market==='BTCUSDT'),ui=t.find(x=>x.market==='USDTINR');
         if(bt&&bu&&+bu.last_price>0)usdtInr=+bt.last_price/+bu.last_price; else if(ui&&+ui.last_price>0)usdtInr=+ui.last_price;
+        markRateNow();
         const by={};t.forEach(x=>{if(x.market&&x.market.endsWith('INR')){const base=x.market.slice(0,-3);const u=usdtBy[base];by[x.market]=(u>0&&usdtInr>0)?u*usdtInr:+x.last_price;}});
         applyQuotes(by);}
     }catch(e){}
@@ -731,7 +749,7 @@ async function pollQuotes(){
   }
   // Everything else — including HOSTED crypto (India server reaches CoinDCX): live prices from the server every poll
   try{const d=await(await fetch('/api/quotes?tab='+encodeURIComponent(activeTab))).json();
-    if(d.usdtInr>0)usdtInr=d.usdtInr;   // keep display rate exactly in sync with the server's pricing rate
+    setRate(d);   // freshest-wins: see setRate()
     if(d.quotes)applyQuotes(d.quotes);
   }catch(e){}
 }
@@ -966,7 +984,7 @@ async function loadQuick(tf){
   quickState.loading=true; renderQuickList();
   try{
     const d=await(await fetch('/api/scan?tab='+encodeURIComponent(quickState.tab)+'&tf='+tf+'&_='+Date.now())).json();
-    if(d.usdtInr>0){usdtInr=d.usdtInr;scalpRateSrc=d.rateSrc||'';}  // use the SAME rate the server priced with — never a substitute rate
+    setRate(d);   // freshest-wins: see setRate() — never a substitute or older rate
     if(!(usdtInr>0))await ensureRate();
     const res=(d.results||[]);
     const quick=res.filter(x=>x.setup&&(x.setup.regime==='range'||x.setup.regime==='correction'));   // scalp/quick only
@@ -1085,7 +1103,7 @@ function setMoversAction(){moversState.actionOnly=!moversState.actionOnly;render
 async function loadMovers(tf){
   moversState.loading=true; renderMoversList();
   try{ const d=await(await fetch('/api/movers?tab='+encodeURIComponent(moversState.tab)+'&tf='+tf+'&_='+Date.now())).json();
-    if(d.usdtInr>0){usdtInr=d.usdtInr;scalpRateSrc=d.rateSrc||'';}  // use the SAME rate the server priced with — never a substitute rate
+    setRate(d);   // freshest-wins: see setRate() — never a substitute or older rate
     if(!(usdtInr>0))await ensureRate();
     moversState.data[moversState.tab+'|'+tf]={movers:d.movers||[],ts:d.ts||Date.now(),scanned:d.scanned,
       needsLogin:!!d.needsLogin,marketOpen:d.marketOpen!==false}; }
@@ -1199,7 +1217,7 @@ function nlLive(r){
 async function loadListPrices(){
   try{
     const d=await(await fetch('/api/quotes?tab=Crypto&_='+Date.now())).json();
-    if(d.usdtInr>0){usdtInr=d.usdtInr;scalpRateSrc=d.rateSrc||scalpRateSrc;}
+    setRate(d);
     if(d.quotes&&Object.keys(d.quotes).length){listState.px=d.quotes;listState.pxAt=d.ts||Date.now();}
   }catch(e){}
   if(listState.open&&listState.data)renderListBody();
@@ -1220,7 +1238,7 @@ async function loadListings(force){
   listState.loading=true;listState.err='';renderListShell();
   try{ const d=await(await fetch('/api/dumpbounce'+(force?'?force=1':''))).json();
     if(d.error)throw new Error(d.error);
-    if(d.usdtInr>0){usdtInr=d.usdtInr;scalpRateSrc=d.rateSrc||scalpRateSrc;}
+    setRate(d);
     listState.data=d; }
   catch(e){ listState.err=String(e.message||e); }
   listState.loading=false; trackedAt=0; renderListShell();
@@ -1418,7 +1436,7 @@ async function loadUniverse(){
 async function loadPositions(quiet){
   if(!quiet)posState.loading=true, renderPosBody();
   try{ const d=await(await fetch('/api/positions?_='+Date.now())).json();
-    if(d.usdtInr>0)usdtInr=d.usdtInr;
+    setRate(d);
     posState.data=d; posState.err=''; }
   catch(e){ posState.err=String(e.message||e); }
   posState.loading=false; renderPosBody();
@@ -1569,7 +1587,7 @@ function renderListBody(){
 let trackedCache=null,trackedAt=0;
 async function loadTrackedSetups(){
   if(trackedCache&&Date.now()-trackedAt<20000)return trackedCache;
-  try{const d=await(await fetch('/api/setups')).json();if(d.usdtInr>0)usdtInr=d.usdtInr;trackedCache=d;trackedAt=Date.now();}catch(e){}
+  try{const d=await(await fetch('/api/setups')).json();setRate(d);trackedCache=d;trackedAt=Date.now();}catch(e){}
   return trackedCache;
 }
 const ageTxt=ms=>{const m=Math.max(1,Math.round((Date.now()-ms)/60000));return m<60?m+'m':m<1440?Math.round(m/60)+'h':Math.round(m/1440)+'d';};
