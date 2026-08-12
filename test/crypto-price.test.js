@@ -209,6 +209,98 @@ test("a source we got NO rate from must never block the one source that works",(
   assert.strictEqual(c.usdtInr,89.9);
 });
 
+test("ONE rate formula: the browser derives CoinDCX's USDT/INR exactly as the server does",()=>{
+  /* THE BUG BEHIND "$3.43 here vs $3.21 on CoinDCX". Two formulas for one rate:
+       server  cdxUsdtInr()      -> USDTINR market first, BTCINR/BTCUSDT ratio as fallback
+       browser (three places)    -> ratio FIRST, USDTINR as fallback
+     Both labelled 'coindcx', both writing the one shared `usdtInr`. ₹ built with one got divided
+     by the other, so the cancellation in (price × rate) ÷ rate broke and $ ran off by exactly the
+     gap between the two readings. A stale BTCINR last-trade is enough: 3.21 × (95.1/89.0) = 3.43. */
+  const vm=require("node:vm");
+  const html=require("node:fs").readFileSync(require("node:path").join(__dirname,"..","index.html"),"utf8");
+  const script=html.match(/<script>([\s\S]*)<\/script>/)[1];
+  const i=script.indexOf("function cdxRateFromTicker(t)");
+  assert.ok(i>0,"the browser must have ONE named rate formula, not three inline copies");
+  const ctx=vm.createContext({});
+  vm.runInContext(script.slice(i,script.indexOf("let lastCryptoMode"))+";globalThis.f=cdxRateFromTicker;",ctx);
+  const tk=(o)=>Object.entries(o).map(([market,last_price])=>({market,last_price:String(last_price)}));
+
+  // when they disagree, BOTH sides must pick USDTINR — the direct pair, not the BTC-implied one
+  S.__setMode("coindcx");
+  S.__setCdxTicker({USDTINR:89.0,BTCINR:8_563_000,BTCUSDT:90_000});   // ratio implies 95.1
+  assert.strictEqual(S.cdxUsdtInr(),89.0,"fixture check: server prefers the direct market");
+  assert.strictEqual(ctx.f(tk({USDTINR:89.0,BTCINR:8_563_000,BTCUSDT:90_000})),89.0,
+    "the browser must agree with the server, or ₹ and $ come apart");
+
+  // and both fall back to the ratio the same way when the direct market is missing
+  S.__setCdxTicker({BTCINR:8_563_000,BTCUSDT:90_000});
+  assert.ok(Math.abs(S.cdxUsdtInr()-8_563_000/90_000)<1e-9);
+  assert.ok(Math.abs(ctx.f(tk({BTCINR:8_563_000,BTCUSDT:90_000}))-8_563_000/90_000)<1e-9);
+  assert.strictEqual(ctx.f(tk({})),0,"no data must be 0, never a guess");
+  // no inline copy may survive anywhere in the page
+  assert.ok(!/last_price\/\+bu\.last_price/.test(script),"an inline rate derivation reintroduces the split");
+});
+
+test("$ is the venue's OWN number, so no rate — right or wrong — can move it",()=>{
+  /* The structural fix. $ used to be reconstructed as ₹ ÷ rate, which is exact only while the
+     dividing rate is the reading that multiplied. Carrying the exchange's real USDT price means
+     the dollar figure is the exchange's by construction. */
+  const vm=require("node:vm");
+  const html=require("node:fs").readFileSync(require("node:path").join(__dirname,"..","index.html"),"utf8");
+  const script=html.match(/<script>([\s\S]*)<\/script>/)[1];
+  const i=script.indexOf("const usdTxt=");
+  const ctx=vm.createContext({cryptoCcy:"USDT",usdtInr:95.1});   // a WRONG shared rate, deliberately
+  vm.runInContext(script.slice(i,script.indexOf("// Currency-aware input conversion"))+
+    ";globalThis.livePriceTxt=livePriceTxt;globalThis.usdTxt=usdTxt;",ctx);
+  ctx.cryptoPrice=(v,rate)=>{const r=(rate>0)?rate:ctx.usdtInr;return ctx.cryptoCcy==='USDT'&&r>0?ctx.usdTxt(v/r):'₹'+v;};
+  ctx.fmtR=r=>v=>ctx.cryptoPrice(v,r.rateUsed);
+
+  const r={asset:{cls:"Crypto"},sig:{price:3.21*89.0,priceUsd:3.21},rateUsed:89.0};
+  assert.strictEqual(ctx.livePriceTxt(r),"$3.2100",
+    "the exchange's own $ must win over any rate arithmetic");
+  // and with no dollar twin it must still use the rate that BUILT the ₹, not the shared one
+  delete r.sig.priceUsd;
+  assert.strictEqual(ctx.livePriceTxt(r),"$3.2100",
+    "falling back must divide by rateUsed (89.0), not the stale shared 95.1 that produced $3.43");
+});
+
+test("the page never claims a global-feed $ price matches CoinDCX",()=>{
+  /* It used to end the global-feed notice with "and $ USDT values are exact". Exact against the
+     GLOBAL market — not against CoinDCX. The India premium explains only the ₹ gap; the coin's own
+     price also differs between venues, and on a thin alt that dwarfs the premium. PROM read $3.43
+     in the app against $3.21 on CoinDCX — 6.85% apart, which no rate can produce, because the rate
+     cancels: ₹ = price×rate, so $ = ₹÷rate = price. A wrong claim in the UI sent someone hunting a
+     bug that was never in the code. */
+  const html=require("node:fs").readFileSync(require("node:path").join(__dirname,"..","index.html"),"utf8");
+  // only what the user is SHOWN — the comment above it quotes the old wording on purpose
+  const g=html.indexOf("mode==='global'");
+  assert.ok(g>0,"could not find the global-feed branch");
+  const seg=html.slice(g,html.indexOf("} else {",g));
+  const note=seg.slice(seg.indexOf("cn.innerHTML="));
+  assert.ok(!/\$ USDT values are exact/.test(note),
+    "the global feed cannot promise CoinDCX-exact $ prices");
+  assert.match(note,/not CoinDCX/,"it must name the venue plainly");
+  assert.match(note,/several percent/,"and size the gap, since 'small' is what misled");
+  assert.match(note,/ratios/,"while still saying what DOES survive the gap");
+});
+
+test("every crypto price is stamped with the exchange it came from",()=>{
+  const html=require("node:fs").readFileSync(require("node:path").join(__dirname,"..","index.html"),"utf8");
+  const script=html.match(/<script>([\s\S]*)<\/script>/)[1];
+  const vm=require("node:vm");
+  const i=script.indexOf("function venueNote(r)");
+  assert.ok(i>0,"venueNote must exist");
+  const ctx=vm.createContext({});
+  vm.runInContext(script.slice(i,script.indexOf("// Currency-aware input conversion"))+
+    ";globalThis.venueNote=venueNote;",ctx);
+  const mk=tag=>({asset:{cls:"Crypto"},priceTag:tag});
+  assert.match(ctx.venueNote(mk("live · CoinDCX ₹")),/CoinDCX/);
+  assert.ok(!/not<\/b> CoinDCX/.test(ctx.venueNote(mk("live · CoinDCX ₹"))),"a real CoinDCX price is not disclaimed");
+  assert.match(ctx.venueNote(mk("live · global ₹")),/not<\/b> CoinDCX/,"a global price must say so on the number itself");
+  assert.strictEqual(ctx.venueNote({asset:{cls:"Stock"},priceTag:"LIVE (broker)"}),"","stocks have no venue ambiguity");
+  assert.match(script,/Current Price\$\{venueNote\(r\)\}/,"and it must be rendered beside the price");
+});
+
 test("the page says so when the $ toggle cannot convert, instead of quietly showing ₹",()=>{
   // cryptoPrice() falls back to ₹ when there is no rate. The number and its symbol are both
   // right — the TOGGLE is what is lying, and it used to lie silently.
@@ -216,7 +308,9 @@ test("the page says so when the $ toggle cannot convert, instead of quietly show
   const script=html.match(/<script>([\s\S]*)<\/script>/)[1];
   assert.match(html,/id="ccyWarn"/,"there must be somewhere to say it");
   assert.match(script,/function updateCcyWarn\(\)/);
-  assert.match(script,/cryptoCcy==='USDT'\s*&&\s*!\(usdtInr>0\)/,"it must trigger on exactly the silent-fallback case");
+  assert.match(script,/cryptoCcy==='USDT'\s*&&\s*!canConvert/,"it must trigger on exactly the silent-fallback case");
+  assert.match(script,/const canConvert\s*=\s*usdtInr>0\s*\|\|/,
+    "convertible means a shared rate OR a per-result one — a per-result rate must not raise a false alarm");
   // it has to be refreshed wherever the rate or the tab can change, not just defined
   const body=name=>{const i=script.indexOf("function "+name+"(");assert.ok(i>0,name+" not found");
     return script.slice(i,i+1400);};

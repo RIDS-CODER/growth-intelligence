@@ -249,6 +249,24 @@ function setRate(d){
    escape hatch never opened. usdtInr stayed 0 permanently and every $ price silently printed in
    ₹ instead. Claiming a rate we do not have is what broke the USDT toggle. */
 function markRateNow(src){ if(!(usdtInr>0))return; usdtInrAt=Date.now(); usdtInrSrc=src||'coindcx'; }
+/* ONE formula for CoinDCX's USDT→INR — the same one, in the same order, as the server's
+   cdxUsdtInr(): the direct USDTINR market first (the fiat gateway pair, deep and current), the
+   BTC-implied ratio (BTCINR/BTCUSDT) only as a fallback.
+   This browser used to derive it the OTHER way round — ratio first — in three separate places.
+   Two formulas, both labelled 'coindcx', both writing the one shared rate: ₹ built with the
+   browser's ratio got divided by the server's USDTINR, and since a stale BTCINR last-trade can
+   sit several percent off, $ prices ran exactly that far from the CoinDCX screen. PROM read
+   $3.43 against CoinDCX's $3.21 — 3.21 × (ratio ÷ USDTINR). One formula ends the fight. */
+function cdxRateFromTicker(t){
+  let ui=0,bi=0,bu=0;
+  for(const x of t){
+    if(x.market==='USDTINR')ui=+x.last_price;
+    else if(x.market==='BTCINR')bi=+x.last_price;
+    else if(x.market==='BTCUSDT')bu=+x.last_price;
+  }
+  if(ui>0)return ui;
+  return (bi>0&&bu>0)?bi/bu:0;
+}
 let lastCryptoMode="";                                  // 'coindcx' (browser) | 'server-coindcx' (India host) | 'global'
 function setBtcNote(btc){
   const el=document.getElementById('btcNote'); if(!el)return;
@@ -264,7 +282,12 @@ function setCryptoNote(mode){
     const via = mode==='coindcx' ? 'your browser' : 'the India server';
     cn.innerHTML='<div class="infobox" style="border-color:rgba(34,197,94,.4)"><b>✅ Exact CoinDCX ₹ — live.</b> Prices come from CoinDCX via '+via+', so the ₹ here matches your CoinDCX screen. Both ₹ and $ USDT are exact. Place orders on CoinDCX using the setup’s direction and entry / stop / target levels.</div>';
   } else if(mode==='global'){
-    cn.innerHTML='<div class="infobox" style="border-color:rgba(240,185,11,.35)"><b>ℹ️ Crypto is on the global ₹ feed right now.</b> This server can’t reach CoinDCX, so ₹ values run ~1–4% below your CoinDCX screen (the India premium). <b>Your decisions are unaffected:</b> direction, signal and all % levels (entry / stop / targets, risk:reward) match CoinDCX, and $ USDT values are exact. For exact ₹, host in an India region or run locally.</div>';
+    /* This used to end "and $ USDT values are exact". That is false, and it is the claim that sent
+       someone hunting a bug that was never in the code: it is exact against the GLOBAL market, not
+       against CoinDCX. The India premium only explains the ₹ gap; the coin's own price also differs
+       between venues, and on a thin alt that gap dwarfs the premium — PROM read $3.43 here against
+       $3.21 on CoinDCX, 6.85% apart, which no rate can produce (the rate cancels in ₹ ÷ rate). */
+    cn.innerHTML='<div class="infobox" style="border-color:rgba(240,185,11,.55)"><b>⚠️ These prices are from the GLOBAL market (Binance) — not CoinDCX.</b> This server can’t reach CoinDCX. Two things follow: ₹ runs ~1–4% under CoinDCX (the India premium), and — the one that bites — <b>the coin itself can trade at a different price on the two exchanges</b>. On majors that gap is small; on thin alt-coins it can be <b>several percent</b>, so a $ price here need not match the $ on your CoinDCX screen. <b>Direction, signal and every % level</b> (entry / stop / targets, risk : reward) still hold — those are ratios, and ratios survive the gap. <b>Do not read the absolute price as a CoinDCX quote.</b> For CoinDCX numbers, host in an India region (e.g. DigitalOcean Bangalore) or run locally.</div>';
   } else {
     cn.innerHTML='<div class="infobox"><b>⏳ Loading crypto feed…</b></div>';
   }
@@ -278,8 +301,7 @@ function fetchT(url,opts,ms){return Promise.race([fetch(url,opts||{}),new Promis
 async function ensureRate(){
   if(usdtInr>0)return usdtInr;
   try{const t=await fetchT("https://api.coindcx.com/exchange/ticker",{},6000).then(r=>r.json());
-    if(Array.isArray(t)){const bt=t.find(x=>x.market==='BTCINR'),bu=t.find(x=>x.market==='BTCUSDT'),ui=t.find(x=>x.market==='USDTINR');
-      if(bt&&bu&&+bu.last_price>0)usdtInr=+bt.last_price/+bu.last_price;else if(ui&&+ui.last_price>0)usdtInr=+ui.last_price;markRateNow('coindcx');}}catch(e){}
+    if(Array.isArray(t)){const rr=cdxRateFromTicker(t);if(rr>0){usdtInr=rr;markRateNow('coindcx');}}}catch(e){}
   if(!(usdtInr>0)){try{const j=await fetchT("https://open.er-api.com/v6/latest/USD",{},6000).then(r=>r.json());if(j&&j.rates&&j.rates.INR){usdtInr=j.rates.INR;markRateNow('fx');}}catch(e){}}
   return usdtInr;
 }
@@ -291,15 +313,46 @@ const fmtVal=(v,d,ix)=>v==null?'—':(ix?Number(v).toLocaleString('en-IN',{minim
    quietly disagree with the button the user just pressed. */
 function updateCcyWarn(){
   const el=document.getElementById('ccyWarn'); if(!el)return;
-  const bad = activeTab==='Crypto' && cryptoCcy==='USDT' && !(usdtInr>0);
+  // convertible if we hold a shared rate, or every result carries the rate that built it
+  const canConvert = usdtInr>0 || (lastResults.length>0 && lastResults.every(r=>r.asset.cls!=='Crypto'||r.rateUsed>0||r.sig.priceUsd>0));
+  const bad = activeTab==='Crypto' && cryptoCcy==='USDT' && !canConvert;
   el.style.display = bad ? 'block' : 'none';
   if(bad) el.textContent='⚠ No USDT/INR rate yet — showing ₹. Prices are correct; the $ conversion is unavailable.';
 }
 // crypto price in the chosen currency (server computes in ₹; convert to USDT for display via CoinDCX's rate)
-function cryptoPrice(v){if(v==null)return '—';
-  if(cryptoCcy==='USDT'&&usdtInr>0){const u=v/usdtInr;return '$'+u.toLocaleString('en-US',{minimumFractionDigits:u<5?4:2,maximumFractionDigits:u<5?4:2});}
+/* `rate` is the rate that BUILT this particular ₹ number, when the payload carried one. Dividing by
+   anything else is how ₹ and $ drift apart: the cancellation in (price × rate) ÷ rate only holds
+   when both rates are the same reading. Falls back to the shared rate for panels that have none. */
+function cryptoPrice(v,rate){if(v==null)return '—';
+  const r=(rate>0)?rate:usdtInr;
+  if(cryptoCcy==='USDT'&&r>0)return usdTxt(v/r);
   return '₹'+Number(v).toLocaleString('en-IN',{minimumFractionDigits:v<5?4:2,maximumFractionDigits:v<5?4:2});}
-const fmtR=r=>v=>r.asset.cls==='Crypto'?cryptoPrice(v):fmtVal(v,r.dec,r.isIndex);   // per-result formatter
+const fmtR=r=>v=>r.asset.cls==='Crypto'?cryptoPrice(v,r.rateUsed):fmtVal(v,r.dec,r.isIndex);   // per-result formatter
+const usdTxt=u=>'$'+Number(u).toLocaleString('en-US',{minimumFractionDigits:u<5?4:2,maximumFractionDigits:u<5?4:2});
+/* THE LIVE PRICE, in the currency being viewed — and in $ that means the venue's OWN dollar
+   number, not ₹ ÷ rate. Reconstructing it by division is exact only while the rate dividing is the
+   same rate that multiplied, and for a long time it was not: the server read USDTINR first and
+   fell back to the BTC ratio, the browser did the reverse, and both wrote one shared `usdtInr`.
+   ₹ built by one got divided by the other, so $ drifted by exactly the gap between the two
+   readings — PROM showed $3.43 against CoinDCX's $3.21.
+   The formulas agree now, but agreement is a property that can rot. Carrying the real number
+   means the $ on screen is the $ on the exchange by construction, and no rate can move it.
+   Levels (entry / stop / targets) have no dollar twin and still convert — they are derived from
+   the ₹ candle series, so they stay internally consistent with it. */
+function livePriceTxt(r){
+  if(r.asset.cls==='Crypto'&&cryptoCcy==='USDT'&&r.sig.priceUsd>0)return usdTxt(r.sig.priceUsd);
+  return fmtR(r)(r.sig.price);
+}
+/* WHICH EXCHANGE this number is from, stamped on the number itself. Without it the price is just
+   a price, and there is no way to tell a CoinDCX quote from a Binance one that happens to be 6%
+   away — which is exactly the confusion this is here to end. The server already decides this per
+   result; it was only being shown in small print at the top of the card. */
+function venueNote(r){
+  if(!r||r.asset.cls!=='Crypto')return '';
+  return /CoinDCX/.test(r.priceTag||'')
+    ? ' <span class="sub">· CoinDCX</span>'
+    : ' <span class="sub" style="color:#fbbf24" title="This server cannot reach CoinDCX, so prices come from the global market. On thin alt-coins the two venues can differ by several percent.">· Binance (global), <b>not</b> CoinDCX</span>';
+}
 // Currency-aware input conversion: the user types in the currency they SEE (₹ or $ USDT); we always STORE ₹.
 function inrFromDisp(cls,v){return (cls==='Crypto'&&cryptoCcy==='USDT'&&usdtInr>0)?v*usdtInr:v;}   // typed number -> ₹
 function dispFromInr(cls,v){return (cls==='Crypto'&&cryptoCcy==='USDT'&&usdtInr>0)?v/usdtInr:v;}   // ₹ -> number shown in the box
@@ -325,12 +378,9 @@ async function mapLimitClient(items,limit,fn){const ret=[];let i=0;async functio
 async function fetchCoinDCXCrypto(tf){
   const t=await fetchT("https://api.coindcx.com/exchange/ticker",{},7000).then(r=>r.json());   // 1 call, times out fast if blocked
   if(!Array.isArray(t))throw new Error("cdx ticker");
-  // USDT→INR from CoinDCX's own markets (BTCINR/BTCUSDT ratio, else USDTINR)
-  // CoinDCX USDT markets (liquid) + CoinDCX's own USDT→INR — this is how the CoinDCX app prices coins
+  // CoinDCX USDT markets (liquid) × CoinDCX's own USDT→INR — this is how the CoinDCX app prices coins
   const usdtBy={}; t.forEach(x=>{if(x.market&&x.market.endsWith('USDT'))usdtBy[x.market.slice(0,-4)]=+x.last_price;});
-  const bt=t.find(x=>x.market==='BTCINR'),bu=t.find(x=>x.market==='BTCUSDT'),ui=t.find(x=>x.market==='USDTINR');
-  if(bt&&bu&&+bu.last_price>0)usdtInr=+bt.last_price/+bu.last_price; else if(ui&&+ui.last_price>0)usdtInr=+ui.last_price;
-  markRateNow('coindcx');
+  const rr=cdxRateFromTicker(t); if(rr>0){usdtInr=rr;markRateNow('coindcx');}
   const liveInr=base=>{const u=usdtBy[base];return (u>0&&usdtInr>0)?u*usdtInr:0;};
   const rows=t.filter(x=>x.market&&x.market.endsWith("INR"))
     .map(x=>{const base=x.market.slice(0,-3);const inrLast=+x.last_price;return {market:x.market,base,last:liveInr(base)||inrLast,vol:(+x.volume||0)*(inrLast||0)};})
@@ -344,7 +394,8 @@ async function fetchCoinDCXCrypto(tf){
       for(const k of rev){const c=+k.close;if(!isFinite(c))continue;close.push(c);high.push(+k.high);low.push(+k.low);times.push(+k.time);vol.push(+k.volume||0);}
       if(close.length<41)return null;
       const f=r.last/close[close.length-1]; if(f>0.2&&f<5){for(let i=0;i<close.length;i++){close[i]*=f;high[i]*=f;low[i]*=f;}} else {close[close.length-1]=r.last;}  // rescale INR candles to the live (USDT-based) price (volume unchanged)
-      return {sym:r.market,tk:r.base,name:r.base,close,high,low,times,vol,price:r.last};
+      // carry the venue's OWN $ number and the rate that built the ₹, so display never has to guess
+      return {sym:r.market,tk:r.base,name:r.base,close,high,low,times,vol,price:r.last,priceUsd:usdtBy[r.base]||0,rateUsed:usdtInr||0};
     }catch(e){return null;}
   });
   return assets.filter(Boolean);
@@ -791,10 +842,14 @@ function refreshStaleFlags(){
   const sig=lastResults.map(r=>(liveStale(r)?'1':'0')+r.asset.sym).join(',');
   if(sig!==_staleSig){_staleSig=sig;render(lastResults);}   // re-sort/re-flag only when something actually changed
 }
-function applyQuotes(map){
+/* `usdMap` is the venue's OWN dollar number per symbol — never derived from `map`. Both arrive
+   from the same ticker read, so ₹ and $ are two independent readings of one snapshot rather than
+   one reconstructed from the other through a rate that may not be the rate that built it. */
+function applyQuotes(map,usdMap){
   let touched=false;
   lastResults.forEach(r=>{const q=map[r.asset.sym];if(q&&isFinite(q)){r.sig.price=q;touched=true;
-    const id=id4(r.asset.sym),txt=fmtR(r)(q);
+    const u=usdMap&&+usdMap[r.asset.sym]; if(u>0)r.sig.priceUsd=u;
+    const id=id4(r.asset.sym),txt=livePriceTxt(r);
     const el=document.getElementById('px_'+id);if(el)el.textContent=txt;
     document.querySelectorAll('.lp'+id).forEach(e=>e.textContent=txt);   // live price quoted inside the LATE/MISSED warning
   }});
@@ -808,18 +863,17 @@ async function pollQuotes(){
     try{const t=await fetchT("https://api.coindcx.com/exchange/ticker",{},6000).then(r=>r.json());
       if(Array.isArray(t)){
         const usdtBy={};t.forEach(x=>{if(x.market&&x.market.endsWith('USDT'))usdtBy[x.market.slice(0,-4)]=+x.last_price;});
-        const bt=t.find(x=>x.market==='BTCINR'),bu=t.find(x=>x.market==='BTCUSDT'),ui=t.find(x=>x.market==='USDTINR');
-        if(bt&&bu&&+bu.last_price>0)usdtInr=+bt.last_price/+bu.last_price; else if(ui&&+ui.last_price>0)usdtInr=+ui.last_price;
-        markRateNow('coindcx');
-        const by={};t.forEach(x=>{if(x.market&&x.market.endsWith('INR')){const base=x.market.slice(0,-3);const u=usdtBy[base];by[x.market]=(u>0&&usdtInr>0)?u*usdtInr:+x.last_price;}});
-        applyQuotes(by);}
+        const rr=cdxRateFromTicker(t); if(rr>0){usdtInr=rr;markRateNow('coindcx');}
+        // two parallel maps: ₹ for the ₹ view, the venue's OWN $ for the $ view — never one from the other
+        const by={},uBy={};t.forEach(x=>{if(x.market&&x.market.endsWith('INR')){const base=x.market.slice(0,-3);const u=usdtBy[base];if(u>0)uBy[x.market]=u;by[x.market]=(u>0&&usdtInr>0)?u*usdtInr:+x.last_price;}});
+        applyQuotes(by,uBy);}
     }catch(e){}
     return;
   }
   // Everything else — including HOSTED crypto (India server reaches CoinDCX): live prices from the server every poll
   try{const d=await(await fetch('/api/quotes?tab='+encodeURIComponent(activeTab))).json();
     setRate(d);   // freshest-wins: see setRate()
-    if(d.quotes)applyQuotes(d.quotes);
+    if(d.quotes)applyQuotes(d.quotes,d.usd);
   }catch(e){}
 }
 
@@ -941,15 +995,15 @@ function card(r,i,isBuy){const{asset,sig,setup,reasons,dec,action,scope,asof,isI
      without its own hook the number inside the warning freezes at whatever it was when the card
      was drawn, which is the very staleness this warning exists to report. Tagged so applyQuotes
      refreshes it on the same 8s tick as the Current Price cell. */
-  const lp=v=>`<span class="lp${id4(asset.sym)}">${f(v)}</span>`;
+  const lp=()=>`<span class="lp${id4(asset.sym)}">${livePriceTxt(r)}</span>`;   // same text applyQuotes writes back on each tick
   const why = missed
-    ? `live price ${lp(sig.price)} has already run <b>past the entry zone</b> (${f(setup.entryLo)}–${f(setup.entryHi)}) — the move on this card has happened`
+    ? `live price ${lp()} has already run <b>past the entry zone</b> (${f(setup.entryLo)}–${f(setup.entryHi)}) — the move on this card has happened`
     : `live price ${room<=0?'is already at/through the stop':'has only ~'+room.toFixed(1)+'R left to the stop'}`;
   const ribbon = stale ? `<div class="ribbon">⚠ ${missed?'MISSED':'LATE'} — ${why}. This ${isBuy?'BUY':'SELL'} level has gone stale — don’t chase. Wait for a fresh setup${asset.cls==='Crypto'?', or hit 🔎 below for an averaged plan':''}.</div>` : '';
   /* Never leave a green "BUY NOW" sitting above a ribbon saying the entry is gone — the card
      would be arguing with itself, and the green line is the one people act on. */
   const actLine = missed
-    ? `⏭ TOO LATE — this ${isBuy?'long':'short'} needed ${f(setup.entryLo)}–${f(setup.entryHi)}; price is ${lp(sig.price)}`
+    ? `⏭ TOO LATE — this ${isBuy?'long':'short'} needed ${f(setup.entryLo)}–${f(setup.entryHi)}; price is ${lp()}`
     : actionText(action,r);
   const actCls = missed ? 'exit' : action.cls;
   return `<div class="tc ${open} ${isBuy?'':'sellcard'} ${stale?'stale':''}">${ribbon}
@@ -966,7 +1020,7 @@ function card(r,i,isBuy){const{asset,sig,setup,reasons,dec,action,scope,asof,isI
       ${mtfBadge(mtf)}
       ${sparkline(series,isBuy)}
       <div class="kv" style="margin-top:6px">
-        <div class="k">Current Price</div><div class="v" id="px_${id4(asset.sym)}">${f(sig.price)}</div>
+        <div class="k">Current Price${venueNote(r)}</div><div class="v" id="px_${id4(asset.sym)}">${livePriceTxt(r)}</div>
         <div class="k">Trade Type</div><div class="v">${setup.type}</div>
         <div class="k">Entry Zone</div><div class="v">${f(setup.entryLo)} – ${f(setup.entryHi)}</div>
         <div class="k">Support / Resistance</div><div class="v">${f(setup.dir>0?setup.support:sig.lo20)} / ${f(setup.dir>0?sig.hi20:setup.resistance)}</div>
