@@ -175,8 +175,7 @@ test("rate ordering never compares the server's clock against the browser's",()=
      as "older" — permanently — and $ prices drifted while ₹ stayed correct. Ordering is by AGE
      now, which means the same thing on both machines. */
   const c=rateGuard();
-  c.markRateNow('coindcx');                                     // browser fetch: local clock, age 0
-  c.usdtInr=89.0;
+  c.usdtInr=89.0; c.markRateNow('coindcx');                     // browser fetch: local clock, age 0
   // A server whose clock trails the browser by an hour. Under the old timestamp comparison every
   // one of these would have been discarded forever.
   for(const v of [89.5,90.0,90.5]){
@@ -190,18 +189,54 @@ test("rate ordering never compares the server's clock against the browser's",()=
   assert.strictEqual(direct.length,0,"a payload writer bypassing setRate() reintroduces the bug");
 });
 
+test("a source we got NO rate from must never block the one source that works",()=>{
+  /* THE REGRESSION THIS PINS — the one that broke the $ USDT toggle outright.
+     markRateNow() stamped the source unconditionally, but its callers assign the rate
+     conditionally:
+         if(bt&&bu&&...) usdtInr=...; else if(ui&&...) usdtInr=...;
+         markRateNow('coindcx');
+     A CoinDCX ticker that answered without a usable BTCINR/BTCUSDT or USDTINR pair therefore left
+     usdtInr at 0 while claiming a fresh CoinDCX rate. The server's FX rate was outranked and
+     dropped, and because pollQuotes re-stamps every 8s the 5-minute escape hatch never opened.
+     usdtInr stayed 0 forever and every $ price silently printed in ₹. */
+  const c=rateGuard();
+  c.markRateNow('coindcx');                                   // ticker answered, but no rate came out of it
+  assert.strictEqual(c.usdtInr,0,"fixture check: we hold no rate");
+  c.setRate({usdtInr:88.4,rateSrc:"fx",rateAge:0});
+  assert.strictEqual(c.usdtInr,88.4,"the only rate available must be accepted, whatever its source");
+  // and a real CoinDCX reading still outranks it afterwards
+  c.setRate({usdtInr:89.9,rateSrc:"coindcx",rateAge:0});
+  assert.strictEqual(c.usdtInr,89.9);
+});
+
+test("the page says so when the $ toggle cannot convert, instead of quietly showing ₹",()=>{
+  // cryptoPrice() falls back to ₹ when there is no rate. The number and its symbol are both
+  // right — the TOGGLE is what is lying, and it used to lie silently.
+  const html=require("node:fs").readFileSync(require("node:path").join(__dirname,"..","index.html"),"utf8");
+  const script=html.match(/<script>([\s\S]*)<\/script>/)[1];
+  assert.match(html,/id="ccyWarn"/,"there must be somewhere to say it");
+  assert.match(script,/function updateCcyWarn\(\)/);
+  assert.match(script,/cryptoCcy==='USDT'\s*&&\s*!\(usdtInr>0\)/,"it must trigger on exactly the silent-fallback case");
+  // it has to be refreshed wherever the rate or the tab can change, not just defined
+  const body=name=>{const i=script.indexOf("function "+name+"(");assert.ok(i>0,name+" not found");
+    return script.slice(i,i+1400);};
+  for(const fn of ["applyQuotes","render"])
+    assert.ok(body(fn).includes("updateCcyWarn()"),fn+" must refresh the warning");
+  assert.ok(script.includes("await ensureRate();updateCcyWarn();"),"and the toggle itself must refresh it");
+});
+
 test("a weaker rate source cannot displace a live one, but does take over when it goes quiet",()=>{
   /* $ is only right when it divides a ₹ price by the rate that BUILT it. When the browser reaches
      CoinDCX but the server cannot, both sources are live at once; ordering purely by freshness
      made them alternate every few seconds, which on screen looks like a wandering price. */
   const c=rateGuard();
-  c.markRateNow('coindcx'); c.usdtInr=89.0;
+  c.usdtInr=89.0; c.markRateNow('coindcx');
   c.setRate({usdtInr:86.4,rateSrc:"fx",rateAge:0});
   assert.strictEqual(c.usdtInr,89.0,"FX must not displace a live CoinDCX rate");
   c.setRate({usdtInr:89.4,rateSrc:"coindcx",rateAge:0});
   assert.strictEqual(c.usdtInr,89.4,"CoinDCX keeps updating itself");
   // CoinDCX stops responding: after the staleness window, FX is better than nothing.
-  c.markRateNow('coindcx'); c.usdtInr=89.4;
+  c.usdtInr=89.4; c.markRateNow('coindcx');
   c.__advance(6*60*1000);
   c.setRate({usdtInr:86.4,rateSrc:"fx",rateAge:0});
   assert.strictEqual(c.usdtInr,86.4,"FX must take over once CoinDCX has gone quiet");

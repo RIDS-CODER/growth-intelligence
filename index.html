@@ -153,6 +153,7 @@
     <div class="tabs" id="tabs"></div>
     <div class="seg" id="tf"><div data-tf="5m">5m</div><div data-tf="15m">15m</div><div data-tf="30m" class="on">30m</div><div data-tf="1h">1h</div><div data-tf="4h">4h</div><div data-tf="6h">6h</div><div data-tf="12h">12h</div><div data-tf="daily">1D</div></div>
     <div class="seg" id="ccy" style="display:none"><div data-ccy="INR" class="on">₹ INR</div><div data-ccy="USDT">$ USDT</div></div>
+    <div class="pstat" id="ccyWarn" style="display:none;color:#fbbf24"></div>
     <button class="btn" id="scanBtn" onclick="runScan()">↻ Refresh now</button>
     <div class="progress"><div class="pf" id="pf"></div></div>
     <div class="pstat" id="pstat">starting…</div>
@@ -228,7 +229,7 @@ function setRate(d){
   if(!d||!(d.usdtInr>0))return;
   const src=d.rateSrc||"fx";
   const at=Date.now()-Math.max(0,+d.rateAge||0);      // normalise the reading into THIS clock
-  if(usdtInrAt){
+  if(usdtInrAt&&usdtInr>0){                           // ...only defend a rate we actually HOLD
     const rank=RATE_RANK[src]||0, have=RATE_RANK[usdtInrSrc]||0;
     if(rank<have && Date.now()-usdtInrAt<RATE_STALE)return;   // a weaker source cannot displace a live one
     if(src===usdtInrSrc && at<usdtInrAt)return;               // same source: an older reading loses
@@ -236,8 +237,18 @@ function setRate(d){
   usdtInr=d.usdtInr; usdtInrAt=at; usdtInrSrc=src;
   if(d.rateSrc)scalpRateSrc=d.rateSrc;
 }
-// the browser's own fetch is by definition current at the moment it lands
-function markRateNow(src){ usdtInrAt=Date.now(); usdtInrSrc=src||'coindcx'; }
+/* The browser's own fetch is current the moment it lands — but ONLY claim the source if a rate
+   actually came out of it. Its callers assign conditionally and then mark unconditionally:
+
+     if(bt&&bu&&...) usdtInr=...; else if(ui&&...) usdtInr=...;
+     markRateNow('coindcx');
+
+   so a CoinDCX ticker that answered without a usable BTCINR/BTCUSDT or USDTINR pair left usdtInr
+   at 0 while stamping "we hold a fresh CoinDCX rate". The server's FX rate — the only one left —
+   was then outranked and rejected, and because pollQuotes re-stamps every 8 seconds the 5-minute
+   escape hatch never opened. usdtInr stayed 0 permanently and every $ price silently printed in
+   ₹ instead. Claiming a rate we do not have is what broke the USDT toggle. */
+function markRateNow(src){ if(!(usdtInr>0))return; usdtInrAt=Date.now(); usdtInrSrc=src||'coindcx'; }
 let lastCryptoMode="";                                  // 'coindcx' (browser) | 'server-coindcx' (India host) | 'global'
 function setBtcNote(btc){
   const el=document.getElementById('btcNote'); if(!el)return;
@@ -274,6 +285,16 @@ async function ensureRate(){
 }
 const money=(v,d=2)=>v==null?'—':'₹'+Number(v).toLocaleString('en-IN',{minimumFractionDigits:d,maximumFractionDigits:d});
 const fmtVal=(v,d,ix)=>v==null?'—':(ix?Number(v).toLocaleString('en-IN',{minimumFractionDigits:d,maximumFractionDigits:d})+' pts':money(v,d));
+/* If the toggle says $ but no USDT/INR rate has arrived, cryptoPrice() prints ₹ instead. The
+   number and its symbol are both correct — it is the TOGGLE that is lying, and silently. That is
+   indistinguishable from "USDT prices are broken", so say it out loud rather than let the page
+   quietly disagree with the button the user just pressed. */
+function updateCcyWarn(){
+  const el=document.getElementById('ccyWarn'); if(!el)return;
+  const bad = activeTab==='Crypto' && cryptoCcy==='USDT' && !(usdtInr>0);
+  el.style.display = bad ? 'block' : 'none';
+  if(bad) el.textContent='⚠ No USDT/INR rate yet — showing ₹. Prices are correct; the $ conversion is unavailable.';
+}
 // crypto price in the chosen currency (server computes in ₹; convert to USDT for display via CoinDCX's rate)
 function cryptoPrice(v){if(v==null)return '—';
   if(cryptoCcy==='USDT'&&usdtInr>0){const u=v/usdtInr;return '$'+u.toLocaleString('en-US',{minimumFractionDigits:u<5?4:2,maximumFractionDigits:u<5?4:2});}
@@ -777,6 +798,7 @@ function applyQuotes(map){
     const el=document.getElementById('px_'+id);if(el)el.textContent=txt;
     document.querySelectorAll('.lp'+id).forEach(e=>e.textContent=txt);   // live price quoted inside the LATE/MISSED warning
   }});
+  updateCcyWarn();   // the rate may have just arrived (or gone) on this same poll
   if(touched){const now=new Date();document.getElementById('lastUpd').textContent='LTP '+now.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true});refreshStaleFlags();}
 }
 async function pollQuotes(){
@@ -865,6 +887,7 @@ function render(results){
   // Guard: an error payload (or any response without `results`) would otherwise leave
   // lastResults undefined and permanently break the quote poller until a page reload.
   lastResults=Array.isArray(results)?results:[];
+  updateCcyWarn();
   const ms=getMinScore();
   // clean (actionable) setups first, "late" ones (price already at/through the stop) pushed to the bottom
   const mAgree=r=>r.mtf?r.mtf.agree:0;   // higher timeframe agreement count
@@ -1782,7 +1805,7 @@ function renderTabs(){const t=document.getElementById('tabs');t.innerHTML='';["S
   if(activeTab==='Crypto'){setCryptoNote(lastCryptoMode);}
   else document.getElementById('cryptoNote').style.display='none';}
 document.getElementById('tf').addEventListener('click',e=>{const d=e.target.closest('[data-tf]');if(!d)return;timeframe=d.dataset.tf;[...document.querySelectorAll('#tf div')].forEach(x=>x.classList.toggle('on',x===d));runScan();});
-document.getElementById('ccy').addEventListener('click',async e=>{const d=e.target.closest('[data-ccy]');if(!d)return;cryptoCcy=d.dataset.ccy;[...document.querySelectorAll('#ccy div')].forEach(x=>x.classList.toggle('on',x===d));if(cryptoCcy==='USDT')await ensureRate();if(lastResults.length)render(lastResults);});
+document.getElementById('ccy').addEventListener('click',async e=>{const d=e.target.closest('[data-ccy]');if(!d)return;cryptoCcy=d.dataset.ccy;[...document.querySelectorAll('#ccy div')].forEach(x=>x.classList.toggle('on',x===d));if(cryptoCcy==='USDT')await ensureRate();updateCcyWarn();if(lastResults.length)render(lastResults);});
 setInterval(tickCountdown,1000);
 setInterval(pollQuotes,8000);
 setInterval(getStatus,60000);
