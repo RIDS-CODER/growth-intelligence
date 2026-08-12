@@ -203,22 +203,41 @@
 <script>
 let activeTab="Stocks",timeframe="30m",lastResults=[],status={},refreshAt=0;
 let cryptoCcy="INR", usdtInr=0, cryptoSource="";       // ₹/USDT toggle + USDT→INR rate + active source label
-/* ONE rate, and only the FRESHEST one wins.
+/* ONE rate. The BEST source wins; within a source, the FRESHEST reading wins.
    Panels refresh on different clocks (20s, 30s, 45s) and the server caches some payloads, so
    responses arrive out of order. With plain last-writer-wins a slow panel could stamp an older
    rate over a newer one — and since $ is ₹ divided by this, a stale rate makes every USDT price
-   drift while ₹ stays correct. `rateAt` says when the server read the rate; an older reading is
-   ignored. */
-let usdtInrAt=0;
+   drift while ₹ stays correct.
+
+   ORDER BY AGE, NEVER BY TIMESTAMP. The first version of this guard compared the server's
+   `rateAt` — a reading of the SERVER's clock — against stamps this browser had written with its
+   own Date.now(). Two clocks, one variable: a browser running even a few seconds ahead of the
+   server judged every subsequent server reading "older" and dropped it permanently, freezing the
+   rate. The server now reports `rateAge`, how old its reading is; a duration means the same thing
+   on both machines, so subtracting it from the local clock puts every reading on one timeline.
+
+   AND NEVER MIX SOURCES BY FRESHNESS. $ is only right when it divides a ₹ price by the same rate
+   that BUILT it — CoinDCX's own USDT/INR for CoinDCX ₹, the FX rate for Binance×FX ₹. When the
+   browser reaches CoinDCX but the server can't, both sources are live at once and a pure
+   freshness race makes them alternate every few seconds, which reads as a wandering price. The
+   exchange the user actually trades on wins; FX only takes over when CoinDCX has gone quiet. */
+let usdtInrAt=0, usdtInrSrc="";
+const RATE_RANK={coindcx:2,fx:1};                     // CoinDCX is the venue being traded — its rate is the truth
+const RATE_STALE=5*60*1000;                           // ...unless it has stopped arriving, then FX may take over
 function setRate(d){
   if(!d||!(d.usdtInr>0))return;
-  const at=+d.rateAt||0;
-  if(at&&usdtInrAt&&at<usdtInrAt)return;              // an older snapshot must not overwrite a newer one
-  usdtInr=d.usdtInr; usdtInrAt=at||Date.now();
+  const src=d.rateSrc||"fx";
+  const at=Date.now()-Math.max(0,+d.rateAge||0);      // normalise the reading into THIS clock
+  if(usdtInrAt){
+    const rank=RATE_RANK[src]||0, have=RATE_RANK[usdtInrSrc]||0;
+    if(rank<have && Date.now()-usdtInrAt<RATE_STALE)return;   // a weaker source cannot displace a live one
+    if(src===usdtInrSrc && at<usdtInrAt)return;               // same source: an older reading loses
+  }
+  usdtInr=d.usdtInr; usdtInrAt=at; usdtInrSrc=src;
   if(d.rateSrc)scalpRateSrc=d.rateSrc;
 }
-// the browser's own CoinDCX fetch is by definition current at the moment it lands
-function markRateNow(){ usdtInrAt=Date.now(); }
+// the browser's own fetch is by definition current at the moment it lands
+function markRateNow(src){ usdtInrAt=Date.now(); usdtInrSrc=src||'coindcx'; }
 let lastCryptoMode="";                                  // 'coindcx' (browser) | 'server-coindcx' (India host) | 'global'
 function setBtcNote(btc){
   const el=document.getElementById('btcNote'); if(!el)return;
@@ -249,8 +268,8 @@ async function ensureRate(){
   if(usdtInr>0)return usdtInr;
   try{const t=await fetchT("https://api.coindcx.com/exchange/ticker",{},6000).then(r=>r.json());
     if(Array.isArray(t)){const bt=t.find(x=>x.market==='BTCINR'),bu=t.find(x=>x.market==='BTCUSDT'),ui=t.find(x=>x.market==='USDTINR');
-      if(bt&&bu&&+bu.last_price>0)usdtInr=+bt.last_price/+bu.last_price;else if(ui&&+ui.last_price>0)usdtInr=+ui.last_price;markRateNow();}}catch(e){}
-  if(!(usdtInr>0)){try{const j=await fetchT("https://open.er-api.com/v6/latest/USD",{},6000).then(r=>r.json());if(j&&j.rates&&j.rates.INR){usdtInr=j.rates.INR;markRateNow();}}catch(e){}}
+      if(bt&&bu&&+bu.last_price>0)usdtInr=+bt.last_price/+bu.last_price;else if(ui&&+ui.last_price>0)usdtInr=+ui.last_price;markRateNow('coindcx');}}catch(e){}
+  if(!(usdtInr>0)){try{const j=await fetchT("https://open.er-api.com/v6/latest/USD",{},6000).then(r=>r.json());if(j&&j.rates&&j.rates.INR){usdtInr=j.rates.INR;markRateNow('fx');}}catch(e){}}
   return usdtInr;
 }
 const money=(v,d=2)=>v==null?'—':'₹'+Number(v).toLocaleString('en-IN',{minimumFractionDigits:d,maximumFractionDigits:d});
@@ -290,7 +309,7 @@ async function fetchCoinDCXCrypto(tf){
   const usdtBy={}; t.forEach(x=>{if(x.market&&x.market.endsWith('USDT'))usdtBy[x.market.slice(0,-4)]=+x.last_price;});
   const bt=t.find(x=>x.market==='BTCINR'),bu=t.find(x=>x.market==='BTCUSDT'),ui=t.find(x=>x.market==='USDTINR');
   if(bt&&bu&&+bu.last_price>0)usdtInr=+bt.last_price/+bu.last_price; else if(ui&&+ui.last_price>0)usdtInr=+ui.last_price;
-  markRateNow();
+  markRateNow('coindcx');
   const liveInr=base=>{const u=usdtBy[base];return (u>0&&usdtInr>0)?u*usdtInr:0;};
   const rows=t.filter(x=>x.market&&x.market.endsWith("INR"))
     .map(x=>{const base=x.market.slice(0,-3);const inrLast=+x.last_price;return {market:x.market,base,last:liveInr(base)||inrLast,vol:(+x.volume||0)*(inrLast||0)};})
@@ -741,7 +760,7 @@ async function pollQuotes(){
         const usdtBy={};t.forEach(x=>{if(x.market&&x.market.endsWith('USDT'))usdtBy[x.market.slice(0,-4)]=+x.last_price;});
         const bt=t.find(x=>x.market==='BTCINR'),bu=t.find(x=>x.market==='BTCUSDT'),ui=t.find(x=>x.market==='USDTINR');
         if(bt&&bu&&+bu.last_price>0)usdtInr=+bt.last_price/+bu.last_price; else if(ui&&+ui.last_price>0)usdtInr=+ui.last_price;
-        markRateNow();
+        markRateNow('coindcx');
         const by={};t.forEach(x=>{if(x.market&&x.market.endsWith('INR')){const base=x.market.slice(0,-3);const u=usdtBy[base];by[x.market]=(u>0&&usdtInr>0)?u*usdtInr:+x.last_price;}});
         applyQuotes(by);}
     }catch(e){}

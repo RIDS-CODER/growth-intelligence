@@ -461,14 +461,25 @@ function priceRate(){
 }
 // 'coindcx' = ₹ and $ both exact vs CoinDCX · 'fx' = $ exact vs the global market, ₹ runs ~1–4% under CoinDCX (India premium)
 function priceRateSrc(){return (cryptoMode==='coindcx'&&cdxUsdtInr()>0)?'coindcx':'fx';}
+/* HOW OLD this rate reading is, in milliseconds — a DURATION, not a timestamp.
+   The browser used to order rate updates by comparing our `rateAt` (this machine's clock) against
+   stamps it had written with its own Date.now(). Two clocks feeding one variable: a browser running
+   even slightly ahead of the server judged every later server reading "older" and dropped it for
+   good, freezing the rate while ₹ kept ticking — the exact drift the ordering exists to prevent.
+   An age survives the clock difference: the browser subtracts it from its own now. */
+function priceRateAge(){
+  const t=(cryptoMode==='coindcx'&&cdxUsdtInr()>0)?cdxTickerAt:fxAt;
+  return t?Math.max(0,Date.now()-t):0;
+}
 /* THE RATE IS NEVER CACHED, even when the payload around it is.
    Every heavy endpoint is cached — scan and movers for 40s, the backtest for 10 min, 🎢 Dump &
    Bounce for 30 MINUTES — and each used to bake `usdtInr` into the cached object. The browser
    keeps ONE global rate on last-writer-wins, so a Dump & Bounce refresh could overwrite it with a
    rate half an hour old, and every panel then divided a FRESH ₹ price by a STALE rate: ₹ looked
    correct while $ drifted. Reading the rate costs nothing, so it is re-stamped on the way out —
-   cache hit or not — and carries `rateAt` so the browser can reject an out-of-order update. */
-function withLiveRate(o){ return {...o, usdtInr:priceRate(), rateSrc:priceRateSrc(), rateAt:Date.now()}; }
+   cache hit or not — and carries `rateAge` so the browser can reject an out-of-order update
+   without having to trust that our clock and its clock agree. */
+function withLiveRate(o){ return {...o, usdtInr:priceRate(), rateSrc:priceRateSrc(), rateAge:priceRateAge(), rateAt:Date.now()}; }
 const isStableBase=b=>STABLE_TK.has(b)||/(UP|DOWN|BULL|BEAR)$/.test(b)||/^\d/.test(b);
 // CoinGecko fallback — works from ANY server region (incl. US), INR native. Uses your demo key if set.
 const cgHeaders=()=>COINGECKO_KEY?{"x-cg-demo-api-key":COINGECKO_KEY}:{};
@@ -1757,6 +1768,14 @@ function readBody(req){return new Promise((resolve,reject)=>{let d="";req.on("da
 // Compute signals from BROWSER-supplied CoinDCX candles (browser is in India → correct ₹ prices). tf + assets[{sym,tk,name,close[],high[],low[],times[],price}]
 function cryptoSignalsFrom(payload){
   const tf=payload.tf||"1h", results=[];
+  /* WHEN these candles were read. The browser fetched them from CoinDCX a moment before POSTing,
+     so "now" is accurate to a second or two — the same standard loadCoinDCX/loadBinance use.
+     Without it processAsset falls back to the last candle's OPEN time, which on a 30m chart is up
+     to 30 minutes in the past and drifts older until the bar rolls: the card read "📡 04:09 pm" at
+     04:38 pm even though its price was 8 seconds old. Longer timeframe, worse it looked — which is
+     exactly why this showed up on the 30m tab and not on 5m. Stamped here rather than trusted from
+     the payload so a client can't backdate or post-date a card. */
+  const fetchedAt=Date.now();
   // BTC regime from the browser-supplied candles, so the alt-long filter applies on the client path too
   const btc=(payload.assets||[]).find(a=>a.tk==='BTC'||a.sym==='BTCINR'||a.sym==='BTCUSDT');
   if(btc&&btc.close&&btc.close.length>41){const st=btcStateFromSeries(btc.close,btc.high,btc.low,tf); if(st)BTC_STATE=st;}
@@ -1764,7 +1783,7 @@ function cryptoSignalsFrom(payload){
     try{
       if(!a.close||a.close.length<41)return;
       const asset={sym:a.sym,tk:a.tk,name:a.name||a.tk,cls:"Crypto",src:"cg"};
-      const data={close:a.close,high:a.high,low:a.low,times:a.times,vol:a.vol,price:a.price};
+      const data={close:a.close,high:a.high,low:a.low,times:a.times,vol:a.vol,price:a.price,mtime:fetchedAt};
       const r=processAsset(asset,data,tf);
       r.priceTag="live · CoinDCX ₹";     // browser-fetched from the Indian exchange
       results.push(r);
@@ -2268,7 +2287,7 @@ if(require.main===module){
 module.exports={IND,computeSignal,buildSetup,buildReasons,confidenceOf,alertEligible,fmtAlert,sendTelegram,signalSince,actionNow,parseCandles,authURL,scan,universeFor,fmtTime,
   loadBinance,loadCoinDCX,loadCrypto,ensureCryptoUniverse,usdInr,resampleSeries,tfCfg,getCRYPTO:()=>CRYPTO,getMode:()=>cryptoMode,
   backtestSeries,scoreSeriesArr,backtest,processAsset,blendResearch,assetBtScore,cdxLiveInr,cdxUsdtInr,topMovers,ticker24,
-  trackSetups,sweepSetups,updateSetupWithPrice,setupStats,markReversals,realizedPct,volMetrics,priceRate,priceRateSrc,
+  trackSetups,sweepSetups,updateSetupWithPrice,setupStats,markReversals,realizedPct,volMetrics,priceRate,priceRateSrc,priceRateAge,cryptoSignalsFrom,
   planTrackables,fmtPlanAlert,dumpBounceAlerts,
   resolveAsset,positionSignal,positionsSweep,addPosition,fmtPosAlert,posPnl,allRecipients,
   __getPositions:()=>POSITIONS,__resetPositions:()=>{POSITIONS=[];},
