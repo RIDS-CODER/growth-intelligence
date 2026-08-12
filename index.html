@@ -264,7 +264,12 @@ function setCryptoNote(mode){
     const via = mode==='coindcx' ? 'your browser' : 'the India server';
     cn.innerHTML='<div class="infobox" style="border-color:rgba(34,197,94,.4)"><b>✅ Exact CoinDCX ₹ — live.</b> Prices come from CoinDCX via '+via+', so the ₹ here matches your CoinDCX screen. Both ₹ and $ USDT are exact. Place orders on CoinDCX using the setup’s direction and entry / stop / target levels.</div>';
   } else if(mode==='global'){
-    cn.innerHTML='<div class="infobox" style="border-color:rgba(240,185,11,.35)"><b>ℹ️ Crypto is on the global ₹ feed right now.</b> This server can’t reach CoinDCX, so ₹ values run ~1–4% below your CoinDCX screen (the India premium). <b>Your decisions are unaffected:</b> direction, signal and all % levels (entry / stop / targets, risk:reward) match CoinDCX, and $ USDT values are exact. For exact ₹, host in an India region or run locally.</div>';
+    /* This used to end "and $ USDT values are exact". That is false, and it is the claim that sent
+       someone hunting a bug that was never in the code: it is exact against the GLOBAL market, not
+       against CoinDCX. The India premium only explains the ₹ gap; the coin's own price also differs
+       between venues, and on a thin alt that gap dwarfs the premium — PROM read $3.43 here against
+       $3.21 on CoinDCX, 6.85% apart, which no rate can produce (the rate cancels in ₹ ÷ rate). */
+    cn.innerHTML='<div class="infobox" style="border-color:rgba(240,185,11,.55)"><b>⚠️ These prices are from the GLOBAL market (Binance) — not CoinDCX.</b> This server can’t reach CoinDCX. Two things follow: ₹ runs ~1–4% under CoinDCX (the India premium), and — the one that bites — <b>the coin itself can trade at a different price on the two exchanges</b>. On majors that gap is small; on thin alt-coins it can be <b>several percent</b>, so a $ price here need not match the $ on your CoinDCX screen. <b>Direction, signal and every % level</b> (entry / stop / targets, risk : reward) still hold — those are ratios, and ratios survive the gap. <b>Do not read the absolute price as a CoinDCX quote.</b> For CoinDCX numbers, host in an India region (e.g. DigitalOcean Bangalore) or run locally.</div>';
   } else {
     cn.innerHTML='<div class="infobox"><b>⏳ Loading crypto feed…</b></div>';
   }
@@ -300,6 +305,16 @@ function cryptoPrice(v){if(v==null)return '—';
   if(cryptoCcy==='USDT'&&usdtInr>0){const u=v/usdtInr;return '$'+u.toLocaleString('en-US',{minimumFractionDigits:u<5?4:2,maximumFractionDigits:u<5?4:2});}
   return '₹'+Number(v).toLocaleString('en-IN',{minimumFractionDigits:v<5?4:2,maximumFractionDigits:v<5?4:2});}
 const fmtR=r=>v=>r.asset.cls==='Crypto'?cryptoPrice(v):fmtVal(v,r.dec,r.isIndex);   // per-result formatter
+/* WHICH EXCHANGE this number is from, stamped on the number itself. Without it the price is just
+   a price, and there is no way to tell a CoinDCX quote from a Binance one that happens to be 6%
+   away — which is exactly the confusion this is here to end. The server already decides this per
+   result; it was only being shown in small print at the top of the card. */
+function venueNote(r){
+  if(!r||r.asset.cls!=='Crypto')return '';
+  return /CoinDCX/.test(r.priceTag||'')
+    ? ' <span class="sub">· CoinDCX</span>'
+    : ' <span class="sub" style="color:#fbbf24" title="This server cannot reach CoinDCX, so prices come from the global market. On thin alt-coins the two venues can differ by several percent.">· Binance (global), <b>not</b> CoinDCX</span>';
+}
 // Currency-aware input conversion: the user types in the currency they SEE (₹ or $ USDT); we always STORE ₹.
 function inrFromDisp(cls,v){return (cls==='Crypto'&&cryptoCcy==='USDT'&&usdtInr>0)?v*usdtInr:v;}   // typed number -> ₹
 function dispFromInr(cls,v){return (cls==='Crypto'&&cryptoCcy==='USDT'&&usdtInr>0)?v/usdtInr:v;}   // ₹ -> number shown in the box
@@ -966,7 +981,7 @@ function card(r,i,isBuy){const{asset,sig,setup,reasons,dec,action,scope,asof,isI
       ${mtfBadge(mtf)}
       ${sparkline(series,isBuy)}
       <div class="kv" style="margin-top:6px">
-        <div class="k">Current Price</div><div class="v" id="px_${id4(asset.sym)}">${f(sig.price)}</div>
+        <div class="k">Current Price${venueNote(r)}</div><div class="v" id="px_${id4(asset.sym)}">${f(sig.price)}</div>
         <div class="k">Trade Type</div><div class="v">${setup.type}</div>
         <div class="k">Entry Zone</div><div class="v">${f(setup.entryLo)} – ${f(setup.entryHi)}</div>
         <div class="k">Support / Resistance</div><div class="v">${f(setup.dir>0?setup.support:sig.lo20)} / ${f(setup.dir>0?sig.hi20:setup.resistance)}</div>

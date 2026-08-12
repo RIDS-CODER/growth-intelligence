@@ -209,6 +209,43 @@ test("a source we got NO rate from must never block the one source that works",(
   assert.strictEqual(c.usdtInr,89.9);
 });
 
+test("the page never claims a global-feed $ price matches CoinDCX",()=>{
+  /* It used to end the global-feed notice with "and $ USDT values are exact". Exact against the
+     GLOBAL market — not against CoinDCX. The India premium explains only the ₹ gap; the coin's own
+     price also differs between venues, and on a thin alt that dwarfs the premium. PROM read $3.43
+     in the app against $3.21 on CoinDCX — 6.85% apart, which no rate can produce, because the rate
+     cancels: ₹ = price×rate, so $ = ₹÷rate = price. A wrong claim in the UI sent someone hunting a
+     bug that was never in the code. */
+  const html=require("node:fs").readFileSync(require("node:path").join(__dirname,"..","index.html"),"utf8");
+  // only what the user is SHOWN — the comment above it quotes the old wording on purpose
+  const g=html.indexOf("mode==='global'");
+  assert.ok(g>0,"could not find the global-feed branch");
+  const seg=html.slice(g,html.indexOf("} else {",g));
+  const note=seg.slice(seg.indexOf("cn.innerHTML="));
+  assert.ok(!/\$ USDT values are exact/.test(note),
+    "the global feed cannot promise CoinDCX-exact $ prices");
+  assert.match(note,/not CoinDCX/,"it must name the venue plainly");
+  assert.match(note,/several percent/,"and size the gap, since 'small' is what misled");
+  assert.match(note,/ratios/,"while still saying what DOES survive the gap");
+});
+
+test("every crypto price is stamped with the exchange it came from",()=>{
+  const html=require("node:fs").readFileSync(require("node:path").join(__dirname,"..","index.html"),"utf8");
+  const script=html.match(/<script>([\s\S]*)<\/script>/)[1];
+  const vm=require("node:vm");
+  const i=script.indexOf("function venueNote(r)");
+  assert.ok(i>0,"venueNote must exist");
+  const ctx=vm.createContext({});
+  vm.runInContext(script.slice(i,script.indexOf("// Currency-aware input conversion"))+
+    ";globalThis.venueNote=venueNote;",ctx);
+  const mk=tag=>({asset:{cls:"Crypto"},priceTag:tag});
+  assert.match(ctx.venueNote(mk("live · CoinDCX ₹")),/CoinDCX/);
+  assert.ok(!/not<\/b> CoinDCX/.test(ctx.venueNote(mk("live · CoinDCX ₹"))),"a real CoinDCX price is not disclaimed");
+  assert.match(ctx.venueNote(mk("live · global ₹")),/not<\/b> CoinDCX/,"a global price must say so on the number itself");
+  assert.strictEqual(ctx.venueNote({asset:{cls:"Stock"},priceTag:"LIVE (broker)"}),"","stocks have no venue ambiguity");
+  assert.match(script,/Current Price\$\{venueNote\(r\)\}/,"and it must be rendered beside the price");
+});
+
 test("the page says so when the $ toggle cannot convert, instead of quietly showing ₹",()=>{
   // cryptoPrice() falls back to ₹ when there is no rate. The number and its symbol are both
   // right — the TOGGLE is what is lying, and it used to lie silently.
