@@ -194,3 +194,43 @@ test("every paper-bot tick-box applies on click, not on Save",()=>{
   }
   assert.match(html,/Save numbers/,"the button should say it is only for the typed fields");
 });
+
+/* ---------------- one rule, one definition ---------------- */
+
+test("the panel's verdict and the bot's decision come from the SAME rule",async()=>{
+  // Two copies of "would the bot take this?" would drift, and the panel would start promising
+  // trades the bot refuses. So the rule lives in server.js and is handed to paper.js.
+  const states=['running','building','late','fading','quiet'];
+  for(const side of ['buy','short']) for(const state of states){
+    const row={sym:'X',tk:'X',plan:{now:side,price:100,
+      long:{dir:1,entryLo:90,entryHi:95,entry:92.5,stop:85,riskPct:8,targets:[105,115,130],ret:[13,24,40],rrr:2.1},
+      short:{dir:-1,entryLo:105,entryHi:110,entry:107.5,stop:118,riskPct:9,targets:[95,88,80],ret:[11,18,25],rrr:1.9}},
+      bump:{state,tf:'4h'},
+      planBt:{long:{n:20,winRate:60,medPct:3,thin:false},short:{n:20,winRate:60,medPct:3,thin:false}}};
+    const panelSays=S.dumpBotTakes(row).take;
+    const p=mk({dumpBounce:async()=>({rows:[row]})}); p.reset();
+    p.setConfig({sources:only("dump"),requireEdge:false,minConfPct:0,minStopPct:0});
+    p.start(); const st=await p.tick(); p.stop();
+    const botDid=st.funnel.eligible>0;
+    assert.strictEqual(panelSays,botDid,`${side} + ${state}: panel says ${panelSays}, bot did ${botDid}`);
+  }
+});
+
+test("a waiting plan is reported as waiting, not as a rejection of the setup",()=>{
+  const base={sym:'X',bump:{state:'running'},plan:{now:'wait_buy',price:100,
+    long:{dir:1,entryHi:95},short:{dir:-1,entryLo:105}}};
+  const v=S.dumpBotTakes(base);
+  assert.strictEqual(v.take,false);
+  assert.match(v.why,/waiting/,"price simply is not in a zone yet — that is not a quality judgement");
+});
+
+test("every Dump & Bounce row carries the bot's verdict, and the payload summarises it",async()=>{
+  const d=await S.dumpBounce(true);
+  assert.ok(d.botSummary,"the panel needs a headline count to be useful before you enable the desk");
+  for(const r of d.rows){
+    assert.ok(r.botTake&&typeof r.botTake.take==='boolean',r.sym+" has no bot verdict");
+    assert.ok(r.botTake.why,"and it must say why");
+    assert.strictEqual(r.botTake.take,S.dumpBotTakes(r).take);
+  }
+  assert.strictEqual(d.botSummary.takeable+d.botSummary.skipped,d.rows.length);
+});

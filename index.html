@@ -1277,6 +1277,7 @@ function nlPlan(r){
       <div style="font-size:14px;font-weight:800;color:${col}">${pi.icon||''} ${pi.label||''}</div>
       <div class="sub" style="margin-top:3px;line-height:1.5;color:var(--txt)">${pi.lead||''}${est}</div>
       ${wait?`<div class="sub" style="margin-top:4px">${wait}</div>`:''}
+      ${r.botTake?`<div class="sub" style="margin-top:5px;padding:5px 8px;border-radius:7px;background:rgba(255,255,255,.04);border:1px dashed var(--line);color:${r.botTake.take?'var(--buy)':'var(--muted)'}">🤖 <b>Paper bot: ${r.botTake.take?'would take this':'would skip'}</b> — ${r.botTake.why}.</div>`:''}
       ${nlSide(p.long,'① LONG the bounce','counter-trend — take profit into strength.',buyLive||p.now==='wait_buy')}
       ${nlSide(p.short,'② SHORT the failure','with-trend — this is the higher-probability side.',shortLive||p.now==='wait_short')}
       <div class="sub" style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--line)">Floor <b>${P(p.floor)}</b> · where bumps have died <b>${P(p.roof)}</b> · ${r.stale?'price at last scan':'live'} <b>${P(p.price)}</b>${r.stale?' <span style="color:#fbbf24" title="No live quote reached the browser, so this price and the instruction above are from the last full scan and may be stale.">⚠ not live</span>':''}</div>
@@ -1531,7 +1532,7 @@ function renderListShell(){
   el.innerHTML=`<div class="tradespanel" style="border-color:rgba(192,132,252,.45)">
     <h3>🎢 Dump &amp; Bounce <span class="sub">— coins bleeding from an old high, with the bump timed</span>
       <button class="btn" style="padding:2px 9px;font-size:11px" onclick="loadListings(1)">↻ rescan</button>
-      <span class="sub">${d&&d.ts?'· levels from '+new Date(d.ts).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true}):''}${d?' · '+d.found+' of '+d.scanned+' coins qualify':''}${listState.pxAt?' · prices ⟳ 20s':''}</span></h3>
+      <span class="sub">${d&&d.ts?'· levels from '+new Date(d.ts).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true}):''}${d?' · '+d.found+' of '+d.scanned+' coins qualify':''}${d&&d.botSummary?' · <b>🤖 bot would take '+d.botSummary.takeable+'</b> of '+(d.botSummary.takeable+d.botSummary.skipped):''}${listState.pxAt?' · prices ⟳ 20s':''}</span></h3>
     <div class="sub" style="line-height:1.55;margin:2px 0 8px">
       The <b>XAI / COOKIE / VANA</b> shape: a coin peaks, falls and falls and falls, throws one sharp bump, then falls again.
       Every card gives you <b>both trades that shape offers</b> — <b style="color:var(--buy)">buy the bounce</b> (counter-trend, fast)

@@ -11,7 +11,7 @@
      • Halts for the day at the daily loss limit.
    Fees/slippage default to 0 so you can judge raw signal accuracy.
    ============================================================ */
-module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, dumpBounce }) {
+module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, dumpBounce, dumpRule }) {
   const fs = require('fs'), path = require('path');
   const FILE = path.join(dir, 'paper-state.json');
   const TF_MIN = {'5m':5,'15m':15,'30m':30,'1h':60,'4h':240,'6h':360,'12h':720,'daily':1440,'intraday':30};
@@ -179,15 +179,19 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, 
        short — only when the bump is `late` (already matched its typical size) or `fading` (rolling
                over). That is what "the failure" means.
      Anything else is a plan without a trigger, and is left to you to read on the panel. */
+  // The rule lives in server.js next to the data and is handed in, so the bot and the 🎢 panel can
+  // never disagree about what will be traded. The literal below is only a standalone fallback.
   const DUMP_OK={ long:['running','building'], short:['late','fading'] };
+  const dumpTakes = typeof dumpRule==='function' ? dumpRule
+    : (r)=>{ const p=r&&r.plan; if(!p||(p.now!=='buy'&&p.now!=='short')) return {take:false};
+             const side=p.now==='buy'?'long':'short';
+             return {take:DUMP_OK[side].includes((r.bump&&r.bump.state)||'quiet')}; };
   function dumpCandidate(r){
     const p=r&&r.plan; if(!p) return null;
     if(p.now!=='buy' && p.now!=='short') return null;      // only LIVE plans, same as the panel
     const s = p.now==='buy' ? p.long : p.short;
     if(!s || !(s.targets||[]).length) return null;
-    const st=(r.bump&&r.bump.state)||'quiet';
-    const want=p.now==='buy'?DUMP_OK.long:DUMP_OK.short;
-    if(!want.includes(st)){ funnel.dumpUnconfirmed++; return null; }
+    if(!dumpTakes(r).take){ funnel.dumpUnconfirmed++; return null; }
     const bt=r.planBt||{}, side=s.dir>0?bt.long:bt.short;
     return {
       asset:{sym:r.sym,tk:r.tk||'',name:r.name||r.tk||r.sym,cls:'Crypto',src:'cg'},

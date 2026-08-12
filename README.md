@@ -432,9 +432,19 @@ confirm the direction first:
 | **LONG** | `running` (a move is underway) or `building` (the fall has stopped, it's basing) |
 | **SHORT** | `late` (already matched its typical size) or `fading` (rolling over) — *the failure* |
 
-It will **not buy a floor that is still falling**. That matters: checked against real output, every
-trade this desk would otherwise have taken was a buy into a `fading` bump — price down 28–82% on the
-current leg and still rolling over. A live plan is not a trigger; the confirmation is.
+It will **not buy a floor that is still falling**. A live plan is not a trigger; the confirmation is.
+
+**See what it would do on your own data before switching the desk on.** Every card carries the
+verdict — *"🤖 Paper bot: would take this — short the failure, the bump is fading"* or *"would skip —
+a long needs the bump running or basing, and it is fading"* — and the panel header counts them
+(*"🤖 bot would take 3 of 12"*). The rule has exactly one definition, in `server.js`, and is handed
+to the bot, so the panel can never promise a trade the bot refuses; there's a test asserting the two
+agree across all ten side/state combinations.
+
+> **DEMO vs LIVE.** `DEMO` is false as soon as an Upstox API key is set, so a configured instance
+> reads real CoinDCX/Binance data here. Any figure quoted from DEMO — including "the desk takes
+> nothing" — comes from synthetic tapes and says nothing about live behaviour. The header count
+> above is the way to check.
 
 **The same quality gates apply to all four.** Arriving from a different panel earns no exemption —
 confidence floor, the proven-edge gate, the noise-floor stop guard, cooldowns and the loss-streak
