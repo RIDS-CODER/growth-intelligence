@@ -812,6 +812,7 @@ async function runScan(){
    Reproduced in a browser: the Current Price cell was live and correct the whole time, and
    every instruction beside it was describing a move that had already happened.
    Both failures are the same mistake — acting on a level the market has left. */
+const PENDING_ENTRY=new Set(['waitdip','waitbounce']);   // the entry is meant to be away from price
 function liveStale(r){
   const s=r.setup,p=r.sig.price; if(!s||!(p>0)||r.sig.verdict==='HOLD')return false;
   const R=Math.abs(s.entry-s.stop)||s.atr||1;
@@ -828,6 +829,14 @@ function liveStale(r){
 function missedEntry(r){
   const s=r.setup,p=r.sig.price;
   if(!s||!(p>0)||!(s.targets&&s.targets.length))return false;
+  /* WAITING IS NOT MISSING. A pullback setup puts its entry at support, deliberately BELOW the
+     price ("⏳ WAIT for the dip — set a buy limit at ₹X, ~2% below now"); a short's sits above.
+     Price outside the zone is that plan working as intended, and its T1 can legitimately sit on
+     the near side of the current price too. Judging those by distance-from-zone greyed almost
+     every card on the board — measured clean=0 actionable setups across all six timeframes —
+     which reads exactly like the scanner having stopped finding anything. Only a setup that was
+     live at scan time can be missed. */
+  if(!r.action||PENDING_ENTRY.has(r.action.kind))return false;
   const past = s.dir>0 ? p>s.entryHi : p<s.entryLo;    // ran away in the trade's OWN favour
   if(!past)return false;
   const rew = s.dir>0 ? (s.targets[0]-p) : (p-s.targets[0]);
