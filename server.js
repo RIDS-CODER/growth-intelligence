@@ -437,6 +437,13 @@ async function cdxGetTicker(){const t=await getJSON("https://api.coindcx.com/exc
 async function ensureCdxFresh(maxMs=12000){if(Date.now()-cdxTickerAt>maxMs){try{await cdxGetTicker();}catch(e){}}}
 // CoinDCX's own USDT→INR rate (what its app uses to price coins)
 function cdxUsdtInr(){const u=cdxTicker["USDTINR"];if(u>0)return u;const bi=cdxTicker["BTCINR"],bu=cdxTicker["BTCUSDT"];return (bi>0&&bu>0)?bi/bu:0;}
+/* The exchange's OWN USDT price for a coin — the number on its USDT screen, untouched.
+   $ used to be reconstructed as ₹ ÷ rate. That is only exact while the rate dividing is the same
+   rate that multiplied, and it was not: this server reads USDTINR first and falls back to the BTC
+   ratio, while the browser did the opposite. Two formulas, both labelled 'coindcx', both writing
+   one shared rate — so ₹ built by one got divided by the other and the cancellation broke.
+   Carrying the real number means no rate can corrupt it. */
+function cdxLiveUsd(base){const u=cdxTicker[base+"USDT"];return u>0?u:0;}
 // The live ₹ price the CoinDCX APP shows: liquid USDT market × CoinDCX USDT/INR. Falls back to the INR last-trade.
 function cdxLiveInr(base){const u=cdxTicker[base+"USDT"],r=cdxUsdtInr();if(u>0&&r>0)return u*r;const i=cdxTicker[base+"INR"];return i>0?i:0;}
 // Binance fallback
@@ -558,7 +565,7 @@ async function loadCoinDCX(asset,tf){
   const live=cdxLiveInr(asset.tk)||(cdxTicker[asset.sym]>0?cdxTicker[asset.sym]:0);
   const rawLast=close[close.length-1];
   if(live>0&&rawLast>0){const f=live/rawLast; if(f>0.2&&f<5){for(let i=0;i<close.length;i++){close[i]*=f;high[i]*=f;low[i]*=f;}} else {close[close.length-1]=live;}}
-  return {close,high,low,times,vol,price:close[close.length-1],mtime:Date.now()};
+  return {close,high,low,times,vol,price:close[close.length-1],priceUsd:cdxLiveUsd(asset.tk),rateUsed:cdxUsdtInr()||undefined,mtime:Date.now()};
 }
 async function loadBinance(asset,tf){
   const interval=BN_INT[tf]||"1h";
@@ -566,8 +573,9 @@ async function loadBinance(asset,tf){
   if(!Array.isArray(j)||!j.length)throw new Error("no klines");
   const r=await usdInr();
   const close=[],high=[],low=[],times=[],vol=[];
-  for(const k of j){const c=+k[4];if(!isFinite(c))continue;close.push(c*r);high.push(+k[2]*r);low.push(+k[3]*r);times.push(+k[6]);vol.push(+k[5]||0);}
-  return {close,high,low,times,vol,price:close[close.length-1],mtime:Date.now()};
+  let lastUsd=0;
+  for(const k of j){const c=+k[4];if(!isFinite(c))continue;lastUsd=c;close.push(c*r);high.push(+k[2]*r);low.push(+k[3]*r);times.push(+k[6]);vol.push(+k[5]||0);}
+  return {close,high,low,times,vol,price:close[close.length-1],priceUsd:lastUsd,rateUsed:r,mtime:Date.now()};
 }
 
 /* ============================================================
@@ -650,6 +658,7 @@ function processAsset(asset,data,tf){
   if(btcSelling && sig.verdict==='BUY'){ sig.verdict='HOLD'; sig.btcBlocked=true; }   // pause alt-longs only during a genuine BTC dump
   const setup=buildSetup(sig,tf==='daily'?'daily':'intraday');   // entry/stop/targets anchored to the closed bar (stable)
   sig.closedPrice=sig.price; sig.price=live;                     // now use LIVE price for the action + the card's Current Price
+  if(data.priceUsd>0)sig.priceUsd=data.priceUsd;                 // the venue's OWN $ number, so the UI never has to divide by a rate
   const since=signalSince(cl,hi,lo,tm);
   const action=actionNow(sig,setup,since,fmtTime);
   const reasons=buildReasons(sig,setup,marketOpen(),asset.src==='cg');
@@ -674,6 +683,7 @@ function processAsset(asset,data,tf){
   const iBack=Math.max(0,cl.length-1-nBack);
   const chgWin=cl[iBack]>0?(live/cl[iBack]-1)*100:null;
   return {asset,sig,setup,since,action,reasons,scope,bt,btSide,mtf,confidence,dec,isIndex,tf,asof:fmtTime(asofMs),
+    rateUsed:(data.rateUsed>0)?data.rateUsed:undefined,   // the rate that BUILT these ₹ numbers — $ display divides by exactly this
     turnover:hasVol?turnover:null, chgWin:chgWin!=null?+chgWin.toFixed(2):null,
     priceTag:asset.src==='cg'?(cryptoMode==='coindcx'?'live · CoinDCX ₹':'live · global ₹'):(marketOpen()?'LIVE (broker)':'prev close'),series:data.close.slice(-80),
     bars:{h:data.high.slice(-24),l:data.low.slice(-24),c:data.close.slice(-24)}};   // compact OHLC window for the Quick-tab mini candlesticks
@@ -888,26 +898,33 @@ async function scan(tab,tf){
 function hashStr(s){let h=0;for(const c of s)h=(h*31+c.charCodeAt(0))>>>0;return h;}
 
 /* live quotes endpoint (cheap, frequent) */
-let cgPriceCache=null,cgPriceAt=0;
-async function liveQuotes(tab){
-  const uni=universeFor(tab),out={};
+/* Two parallel maps, never one derived from the other: `inr` is ₹, `usd` is the venue's OWN USDT
+   number. The UI shows $ from `usd` directly instead of computing ₹ ÷ rate, so a wrong or
+   mismatched rate can no longer move a dollar price. */
+let cgPriceCache=null,cgUsdCache=null,cgPriceAt=0;
+async function liveQuotesFull(tab){
+  const uni=universeFor(tab),out={},usd={};
   const cryptoIds=uni.filter(a=>a.src==='cg');
   if(cryptoIds.length && !DEMO){
-    if(cgPriceCache && Date.now()-cgPriceAt<8000){Object.assign(out,cgPriceCache);}
+    if(cgPriceCache && Date.now()-cgPriceAt<8000){Object.assign(out,cgPriceCache);Object.assign(usd,cgUsdCache||{});}
     else if(cryptoMode==="coindcx"){
-      try{await cdxGetTicker();const c={};cryptoIds.forEach(x=>{const p=cdxLiveInr(x.tk)||(cdxTicker[x.sym]>0?cdxTicker[x.sym]:0);if(p>0)c[x.sym]=p;});cgPriceCache=c;cgPriceAt=Date.now();Object.assign(out,c);}
-      catch(e){if(cgPriceCache)Object.assign(out,cgPriceCache);}
+      try{await cdxGetTicker();const c={},u={};cryptoIds.forEach(x=>{const p=cdxLiveInr(x.tk)||(cdxTicker[x.sym]>0?cdxTicker[x.sym]:0);if(p>0)c[x.sym]=p;const d=cdxLiveUsd(x.tk);if(d>0)u[x.sym]=d;});
+        cgPriceCache=c;cgUsdCache=u;cgPriceAt=Date.now();Object.assign(out,c);Object.assign(usd,u);}
+      catch(e){if(cgPriceCache){Object.assign(out,cgPriceCache);Object.assign(usd,cgUsdCache||{});}}
     }else{
       try{const arr=await binanceGet("/api/v3/ticker/price");const r=await usdInr();
-        const bySym={};if(Array.isArray(arr))arr.forEach(x=>{bySym[x.symbol]=+x.price*r;});
-        const c={};cryptoIds.forEach(x=>{if(bySym[x.binance])c[x.sym]=bySym[x.binance];});cgPriceCache=c;cgPriceAt=Date.now();Object.assign(out,c);}
-        catch(e){if(cgPriceCache)Object.assign(out,cgPriceCache);}
+        const bySym={};if(Array.isArray(arr))arr.forEach(x=>{bySym[x.symbol]=+x.price;});
+        const c={},u={};cryptoIds.forEach(x=>{const p=bySym[x.binance];if(p>0){c[x.sym]=p*r;u[x.sym]=p;}});
+        cgPriceCache=c;cgUsdCache=u;cgPriceAt=Date.now();Object.assign(out,c);Object.assign(usd,u);}
+        catch(e){if(cgPriceCache){Object.assign(out,cgPriceCache);Object.assign(usd,cgUsdCache||{});}}
     }}
   if(!DEMO){await ensureInstruments();const stocks=uni.filter(a=>a.src==='upstox');const keyOf={};stocks.forEach(a=>keyOf[a.sym]=keyForAsset(a));
     const keys=stocks.map(a=>keyOf[a.sym]).filter(Boolean);
     try{const ltp=await upstoxLTP(keys);stocks.forEach(a=>{const k=keyOf[a.sym];if(k&&ltp[k])out[a.sym]=ltp[k];});}catch(e){}}
-  return out;
+  return {inr:out,usd};
 }
+// ₹ only — every internal caller (position sweeps, setup tracker) keys a price map by symbol and wants nothing else
+async function liveQuotes(tab){return (await liveQuotesFull(tab)).inr;}
 
 /* ============================================================
    🔥 HIGH-VOLUME MOVERS — the coins moving the MOST right now on real volume,
@@ -1783,7 +1800,10 @@ function cryptoSignalsFrom(payload){
     try{
       if(!a.close||a.close.length<41)return;
       const asset={sym:a.sym,tk:a.tk,name:a.name||a.tk,cls:"Crypto",src:"cg"};
-      const data={close:a.close,high:a.high,low:a.low,times:a.times,vol:a.vol,price:a.price,mtime:fetchedAt};
+      const data={close:a.close,high:a.high,low:a.low,times:a.times,vol:a.vol,price:a.price,
+        priceUsd:(+a.priceUsd>0)?+a.priceUsd:0,           // the venue's own $ number, from the browser's ticker read
+        rateUsed:(+a.rateUsed>0)?+a.rateUsed:0,           // the rate the browser built its ₹ with
+        mtime:fetchedAt};
       const r=processAsset(asset,data,tf);
       r.priceTag="live · CoinDCX ₹";     // browser-fetched from the Indian exchange
       results.push(r);
@@ -2195,7 +2215,7 @@ async function handler(req,res){
     if(p==="/api/scan"){ // no login gate — crypto/commodity-ETF work without Upstox; stocks just skip until logged in
       const data=await scan(u.searchParams.get("tab")||"Stocks",u.searchParams.get("tf")||"intraday");return sendJSON(res,data);}
     if(p==="/api/quotes"){
-      {const q=await liveQuotes(u.searchParams.get("tab")||"Stocks");return sendJSON(res,withLiveRate({quotes:q,loggedIn:loggedIn(),ts:Date.now()}));}}
+      {const q=await liveQuotesFull(u.searchParams.get("tab")||"Stocks");return sendJSON(res,withLiveRate({quotes:q.inr,usd:q.usd,loggedIn:loggedIn(),ts:Date.now()}));}}
     if(p==="/api/backtest"){
       const data=await backtest(u.searchParams.get("tab")||"Stocks",u.searchParams.get("tf")||"daily");return sendJSON(res,data);}
     if(p==="/api/crypto-signals" && req.method==="POST"){
@@ -2286,7 +2306,7 @@ if(require.main===module){
 }
 module.exports={IND,computeSignal,buildSetup,buildReasons,confidenceOf,alertEligible,fmtAlert,sendTelegram,signalSince,actionNow,parseCandles,authURL,scan,universeFor,fmtTime,
   loadBinance,loadCoinDCX,loadCrypto,ensureCryptoUniverse,usdInr,resampleSeries,tfCfg,getCRYPTO:()=>CRYPTO,getMode:()=>cryptoMode,
-  backtestSeries,scoreSeriesArr,backtest,processAsset,blendResearch,assetBtScore,cdxLiveInr,cdxUsdtInr,topMovers,ticker24,
+  backtestSeries,scoreSeriesArr,backtest,processAsset,blendResearch,assetBtScore,cdxLiveInr,cdxUsdtInr,cdxLiveUsd,topMovers,ticker24,
   trackSetups,sweepSetups,updateSetupWithPrice,setupStats,markReversals,realizedPct,volMetrics,priceRate,priceRateSrc,priceRateAge,cryptoSignalsFrom,
   planTrackables,fmtPlanAlert,dumpBounceAlerts,
   resolveAsset,positionSignal,positionsSweep,addPosition,fmtPosAlert,posPnl,allRecipients,
