@@ -405,6 +405,64 @@ reversed doesn't spam you.
 API: `GET/POST /api/positions` · state in `positions.json` (gitignored — it holds your entries and
 chat IDs).
 
+## 🤖 Paper Bot — choose which desks it trades
+
+The bot no longer just "scans and filters". You pick **which of the four desks it takes trades
+from**, and each one maps to a panel you already read, so what it trades is what you would have
+seen yourself:
+
+| Desk | What it takes |
+|---|---|
+| **⚡ Quick** | Scalp regimes (range / correction) on 5m–1h — the ⚡ Quick Trades panel. *(default)* |
+| **📈 Normal** | The main scanner's trend and breakout setups — the dashboard table. |
+| **🔥 Movers** | Only coins that passed the participation gate — real volume behind the move. |
+| **🎢 Dump & Bounce** | Live buy/short plans from the fall-bump-fall detector, using **its** levels. |
+
+**Tick any combination — each box applies the moment you click it**, no Save needed. (The Save
+button is only for the typed numbers: capital, risk %, target, leverage.) A coin that qualifies
+under several desks is attributed to the most specific one, so nothing is double-counted.
+
+### 🎢 What the Dump & Bounce desk will actually take
+
+Only the two clear ones — **long a rally** or **short a failure** — and the fast chart has to
+confirm the direction first:
+
+| | Taken when the 4h bump is… |
+|---|---|
+| **LONG** | `running` (a move is underway) or `building` (the fall has stopped, it's basing) |
+| **SHORT** | `late` (already matched its typical size) or `fading` (rolling over) — *the failure* |
+
+It will **not buy a floor that is still falling**. A live plan is not a trigger; the confirmation is.
+
+**See what it would do on your own data before switching the desk on.** Every card carries the
+verdict — *"🤖 Paper bot: would take this — short the failure, the bump is fading"* or *"would skip —
+a long needs the bump running or basing, and it is fading"* — and the panel header counts them
+(*"🤖 bot would take 3 of 12"*). The rule has exactly one definition, in `server.js`, and is handed
+to the bot, so the panel can never promise a trade the bot refuses; there's a test asserting the two
+agree across all ten side/state combinations.
+
+> **DEMO vs LIVE.** `DEMO` is false as soon as an Upstox API key is set, so a configured instance
+> reads real CoinDCX/Binance data here. Any figure quoted from DEMO — including "the desk takes
+> nothing" — comes from synthetic tapes and says nothing about live behaviour. The header count
+> above is the way to check.
+
+**The same quality gates apply to all four.** Arriving from a different panel earns no exemption —
+confidence floor, the proven-edge gate, the noise-floor stop guard, cooldowns and the loss-streak
+pause are shared. Dump & Bounce brings its **own** backtest of its exact levels, so the edge gate
+reads that: a plan whose own replay lost money is refused, with no special-casing. (In DEMO all ten
+live plans are rejected for exactly this reason — which is the gate working, not failing.)
+
+**Which desk is making the money.** Every position, working order and closed trade records the desk
+that produced it, and the panel totals P&L per desk. That is the point of the picker: a desk with a
+losing record is one you can simply untick. Open rows and closed rows carry a ⚡/📈/🔥/🎢 badge.
+
+**When it holds nothing, it says why** — which gate rejected how many, in plain English ("Scanned 48
+setups, took none: none were scalp setups"). Being correctly selective and being broken look
+identical without that line.
+
+Existing saved state migrates: a bot running `scalpOnly:true` keeps trading Quick only, and one
+running `scalpOnly:false` becomes Quick + Normal — the same setups it took before the upgrade.
+
 ## How prices stay accurate
 
 - **Stocks/ETFs/indices:** Upstox real-time last-traded price (LTP), refreshed every few seconds, plus

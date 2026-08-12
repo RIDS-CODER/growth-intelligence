@@ -1417,6 +1417,30 @@ const PLAN_NOW={
   wait_short:{icon:'⏳',label:'WAIT — TO SHORT',col:'muted',
     lead:"Past the buy zone, not yet at the level where bumps roll over. The long is gone; the short is not on yet. Wait for the price below."}
 };
+/* WOULD THE PAPER BOT TAKE THIS PLAN?
+   Defined HERE, next to the data, and handed to paper.js — so the rule has exactly one definition
+   and the panel can never disagree with the bot about what it will trade.
+
+   A live plan is not a trigger. The fast chart has to confirm the direction first:
+     long  — the bump is `running` (a move is underway) or `building` (the fall has stopped and it
+             is basing). Never while it is still fading; that is catching a knife.
+     short — the bump is `late` (already matched its typical size) or `fading` (rolling over).
+             That is what "the failure" means. */
+const DUMP_TAKE={long:["running","building"],short:["late","fading"]};
+function dumpBotTakes(r){
+  const p=r&&r.plan;
+  if(!p)return {take:false,why:"no levels"};
+  if(p.now!=="buy"&&p.now!=="short")return {take:false,why:"waiting — price is not in either zone yet"};
+  const st=(r.bump&&r.bump.state)||"quiet";
+  const side=p.now==="buy"?"long":"short";
+  if(DUMP_TAKE[side].includes(st))
+    return {take:true,side,state:st,
+      why:side==="long"?`long the rally — the bump is ${st}`:`short the failure — the bump is ${st}`};
+  return {take:false,side,state:st,
+    why:side==="long"
+      ? `not yet — a long needs the bump running or basing, and it is ${st}`+(st==="fading"?" (that would be buying a floor that is still falling)":"")
+      : `not yet — a short needs the bump late or rolling over, and it is ${st}`};
+}
 const BUMP_STATE={
   late:    {icon:'⚠️',label:'BUMP LATE',col:'sell',
     what:"The move up has already matched this coin's typical bump in size or in hours. Past bumps rolled over here."},
@@ -1562,12 +1586,17 @@ async function dumpBounce(force){
           if(bt)r.planBt=bt;
         }catch(e){r.bumpErr=String(e.message||e).slice(0,80);}
       });
-      keep.forEach(r=>{delete r.a;});
+      keep.forEach(r=>{delete r.a; r.botTake=dumpBotTakes(r);});
+      // So you can see, on the data you actually run, how many of these the 🤖 desk would take —
+      // without enabling it and waiting to find out.
+      const botSummary={takeable:0,skipped:0,byState:{}};
+      keep.forEach(r=>{ const b=r.botTake; b.take?botSummary.takeable++:botSummary.skipped++;
+        const k=(b.side||"?")+" / "+(b.state||"-"); botSummary.byState[k]=(botSummary.byState[k]||0)+1; });
       // Follow these to an outcome like every other recommendation the app makes, so a
       // Dump & Bounce trade never vanishes off the panel mid-trade — and so the feature builds
       // a FORWARD record to set against the backtest above.
       try{ trackSetups(planTrackables(keep),BUMP_TF,"dumpbounce"); }catch(e){}
-      const out={rows:keep,found:rows.length,scanned:res.length,skip,ts:Date.now(),demo:DEMO,cryptoMode,
+      const out={rows:keep,found:rows.length,scanned:res.length,skip,botSummary,ts:Date.now(),demo:DEMO,cryptoMode,
         usdtInr:priceRate(),rateSrc:priceRateSrc(),
         // The UI re-derives the instruction from a live quote, so it needs the copy for every
         // state — shipped once here rather than duplicated as prose in index.html.
@@ -1790,7 +1819,7 @@ async function researchCoin(rawSym,horizon){
   return {sym:base,horizon,dec:per[0].dec,cryptoMode,consensus:blendResearch(per),ts:Date.now()};
 }
 // Paper-trading engine (simulation) — reuses this server's scan + live quotes. Never places real orders.
-const paper = require('./paper.js')({ scan, liveQuotes, dir:__dirname, rate:()=>cdxUsdtInr() });
+const paper = require('./paper.js')({ scan, liveQuotes, dir:__dirname, rate:()=>cdxUsdtInr(), topMovers, dumpBounce, dumpRule:dumpBotTakes });
 
 /* ===== Telegram alerts — ping on a High-confidence quick scalp. Token lives ONLY on the server
    (env var or config.json); it is NEVER sent to the browser or committed to GitHub. Inert until set. ===== */
@@ -2236,7 +2265,7 @@ module.exports={IND,computeSignal,buildSetup,buildReasons,confidenceOf,alertElig
   planTrackables,fmtPlanAlert,dumpBounceAlerts,
   resolveAsset,positionSignal,positionsSweep,addPosition,fmtPosAlert,posPnl,allRecipients,
   __getPositions:()=>POSITIONS,__resetPositions:()=>{POSITIONS=[];},
-  zigzag,listingProfile,bumpProfile,tradePlan,planNowFor,backtestPlan,demoRescale,forwardStats,dumpBounce,sparkline,synthListing,synthBump,cleanSeries,cleanOHLC,
+  zigzag,listingProfile,bumpProfile,tradePlan,planNowFor,backtestPlan,demoRescale,dumpBotTakes,DUMP_TAKE,forwardStats,dumpBounce,sparkline,synthListing,synthBump,cleanSeries,cleanOHLC,
   __setFx:(r)=>{fxRate=r;fxAt=Date.now();},__setMode:(m)=>{cryptoMode=m;},
   __getSetups:()=>SETUPS,__resetSetups:()=>{SETUPS={active:[],resolved:[]};},
   btcStateFromSeries,__setBtc:(s)=>{BTC_STATE=s;},
