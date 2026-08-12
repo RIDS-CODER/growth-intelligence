@@ -732,13 +732,37 @@ async function runScan(){
   }catch(e){document.getElementById('pstat').textContent='Error';document.getElementById('buyCards').innerHTML='<div class="empty">Backend error: '+e.message+'</div>';}
   scanning=false;document.getElementById('scanBtn').disabled=false;scheduleRefresh();
 }
-// Is this recommendation "late" — has the LIVE price already run past the entry toward the stop?
+/* HAS THE LIVE PRICE ALREADY RUN AWAY FROM THIS SETUP — in EITHER direction?
+   This used to measure one thing only: room left to the stop. So it caught the trade going
+   wrong and completely missed the trade already being over. A long whose price had blown
+   through all three targets scored 30R of room to its stop, passed the check, and kept
+   displaying "🟢 BUY the breakout — ₹8,725–₹8,776" while the coin traded at ₹12,350.
+   Reproduced in a browser: the Current Price cell was live and correct the whole time, and
+   every instruction beside it was describing a move that had already happened.
+   Both failures are the same mistake — acting on a level the market has left. */
 function liveStale(r){
   const s=r.setup,p=r.sig.price; if(!s||!(p>0)||r.sig.verdict==='HOLD')return false;
   const R=Math.abs(s.entry-s.stop)||s.atr||1;
   const roomR=s.dir>0?(p-s.stop)/R:(s.stop-p)/R;      // R of room left from LIVE price to the stop
-  const pastEntry=s.dir>0?p<s.entryLo:p>s.entryHi;    // price already broke through the entry zone
-  return pastEntry || roomR<0.5;                       // <½R of room = too late / too risky to enter now
+  const pastEntry=s.dir>0?p<s.entryLo:p>s.entryHi;    // price broke through the entry toward the stop
+  return pastEntry || roomR<0.5 || missedEntry(r);     // <½R of room = too risky; missed = too late
+}
+/* The move you were waiting for has ALREADY happened. Not "price moved a bit" — a breakout entry
+   zone deliberately STARTS at the last close, so price sitting just above it is the setup working,
+   not a miss. What matters is whether the trade is still worth taking FROM HERE: entering late
+   pays a worse price for the same stop and the same targets, so reward shrinks while risk grows.
+   Measured against the card's own advertised R:R, so a naturally tight setup isn't punished for
+   being tight — only for having lost most of what it promised. */
+function missedEntry(r){
+  const s=r.setup,p=r.sig.price;
+  if(!s||!(p>0)||!(s.targets&&s.targets.length))return false;
+  const past = s.dir>0 ? p>s.entryHi : p<s.entryLo;    // ran away in the trade's OWN favour
+  if(!past)return false;
+  const rew = s.dir>0 ? (s.targets[0]-p) : (p-s.targets[0]);
+  if(rew<=0)return true;                               // Target 1 already reached — this card's trade is over
+  const risk = s.dir>0 ? (p-s.stop) : (s.stop-p);
+  if(!(risk>0))return false;                           // through the stop is the other flag's job
+  return (rew/risk) < 0.5*(s.rrr>0?s.rrr:1);           // less than half the edge it advertised
 }
 function liveRoomR(r){const s=r.setup,p=r.sig.price,R=Math.abs(s.entry-s.stop)||s.atr||1;return s.dir>0?(p-s.stop)/R:(s.stop-p)/R;}
 let _staleSig='';
@@ -748,7 +772,11 @@ function refreshStaleFlags(){
 }
 function applyQuotes(map){
   let touched=false;
-  lastResults.forEach(r=>{const q=map[r.asset.sym];if(q&&isFinite(q)){r.sig.price=q;touched=true;const el=document.getElementById('px_'+id4(r.asset.sym));if(el)el.textContent=fmtR(r)(q);}});
+  lastResults.forEach(r=>{const q=map[r.asset.sym];if(q&&isFinite(q)){r.sig.price=q;touched=true;
+    const id=id4(r.asset.sym),txt=fmtR(r)(q);
+    const el=document.getElementById('px_'+id);if(el)el.textContent=txt;
+    document.querySelectorAll('.lp'+id).forEach(e=>e.textContent=txt);   // live price quoted inside the LATE/MISSED warning
+  }});
   if(touched){const now=new Date();document.getElementById('lastUpd').textContent='LTP '+now.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true});refreshStaleFlags();}
 }
 async function pollQuotes(){
@@ -845,7 +873,7 @@ function render(results){
   document.getElementById('buyCount').textContent=buys.length;document.getElementById('sellCount').textContent=sells.length;
   const hidden=results.filter(r=>r.sig.verdict!=='HOLD').length-(buys.length+sells.length);
   const lateB=buys.filter(liveStale).length, lateS=sells.filter(liveStale).length, late=lateB+lateS;
-  document.getElementById('filterNote').textContent=(ms>0?`Min score ${ms}: hiding ${hidden} weaker setup${hidden===1?'':'s'}. `:'')+(late>0?`⚠ ${late} setup${late===1?'':'s'} greyed — price already ran to the stop.`:'');
+  document.getElementById('filterNote').textContent=(ms>0?`Min score ${ms}: hiding ${hidden} weaker setup${hidden===1?'':'s'}. `:'')+(late>0?`⚠ ${late} setup${late===1?'':'s'} greyed — live price has left the entry (run to the stop, or already past it).`:'');
   const clean=arr=>arr.find(r=>!liveStale(r))||null;   // hero only ever shows a CLEAN entry
   renderSummary(clean(buys),clean(sells));renderCards('buyCards',buys,true);renderCards('sellCards',sells,false);
 }
@@ -885,8 +913,22 @@ function card(r,i,isBuy){const{asset,sig,setup,reasons,dec,action,scope,asof,isI
     &nbsp;·&nbsp; <span style="color:${confCol};font-weight:800" title="Blends signal strength, multi-timeframe agreement and backtest grade — a quality gauge, not a win probability.">Confidence ${conf.label}${conf.pct!=null?' '+conf.pct+'%':''}</span></div>`;
   const tgts=setup.targets.map((t,k)=>`<div class="lv t${k+1}"><div class="k">${tn[k]}</div><div class="v">${f(t)}</div><div class="r">${setup.ret[k]>=0?'+':''}${setup.ret[k].toFixed(1)}%</div></div>`).join('');
   const hz=tfHorizon(timeframe), hzLabel=hz==='short'?'⏱ Short-term':'📆 Long-term';
-  const stale=liveStale(r), room=liveRoomR(r);
-  const ribbon = stale ? `<div class="ribbon">⚠ LATE — live price ${room<=0?'is already at/through the stop':'has only ~'+room.toFixed(1)+'R left to the stop'}. This ${isBuy?'BUY':'SELL'} level has gone stale — don’t chase. Wait for a fresh setup${asset.cls==='Crypto'?', or hit 🔎 below for an averaged plan':''}.</div>` : '';
+  const stale=liveStale(r), room=liveRoomR(r), missed=missedEntry(r);
+  /* The warning quotes the live price, and render() only re-runs when the stale STATE flips — so
+     without its own hook the number inside the warning freezes at whatever it was when the card
+     was drawn, which is the very staleness this warning exists to report. Tagged so applyQuotes
+     refreshes it on the same 8s tick as the Current Price cell. */
+  const lp=v=>`<span class="lp${id4(asset.sym)}">${f(v)}</span>`;
+  const why = missed
+    ? `live price ${lp(sig.price)} has already run <b>past the entry zone</b> (${f(setup.entryLo)}–${f(setup.entryHi)}) — the move on this card has happened`
+    : `live price ${room<=0?'is already at/through the stop':'has only ~'+room.toFixed(1)+'R left to the stop'}`;
+  const ribbon = stale ? `<div class="ribbon">⚠ ${missed?'MISSED':'LATE'} — ${why}. This ${isBuy?'BUY':'SELL'} level has gone stale — don’t chase. Wait for a fresh setup${asset.cls==='Crypto'?', or hit 🔎 below for an averaged plan':''}.</div>` : '';
+  /* Never leave a green "BUY NOW" sitting above a ribbon saying the entry is gone — the card
+     would be arguing with itself, and the green line is the one people act on. */
+  const actLine = missed
+    ? `⏭ TOO LATE — this ${isBuy?'long':'short'} needed ${f(setup.entryLo)}–${f(setup.entryHi)}; price is ${lp(sig.price)}`
+    : actionText(action,r);
+  const actCls = missed ? 'exit' : action.cls;
   return `<div class="tc ${open} ${isBuy?'':'sellcard'} ${stale?'stale':''}">${ribbon}
     <div class="hd" onclick="this.parentNode.classList.toggle('open')">
       <div class="l"><div class="name">${asset.name}</div><div class="sub">${asset.tk?asset.tk+' · ':''}${asset.sym} · ${asset.cls}</div>
@@ -894,7 +936,7 @@ function card(r,i,isBuy){const{asset,sig,setup,reasons,dec,action,scope,asof,isI
       <div class="r"><span class="verdict ${sig.verdict}">${sig.verdict}</span><div class="toplineRet" style="color:${isBuy?'var(--buy)':'var(--sell)'};margin-top:6px">${setup.ret[0]>=0?'+':''}${setup.ret[0].toFixed(1)}%→T1</div>${confBadge(conf)}${mtfChip(mtf)}${btBadge(bt)}</div>
     </div>
     <div class="bd">
-      <div class="action ${action.cls}">${actionText(action,r)}<span class="since">${action.since||''}</span></div>
+      <div class="action ${actCls}">${actLine}<span class="since">${action.since||''}</span></div>
       ${quickStrip}
       ${setup.note?`<div style="margin:6px 0;padding:7px 10px;border-radius:8px;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.42);color:#fbbf24;font-size:12px;font-weight:600;line-height:1.35">⚡ SMALL TARGETS — ${setup.note}</div>`:''}
       ${scope?`<div class="scope ${scope.good?'good':'warn'}">${scope.txt}</div>`:''}

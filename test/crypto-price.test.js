@@ -207,6 +207,84 @@ test("a weaker rate source cannot displace a live one, but does take over when i
   assert.strictEqual(c.usdtInr,86.4,"FX must take over once CoinDCX has gone quiet");
 });
 
+/* The card's "is this still tradeable?" logic, lifted out of index.html and RUN. It decides
+   whether you are shown a green BUY or a warning, so it is worth executing rather than reading. */
+function staleGuard(){
+  const vm=require("node:vm");
+  const html=require("node:fs").readFileSync(require("node:path").join(__dirname,"..","index.html"),"utf8");
+  const script=html.match(/<script>([\s\S]*)<\/script>/)[1];
+  const from=script.indexOf("function liveStale(r)"), to=script.indexOf("let _staleSig=");
+  assert.ok(from>0&&to>from,"could not locate the staleness block in index.html");
+  const ctx=vm.createContext({});
+  vm.runInContext(script.slice(from,to)+
+    ";globalThis.liveStale=liveStale;globalThis.missedEntry=missedEntry;globalThis.liveRoomR=liveRoomR;",ctx);
+  return ctx;
+}
+// long: zone 100–102, entry 101, stop 96, T1 110 -> advertised R:R 1.8
+const LONG={dir:1,entry:101,entryLo:100,entryHi:102,stop:96,targets:[110,115,120],rrr:1.8,atr:2};
+// short: zone 98–100, entry 99, stop 104, T1 90 -> advertised R:R 1.8
+const SHORT={dir:-1,entry:99,entryLo:98,entryHi:100,stop:104,targets:[90,85,80],rrr:1.8,atr:2};
+const long=px=>({sig:{price:px,verdict:"BUY"},setup:LONG});
+const short=px=>({sig:{price:px,verdict:"SELL"},setup:SHORT});
+
+test("a setup whose price has already run PAST the entry is flagged, not shown as a live BUY",()=>{
+  /* THE REGRESSION THIS PINS. liveStale only ever measured room to the STOP, so it caught a trade
+     going wrong and completely missed a trade already being over. Reproduced in a browser: with
+     the coin at ₹12,350 the card still read "🟢 BUY the breakout — ₹8,725–₹8,776" — past all three
+     targets — because 30R of room to the stop sailed through the check. */
+  const c=staleGuard();
+  assert.strictEqual(c.liveStale(long(101)),false,"inside the entry zone is tradeable");
+  assert.strictEqual(c.missedEntry(long(103)),false,
+    "just above the zone is the setup WORKING — a breakout zone starts at the last close");
+  assert.strictEqual(c.missedEntry(long(108)),true,"2 up against 12 down is not the trade advertised");
+  assert.strictEqual(c.missedEntry(long(111)),true,"past Target 1 — this card's trade is over");
+  assert.strictEqual(c.liveStale(long(108)),true,"and that must grey the card");
+  assert.ok(c.liveRoomR(long(108))>2,
+    "fixture check: room to the stop is still wide, which is exactly why this slipped through before");
+  // and the mirror image for a short
+  assert.strictEqual(c.missedEntry(short(97)),false,"just below the zone is the breakdown working");
+  assert.strictEqual(c.missedEntry(short(92)),true,"a short whose price has already collapsed is done");
+  assert.strictEqual(c.missedEntry(short(89)),true,"past Target 1");
+  assert.strictEqual(c.liveStale(short(92)),true);
+  assert.strictEqual(c.missedEntry(short(99)),false,"inside the zone is still the trade");
+});
+
+test("the miss is judged against the card's OWN advertised R:R, not a fixed ratio",()=>{
+  /* A fixed cutoff would declare every naturally tight setup "missed" the moment it left its zone,
+     while letting a wide one bleed most of its edge unflagged. The test is proportional: two very
+     different setups, each priced so the SAME fraction of their advertised edge remains, must be
+     judged the same way. */
+  const c=staleGuard();
+  const mk=(lo,hi,t1,rrr)=>px=>({sig:{price:px,verdict:"BUY"},
+    setup:{dir:1,entry:101,entryLo:lo,entryHi:hi,stop:96,targets:[t1,t1+5,t1+10],rrr,atr:2}});
+  const wide=mk(100,102,110,1.8), tight=mk(100.5,101.5,104,0.6);
+  //                        price   remaining R:R   as a share of advertised
+  assert.strictEqual(c.missedEntry(wide(102.73)),false,  // 1.08 of 1.8  -> 60% left
+    "60% of a wide setup's edge remains — still the trade on the card");
+  assert.strictEqual(c.missedEntry(tight(101.88)),false, // 0.36 of 0.6  -> 60% left
+    "60% of a tight setup's edge remains — it must not be punished for being tight");
+  assert.strictEqual(c.missedEntry(wide(104.14)),true,   // 0.72 of 1.8  -> 40% left
+    "only 40% of the edge left — chasing this is a different trade");
+  assert.strictEqual(c.missedEntry(tight(102.45)),true,  // 0.24 of 0.6  -> 40% left
+    "the same 40% must read the same way on a tight setup");
+});
+
+test("running toward the stop is still caught, and HOLD is never flagged",()=>{
+  const c=staleGuard();
+  assert.strictEqual(c.liveStale(long(97)),true,"<½R from the stop");
+  assert.strictEqual(c.liveStale(long(99)),true,"broke below the entry zone");
+  assert.strictEqual(c.liveStale({sig:{price:108,verdict:"HOLD"},setup:LONG}),false,
+    "HOLD has no setup to be late for");
+});
+
+test("the card never shows a green BUY above a ribbon saying the entry is gone",()=>{
+  const html=require("node:fs").readFileSync(require("node:path").join(__dirname,"..","index.html"),"utf8");
+  const script=html.match(/<script>([\s\S]*)<\/script>/)[1];
+  assert.match(script,/const actLine\s*=\s*missed/,"the action line must be overridden when the entry is missed");
+  assert.match(script,/class="action \$\{actCls\}">\$\{actLine\}/,"the card must render the overridden line, not the scan-time one");
+  assert.ok(!/class="action \$\{action\.cls\}">\$\{actionText/.test(script),"the raw scan-time action must no longer be rendered directly");
+});
+
 test("withLiveRate reports the rate's AGE, which survives a clock difference",()=>{
   S.__setMode("binance");
   S.__setFx(88.5);
