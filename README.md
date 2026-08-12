@@ -130,6 +130,19 @@ Two things that used to break it, both fixed:
   size, retrace %, R:R, the backtest) is unchanged; only the absolute number moves. LIVE mode was
   never affected — there all panels read the one feed.
 
+### The USDT rate is never served stale
+
+`$` is `₹ ÷ rate`, so a stale rate makes every USDT price drift while ₹ stays correct. Two things
+guarantee it can't:
+
+- **The server re-reads the rate on every response**, cache hit or not. The heavy endpoints are
+  cached — scan and movers 40s, backtest 10 min, 🎢 Dump & Bounce **30 minutes** — and each used to
+  bake the rate into the cached object, so a Dump & Bounce refresh could stamp a half-hour-old rate
+  over a fresh one. Reading the rate is free; only the payload is cached.
+- **The browser keeps the freshest reading, not the last one.** Panels poll on different clocks
+  (20s / 30s / 45s), so responses arrive out of order. Every payload carries `rateAt`, and a reading
+  older than the one already held is dropped.
+
 ### Why a price may not match your exchange exactly
 
 Each panel states which currency is exact right now, and it depends on whether this server can reach CoinDCX:

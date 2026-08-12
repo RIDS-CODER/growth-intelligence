@@ -461,6 +461,25 @@ function priceRate(){
 }
 // 'coindcx' = ₹ and $ both exact vs CoinDCX · 'fx' = $ exact vs the global market, ₹ runs ~1–4% under CoinDCX (India premium)
 function priceRateSrc(){return (cryptoMode==='coindcx'&&cdxUsdtInr()>0)?'coindcx':'fx';}
+/* HOW OLD this rate reading is, in milliseconds — a DURATION, not a timestamp.
+   The browser used to order rate updates by comparing our `rateAt` (this machine's clock) against
+   stamps it had written with its own Date.now(). Two clocks feeding one variable: a browser running
+   even slightly ahead of the server judged every later server reading "older" and dropped it for
+   good, freezing the rate while ₹ kept ticking — the exact drift the ordering exists to prevent.
+   An age survives the clock difference: the browser subtracts it from its own now. */
+function priceRateAge(){
+  const t=(cryptoMode==='coindcx'&&cdxUsdtInr()>0)?cdxTickerAt:fxAt;
+  return t?Math.max(0,Date.now()-t):0;
+}
+/* THE RATE IS NEVER CACHED, even when the payload around it is.
+   Every heavy endpoint is cached — scan and movers for 40s, the backtest for 10 min, 🎢 Dump &
+   Bounce for 30 MINUTES — and each used to bake `usdtInr` into the cached object. The browser
+   keeps ONE global rate on last-writer-wins, so a Dump & Bounce refresh could overwrite it with a
+   rate half an hour old, and every panel then divided a FRESH ₹ price by a STALE rate: ₹ looked
+   correct while $ drifted. Reading the rate costs nothing, so it is re-stamped on the way out —
+   cache hit or not — and carries `rateAge` so the browser can reject an out-of-order update
+   without having to trust that our clock and its clock agree. */
+function withLiveRate(o){ return {...o, usdtInr:priceRate(), rateSrc:priceRateSrc(), rateAge:priceRateAge(), rateAt:Date.now()}; }
 const isStableBase=b=>STABLE_TK.has(b)||/(UP|DOWN|BULL|BEAR)$/.test(b)||/^\d/.test(b);
 // CoinGecko fallback — works from ANY server region (incl. US), INR native. Uses your demo key if set.
 const cgHeaders=()=>COINGECKO_KEY?{"x-cg-demo-api-key":COINGECKO_KEY}:{};
@@ -770,7 +789,7 @@ function assetBtScore(b){
   return {score:s,trades:b.trades,totalRet:b.totalRet,buyHold:b.buyHold,winRate:b.winRate};
 }
 async function backtest(tab,tf){
-  const ck="bt:"+tab+":"+tf;const hit=cGet(ck,10*60*1000);if(hit)return{...hit,cached:true};
+  const ck="bt:"+tab+":"+tf;const hit=cGet(ck,10*60*1000);if(hit)return withLiveRate({...hit,cached:true});
   if(tab==='Crypto'||tab==='All')try{await ensureCryptoUniverse();}catch(e){}
   if(tab==='Commodities'||tab==='All')try{await ensureCommodities();}catch(e){}
   const uni=universeFor(tab).slice(0,250);     // cover the whole universe (single tabs are well under this)
@@ -816,7 +835,7 @@ async function backtest(tab,tf){
 }
 async function scan(tab,tf){
   const ttl = tab==='Crypto' ? TTL_CRYPTO : (tf==='intraday'?TTL_INTRA:TTL_DAILY);
-  const ck="scan:"+tab+":"+tf;const hit=cGet(ck,ttl);if(hit)return{...hit,cached:true};
+  const ck="scan:"+tab+":"+tf;const hit=cGet(ck,ttl);if(hit)return withLiveRate({...hit,cached:true});
   // crypto universe (Binance) + commodities resolved FIRST so the universe reflects them
   if(tab==="Crypto"||tab==="All"){try{await ensureCryptoUniverse();}catch(e){}if(cryptoMode==="coindcx")await ensureCdxFresh();if(!DEMO)try{await ensureBtcState(tf);}catch(e){}}
   if(tab==="Commodities"||tab==="All"){try{await ensureCommodities();}catch(e){}}
@@ -864,7 +883,7 @@ async function scan(tab,tf){
     btc:((tab==='Crypto'||tab==='All')&&BTC_STATE)?{bull:BTC_STATE.bull,verdict:BTC_STATE.verdict}:null,
     note: cryptoFailed?"Crypto unreachable — this server's region can't reach CoinDCX. For exact CoinDCX ₹, host in an India region (e.g. DigitalOcean Bangalore/BLR); otherwise the global ₹ feed is used.":undefined};
   if(ok.length>0 && !cryptoFailed) cSet(ck,out);   // never cache an empty/failed scan
-  return out;
+  return withLiveRate(out);
 }
 function hashStr(s){let h=0;for(const c of s)h=(h*31+c.charCodeAt(0))>>>0;return h;}
 
@@ -962,7 +981,7 @@ async function topMovers(tab,tf){
   tab=tab||"Crypto";
   const ck="movers:"+tab+":"+tf;
   const ttl = tab==='Crypto' ? TTL_CRYPTO : (marketOpen()?TTL_INTRA:TTL_DAILY);
-  const hit=cGet(ck,ttl); if(hit)return {...hit,cached:true};
+  const hit=cGet(ck,ttl); if(hit)return withLiveRate({...hit,cached:true});
   const d=await scan(tab,tf);
   const rows=[],trackable=[];
   (d.results||[]).forEach(r=>{
@@ -990,7 +1009,7 @@ async function topMovers(tab,tf){
     loggedIn:d.loggedIn!==false, marketOpen:marketOpen(),
     needsLogin: tab!=='Crypto' && !DEMO && d.loggedIn===false};
   if(rows.length)cSet(ck,out);
-  return out;
+  return withLiveRate(out);
 }
 
 /* ============================================================
@@ -1537,7 +1556,7 @@ function demoRescale(d,sym){
 let nlInflight=null;
 async function dumpBounce(force){
   const ck="dumpbounce";
-  if(!force){const hit=cGet(ck,NL_TTL);if(hit)return {...hit,cached:true};}
+  if(!force){const hit=cGet(ck,NL_TTL);if(hit)return withLiveRate({...hit,cached:true});}
   if(nlInflight)return nlInflight;                              // one scan at a time — 120 daily-candle fetches is not cheap
   nlInflight=(async()=>{
     try{
@@ -1604,7 +1623,7 @@ async function dumpBounce(force){
         cfg:{minAgeDays:NL_MIN_AGE,minPeakAgeDays:NL_MIN_PEAK_AGE,minDrawdown:NL_MIN_DD,
           zigzag:NL_ZZ_PCT,minQv:NL_MIN_QV,bumpTf:BUMP_TF,bumpMinPct:BUMP_MIN_PCT,bumpMaxHours:BUMP_MAX_BARS*BUMP_BAR_H}};
       if(res.length)cSet(ck,out);
-      return out;
+      return withLiveRate(out);
     }finally{nlInflight=null;}
   })();
   return nlInflight;
@@ -1749,6 +1768,14 @@ function readBody(req){return new Promise((resolve,reject)=>{let d="";req.on("da
 // Compute signals from BROWSER-supplied CoinDCX candles (browser is in India → correct ₹ prices). tf + assets[{sym,tk,name,close[],high[],low[],times[],price}]
 function cryptoSignalsFrom(payload){
   const tf=payload.tf||"1h", results=[];
+  /* WHEN these candles were read. The browser fetched them from CoinDCX a moment before POSTing,
+     so "now" is accurate to a second or two — the same standard loadCoinDCX/loadBinance use.
+     Without it processAsset falls back to the last candle's OPEN time, which on a 30m chart is up
+     to 30 minutes in the past and drifts older until the bar rolls: the card read "📡 04:09 pm" at
+     04:38 pm even though its price was 8 seconds old. Longer timeframe, worse it looked — which is
+     exactly why this showed up on the 30m tab and not on 5m. Stamped here rather than trusted from
+     the payload so a client can't backdate or post-date a card. */
+  const fetchedAt=Date.now();
   // BTC regime from the browser-supplied candles, so the alt-long filter applies on the client path too
   const btc=(payload.assets||[]).find(a=>a.tk==='BTC'||a.sym==='BTCINR'||a.sym==='BTCUSDT');
   if(btc&&btc.close&&btc.close.length>41){const st=btcStateFromSeries(btc.close,btc.high,btc.low,tf); if(st)BTC_STATE=st;}
@@ -1756,7 +1783,7 @@ function cryptoSignalsFrom(payload){
     try{
       if(!a.close||a.close.length<41)return;
       const asset={sym:a.sym,tk:a.tk,name:a.name||a.tk,cls:"Crypto",src:"cg"};
-      const data={close:a.close,high:a.high,low:a.low,times:a.times,vol:a.vol,price:a.price};
+      const data={close:a.close,high:a.high,low:a.low,times:a.times,vol:a.vol,price:a.price,mtime:fetchedAt};
       const r=processAsset(asset,data,tf);
       r.priceTag="live · CoinDCX ₹";     // browser-fetched from the Indian exchange
       results.push(r);
@@ -2168,7 +2195,7 @@ async function handler(req,res){
     if(p==="/api/scan"){ // no login gate — crypto/commodity-ETF work without Upstox; stocks just skip until logged in
       const data=await scan(u.searchParams.get("tab")||"Stocks",u.searchParams.get("tf")||"intraday");return sendJSON(res,data);}
     if(p==="/api/quotes"){
-      {const q=await liveQuotes(u.searchParams.get("tab")||"Stocks");return sendJSON(res,{quotes:q,usdtInr:priceRate(),rateSrc:priceRateSrc(),loggedIn:loggedIn(),ts:Date.now()});}}
+      {const q=await liveQuotes(u.searchParams.get("tab")||"Stocks");return sendJSON(res,withLiveRate({quotes:q,loggedIn:loggedIn(),ts:Date.now()}));}}
     if(p==="/api/backtest"){
       const data=await backtest(u.searchParams.get("tab")||"Stocks",u.searchParams.get("tf")||"daily");return sendJSON(res,data);}
     if(p==="/api/crypto-signals" && req.method==="POST"){
@@ -2183,7 +2210,7 @@ async function handler(req,res){
       const active=SETUPS.active.filter(x=>!tfq||x.tf===tfq).slice().sort((a,b)=>b.born-a.born).slice(0,60)
         .map(x=>({...x,pnlNow:x.status==='filled'?realizedPct(x,x.live):null}));   // live unrealized %, so you know where you stand
       const history=SETUPS.resolved.filter(x=>!tfq||x.tf===tfq).slice(-lim).reverse();
-      return sendJSON(res,{active,recent:history,history,stats:setupStats(),usdtInr:priceRate(),rateSrc:priceRateSrc(),ts:Date.now(),demo:DEMO});}
+      return sendJSON(res,withLiveRate({active,recent:history,history,stats:setupStats(),ts:Date.now(),demo:DEMO}));}
     if(p==="/api/research"){   // one coin, several timeframes, averaged consensus (short or long horizon)
       const sym=u.searchParams.get("sym")||"", horizon=u.searchParams.get("horizon")==="long"?"long":"short";
       return sendJSON(res,await researchCoin(sym,horizon));}
@@ -2216,9 +2243,8 @@ async function handler(req,res){
         if(!DEMO)try{await ensureCryptoUniverse();}catch(e){}
         return sendJSON(res,await addPosition(b)); }
       const chats=await allRecipients();
-      return sendJSON(res,{positions:POSITIONS.slice().sort((a,b)=>b.created-a.created),
-        chats, hasToken:!!TG_TOKEN, explicit:!!TG_CHATS.length,
-        usdtInr:priceRate(), rateSrc:priceRateSrc(), ts:Date.now(), demo:DEMO}); }
+      return sendJSON(res,withLiveRate({positions:POSITIONS.slice().sort((a,b)=>b.created-a.created),
+        chats, hasToken:!!TG_TOKEN, explicit:!!TG_CHATS.length, ts:Date.now(), demo:DEMO})); }
     if(p==="/api/positions/sweep"){ return sendJSON(res,{sent:await positionsSweep(),positions:POSITIONS}); }
     if(p==="/api/universe"){    // symbols the watcher will accept, for the add-position picker
       if(!DEMO)try{await ensureCryptoUniverse();}catch(e){}
@@ -2261,11 +2287,11 @@ if(require.main===module){
 module.exports={IND,computeSignal,buildSetup,buildReasons,confidenceOf,alertEligible,fmtAlert,sendTelegram,signalSince,actionNow,parseCandles,authURL,scan,universeFor,fmtTime,
   loadBinance,loadCoinDCX,loadCrypto,ensureCryptoUniverse,usdInr,resampleSeries,tfCfg,getCRYPTO:()=>CRYPTO,getMode:()=>cryptoMode,
   backtestSeries,scoreSeriesArr,backtest,processAsset,blendResearch,assetBtScore,cdxLiveInr,cdxUsdtInr,topMovers,ticker24,
-  trackSetups,sweepSetups,updateSetupWithPrice,setupStats,markReversals,realizedPct,volMetrics,priceRate,priceRateSrc,
+  trackSetups,sweepSetups,updateSetupWithPrice,setupStats,markReversals,realizedPct,volMetrics,priceRate,priceRateSrc,priceRateAge,cryptoSignalsFrom,
   planTrackables,fmtPlanAlert,dumpBounceAlerts,
   resolveAsset,positionSignal,positionsSweep,addPosition,fmtPosAlert,posPnl,allRecipients,
   __getPositions:()=>POSITIONS,__resetPositions:()=>{POSITIONS=[];},
-  zigzag,listingProfile,bumpProfile,tradePlan,planNowFor,backtestPlan,demoRescale,dumpBotTakes,DUMP_TAKE,forwardStats,dumpBounce,sparkline,synthListing,synthBump,cleanSeries,cleanOHLC,
+  zigzag,listingProfile,bumpProfile,tradePlan,planNowFor,backtestPlan,demoRescale,dumpBotTakes,DUMP_TAKE,withLiveRate,forwardStats,dumpBounce,sparkline,synthListing,synthBump,cleanSeries,cleanOHLC,
   __setFx:(r)=>{fxRate=r;fxAt=Date.now();},__setMode:(m)=>{cryptoMode=m;},
   __getSetups:()=>SETUPS,__resetSetups:()=>{SETUPS={active:[],resolved:[]};},
   btcStateFromSeries,__setBtc:(s)=>{BTC_STATE=s;},
