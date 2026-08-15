@@ -349,9 +349,13 @@ function livePriceTxt(r){
    result; it was only being shown in small print at the top of the card. */
 function venueNote(r){
   if(!r||r.asset.cls!=='Crypto')return '';
-  return /CoinDCX/.test(r.priceTag||'')
-    ? ' <span class="sub">· CoinDCX</span>'
-    : ' <span class="sub" style="color:#fbbf24" title="This server cannot reach CoinDCX, so prices come from the global market. On thin alt-coins the two venues can differ by several percent.">· Binance (global), <b>not</b> CoinDCX</span>';
+  const tag=r.priceTag||'';
+  if(/CoinDCX USDT market/.test(tag))
+    return ' <span class="sub" title="Straight from CoinDCX\'s own USDT market — the price and every level come from that series, nothing is reconstructed.">· CoinDCX USDT market</span>';
+  if(/CoinDCX INR pair/.test(tag))
+    return ' <span class="sub" title="This coin has no USDT market on CoinDCX, so its levels come from the thinner INR pair pinned to the live price.">· CoinDCX INR pair</span>';
+  if(/CoinDCX/.test(tag)) return ' <span class="sub">· CoinDCX</span>';
+  return ' <span class="sub" style="color:#fbbf24" title="This server cannot reach CoinDCX, so prices come from the global market. On thin alt-coins the two venues can differ by several percent.">· Binance (global), <b>not</b> CoinDCX</span>';
 }
 // Currency-aware input conversion: the user types in the currency they SEE (₹ or $ USDT); we always STORE ₹.
 function inrFromDisp(cls,v){return (cls==='Crypto'&&cryptoCcy==='USDT'&&usdtInr>0)?v*usdtInr:v;}   // typed number -> ₹
@@ -387,18 +391,57 @@ async function fetchCoinDCXCrypto(tf){
     .filter(r=>r.last>0&&!STABLE_C.has(r.base)&&!/(UP|DOWN|BULL|BEAR)$/.test(r.base)&&!/^\d/.test(r.base))
     .sort((a,b)=>b.vol-a.vol).slice(0,CRYPTO_N);
   const interval=CDX_INT_C[tf]||"1h";
+  const pairs=await cdxPairMap();                       // authoritative pair ids, cached for the hour
+  const bars=async pair=>{
+    const j=await fetchT(`https://public.coindcx.com/market_data/candles?pair=${encodeURIComponent(pair)}&interval=${interval}&limit=300`,{},7000).then(x=>x.json());
+    if(!Array.isArray(j)||j.length<41)return null;
+    const rev=j.slice().reverse();const close=[],high=[],low=[],times=[],vol=[];
+    for(const k of rev){const c=+k.close;if(!isFinite(c))continue;close.push(c);high.push(+k.high);low.push(+k.low);times.push(+k.time);vol.push(+k.volume||0);}
+    return close.length<41?null:{close,high,low,times,vol};
+  };
   const assets=await mapLimitClient(rows,10,async r=>{
-    try{const j=await fetchT(`https://public.coindcx.com/market_data/candles?pair=I-${r.base}_INR&interval=${interval}&limit=300`,{},7000).then(x=>x.json());
-      if(!Array.isArray(j)||j.length<41)return null;
-      const rev=j.slice().reverse();const close=[],high=[],low=[],times=[],vol=[];
-      for(const k of rev){const c=+k.close;if(!isFinite(c))continue;close.push(c);high.push(+k.high);low.push(+k.low);times.push(+k.time);vol.push(+k.volume||0);}
-      if(close.length<41)return null;
-      const f=r.last/close[close.length-1]; if(f>0.2&&f<5){for(let i=0;i<close.length;i++){close[i]*=f;high[i]*=f;low[i]*=f;}} else {close[close.length-1]=r.last;}  // rescale INR candles to the live (USDT-based) price (volume unchanged)
-      // carry the venue's OWN $ number and the rate that built the ₹, so display never has to guess
-      return {sym:r.market,tk:r.base,name:r.base,close,high,low,times,vol,price:r.last,priceUsd:usdtBy[r.base]||0,rateUsed:usdtInr||0};
+    const usdtPair=(pairs[r.base]||{}).usdt, u=usdtBy[r.base]||0;
+    /* PREFERRED: the coin's own USDT market. The series is then the exchange's series, and ₹ is
+       one multiplication by CoinDCX's own USDT/INR — the same arithmetic the CoinDCX app does.
+       The INR pair below is thin: its history has a different shape, and rescaling it pins only
+       the last bar, leaving every entry / stop / target on the wrong curve. */
+    if(usdtPair&&usdtInr>0){
+      try{ const s=await bars(usdtPair);
+        if(s){ if(u>0)s.close[s.close.length-1]=u;
+          const close=s.close.map(v=>v*usdtInr),high=s.high.map(v=>v*usdtInr),low=s.low.map(v=>v*usdtInr);
+          return {sym:r.market,tk:r.base,name:r.base,close,high,low,times:s.times,vol:s.vol,
+            price:close[close.length-1],priceUsd:s.close[s.close.length-1],rateUsed:usdtInr,pairUsed:"usdt"};
+        }
+      }catch(e){}
+    }
+    try{ const s=await bars(`I-${r.base}_INR`);
+      if(!s)return null;
+      const {close,high,low}=s;
+      const f=r.last/close[close.length-1]; if(f>0.2&&f<5){for(let i=0;i<close.length;i++){close[i]*=f;high[i]*=f;low[i]*=f;}} else {close[close.length-1]=r.last;}
+      return {sym:r.market,tk:r.base,name:r.base,close,high,low,times:s.times,vol:s.vol,
+        price:r.last,priceUsd:u,rateUsed:usdtInr||0,pairUsed:"inr"};
     }catch(e){return null;}
   });
   return assets.filter(Boolean);
+}
+/* CoinDCX's own pair ids, so nothing is guessed from a template. A wrong id 404s and falls
+   silently back to the INR pair, which looks exactly like the fix not having shipped. */
+let cdxPairCache=null,cdxPairCacheAt=0;
+async function cdxPairMap(){
+  if(cdxPairCache&&Date.now()-cdxPairCacheAt<3600e3)return cdxPairCache;
+  try{
+    const j=await fetchT("https://api.coindcx.com/exchange/v1/markets_details",{},7000).then(r=>r.json());
+    if(!Array.isArray(j))throw new Error("markets_details");
+    const map={};
+    for(const m of j){
+      const base=m.target_currency_short_name,quote=m.base_currency_short_name,pair=m.pair;
+      if(!base||!quote||!pair)continue;
+      map[base]=map[base]||{};
+      if(quote==='USDT')map[base].usdt=pair; else if(quote==='INR')map[base].inr=pair;
+    }
+    cdxPairCache=map;cdxPairCacheAt=Date.now();
+  }catch(e){ cdxPairCache=cdxPairCache||{}; }   // no list -> every coin takes the INR fallback
+  return cdxPairCache;
 }
 const id4=s=>s.replace(/[^a-z0-9]/gi,'');
 const getCap=()=>Math.max(0,+document.getElementById('capital').value||0);
