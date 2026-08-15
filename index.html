@@ -360,7 +360,7 @@ function dispFromInr(cls,v){return (cls==='Crypto'&&cryptoCcy==='USDT'&&usdtInr>
 function actionText(a,r){
   if(!a)return '';
   if(!r||r.asset.cls!=='Crypto'||!a.kind) return a.txt||'';
-  const P=v=>cryptoPrice(v), g=(a.gap!=null?a.gap:0).toFixed(1), lo=P(a.lo), hi=P(a.hi);
+  const P=v=>cryptoPrice(v,r.rateUsed), g=(a.gap!=null?a.gap:0).toFixed(1), lo=P(a.lo), hi=P(a.hi);
   switch(a.kind){
     case 'buynow':    return `🟢 BUY NOW — price is at the support/dip zone (${lo}–${hi})`;
     case 'buybreak':  return `🟢 BUY the breakout — ${lo}–${hi}`;
@@ -434,7 +434,7 @@ function updateTradesBtn(){const b=document.getElementById('tradesBtn');if(b)b.t
 function requestNotify(){try{if('Notification'in window&&Notification.permission==='default')Notification.requestPermission();}catch(e){}}
 function notify(title,body){toast(title+' — '+body);try{if('Notification'in window&&Notification.permission==='granted')new Notification(title,{body});}catch(e){}}
 function toast(msg){const c=document.getElementById('toast');if(!c)return;const d=document.createElement('div');d.className='t';d.textContent=msg;c.appendChild(d);setTimeout(()=>d.remove(),9000);}
-function tpx(t,v){return t.cls==='Crypto'?cryptoPrice(v):fmtVal(v,t.dec,t.isIndex);}
+function tpx(t,v){return t.cls==='Crypto'?cryptoPrice(v,usdtInr):fmtVal(v,t.dec,t.isIndex);}   // stored trade: no build-rate, today's rate is the right one
 function tpnl(t){return t.price>0?(t.dir>0?(t.price/t.entry-1):(t.entry/t.price-1))*100:0;}
 const TF_MIN={'5m':5,'15m':15,'30m':30,'1h':60,'4h':240,'6h':360,'12h':720,'daily':1440,'intraday':30};
 const FILL_BARS=6;                                   // a limit that doesn't fill within ~6 bars is treated as missed
@@ -446,7 +446,7 @@ function placeTrade(sym){
   requestNotify();
   const dir=r.setup.dir,p0=r.sig.price,lo=r.setup.entryLo,hi=r.setup.entryHi,mid=r.setup.entry;
   const cls=r.asset.cls;
-  const fmt=v=>cls==='Crypto'?cryptoPrice(v):fmtVal(v,r.dec,r.isIndex);
+  const fmt=v=>cls==='Crypto'?cryptoPrice(v,r.rateUsed):fmtVal(v,r.dec,r.isIndex);
   const ccyLabel=(cls==='Crypto'&&cryptoCcy==='USDT'&&usdtInr>0)?'USDT ($)':'₹';
   // Price already in / through the entry zone? Then you're likely entering at market now.
   const atMarketable = dir>0 ? (p0<=hi) : (p0>=lo);
@@ -687,14 +687,31 @@ async function runResearch(){
   researchBusy=false;
 }
 function renderResearchResult(d){
-  const c=d.consensus, out=document.getElementById('researchOut'), P=v=>cryptoPrice(v);
+  const c=d.consensus, out=document.getElementById('researchOut'), P=v=>cryptoPrice(v,c.rateUsed);
   const vCol=c.verdict==='BUY'?'buy':c.verdict==='SELL'?'sell':'muted';
   const vLabel=c.verdict==='BUY'?'🟢 CONSENSUS: BUY / LONG':c.verdict==='SELL'?'🔴 CONSENSUS: SELL / SHORT':'⚪ NO CONSENSUS';
   const frames=c.frames.map(f=>`<tr><td>${f.tf}</td><td style="color:var(--${f.verdict==='BUY'?'buy':f.verdict==='SELL'?'sell':'muted'})">${f.verdict}</td><td>${f.score>0?'+':''}${f.score}</td><td>${P(f.stop)}</td><td>${f.bt!=null?f.bt:'—'}</td></tr>`).join('');
   let plan;
   if(c.verdict!=='HOLD'&&c.entry){
-    const tgts=c.targets.map((t,i)=>`<span class="rzk">T${i+1}</span> <b>${P(t)}</b> <span class="sub">(${c.ret[i]>=0?'+':''}${c.ret[i].toFixed(1)}%)</span>`).join(' &nbsp;·&nbsp; ');
-    plan=`<div style="margin:9px 0;line-height:2">
+    /* THE TARGETS ARE MEASURED FROM THE AVERAGED ENTRY, NOT FROM THE LIVE PRICE. When the entry
+       sits well away from the market — averaging three timeframes routinely puts it there — those
+       "+9.1% / +15.0%" figures describe a move starting somewhere the coin is not. A real card
+       read CONSENSUS: BUY at a live $0.1875 with T1 $0.1785 and T2 $0.1880: the first target
+       already BELOW the market and the second level with it, presented as upside. Both facts are
+       now said out loud instead of left for the reader to derive. */
+    const gapPct=isFinite(c.price)&&c.price>0?(c.entry/c.price-1)*100:0;
+    const away=Math.abs(gapPct)>=1.5;
+    const passed=c.targets.length&&(c.dir>0?c.price>=c.targets[0]:c.price<=c.targets[0]);
+    const tgts=c.targets.map((t,i)=>{
+      const gone=c.dir>0?c.price>=t:c.price<=t;
+      return `<span class="rzk">T${i+1}</span> <b${gone?' style="opacity:.55;text-decoration:line-through"':''}>${P(t)}</b> <span class="sub">(${c.ret[i]>=0?'+':''}${c.ret[i].toFixed(1)}%${gone?' · already there':''})</span>`;
+    }).join(' &nbsp;·&nbsp; ');
+    const warn = passed
+      ? `<div style="margin:8px 0;padding:8px 11px;border-radius:9px;background:rgba(245,158,11,.13);border:1px solid rgba(245,158,11,.45);color:#fbbf24;font-size:12.5px;line-height:1.5">⚠ <b>Target 1 is already behind the market.</b> Live ${P(c.price)} has passed T1 ${P(c.targets[0])}, so this averaged plan describes a move that has largely happened. The % figures below are measured from the <b>entry</b>, not from here — re-run after the next close rather than buying into it.</div>`
+      : away
+      ? `<div class="sub" style="margin:6px 0">⏳ This is a <b>${c.dir>0?'pullback':'bounce'} plan</b>, not a buy-now: the averaged entry ${P(c.entry)} sits <b>${Math.abs(gapPct).toFixed(1)}% ${gapPct<0?'below':'above'}</b> the live ${P(c.price)}. The % figures are measured from that entry.</div>`
+      : '';
+    plan=`${warn}<div style="margin:9px 0;line-height:2">
       <div><span class="rzk">Averaged entry</span> <b>${P(c.entry)}</b> &nbsp;·&nbsp; <span class="rzk">Stop</span> <b style="color:var(--sell)">${P(c.stop)}</b> <span class="sub">(risk ${c.riskPct.toFixed(1)}%)</span> &nbsp;·&nbsp; <span class="rzk">R:R</span> <b>${c.rrr.toFixed(1)}:1</b></div>
       <div>${tgts}</div>
       <div class="sub" style="margin-top:5px">Per-timeframe stops disagreed by <b>${c.stopSpreadPct.toFixed(1)}%</b> — this averaged stop smooths that out.${c.btAvg!=null?' · Avg backtest grade <b>'+c.btAvg+'/100</b>':''}</div></div>`;

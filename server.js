@@ -1850,7 +1850,13 @@ function blendResearch(per){
   }
   const grades=per.map(r=>r.bt&&r.bt.score).filter(v=>v!=null);
   const btAvg=grades.length?Math.round(avg(grades)):null;
-  return {verdict,dir,agree,price,entry,stop,targets,ret,rrr,riskPct,stopSpreadPct,btAvg,
+  /* The rate that BUILT these ₹ figures, and the venue's own $ for the live price. Without them
+     the panel divided by whatever the shared global rate happened to hold, which is only correct
+     when that is the same reading — the mismatch that put $3.43 on screen against CoinDCX's
+     $3.21. Every crypto payload states its own rate now; none of them share one by accident. */
+  const last=per[per.length-1];
+  return {verdict,dir,agree,price,priceUsd:last.sig.priceUsd,rateUsed:last.rateUsed,
+    entry,stop,targets,ret,rrr,riskPct,stopSpreadPct,btAvg,
     frames:per.map(r=>({tf:r.tf,verdict:r.sig.verdict,score:r.sig.score,entry:r.setup.entry,stop:r.setup.stop,t1:r.setup.targets[0],bt:r.bt&&r.bt.score}))};
 }
 async function researchCoin(rawSym,horizon){
