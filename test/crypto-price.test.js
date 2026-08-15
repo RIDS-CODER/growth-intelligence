@@ -274,9 +274,9 @@ test("a $ price can never be older than the ₹ beside it",()=>{
   const vm=require("node:vm");
   const html=require("node:fs").readFileSync(require("node:path").join(__dirname,"..","index.html"),"utf8");
   const script=html.match(/<script>([\s\S]*)<\/script>/)[1];
-  const el=()=>({textContent:""});
+  const el=()=>({textContent:"",style:{color:""}});
   const ctx=vm.createContext({
-    cryptoCcy:"USDT", usdtInr:89.0, lastResults:[],
+    cryptoCcy:"USDT", usdtInr:89.0, lastResults:[], setInterval(){},
     document:{getElementById:()=>el(),querySelectorAll:()=>[]},
     updateCcyWarn(){}, refreshStaleFlags(){}, id4:s=>s.replace(/[^a-z0-9]/gi,""),
   });
@@ -301,6 +301,45 @@ test("a $ price can never be older than the ₹ beside it",()=>{
   ctx.applyQuotes({PROMINR:3.6*89},{PROMINR:3.61});
   assert.strictEqual(r.sig.priceUsd,3.61);
   assert.strictEqual(ctx.livePriceTxt(r),"$3.6100","the exchange's own number wins whenever we have it");
+});
+
+test("a failing browser feed falls through to the server instead of freezing silently",()=>{
+  /* THE STALL THIS PINS. The browser-direct branch ended in a bare `catch(e){}` followed by an
+     unconditional `return`, so one failed read — a rate limit, a blip, a CORS change — stopped the
+     price dead with no error, no fallback and no sign of it, until the next full rescan. A
+     non-array body like {"message":"Too many requests"} did the same without even throwing. */
+  const html=require("node:fs").readFileSync(require("node:path").join(__dirname,"..","index.html"),"utf8");
+  const script=html.match(/<script>([\s\S]*)<\/script>/)[1];
+  const fn=script.slice(script.indexOf("async function pollQuotes()"),script.indexOf("const getMinScore="));
+  assert.ok(!/\}catch\(e\)\{\}\s*return;/.test(fn),"a swallowed error must not also skip the fallback");
+  assert.match(fn,/if\(!Array\.isArray\(t\)\)throw/,"a refusal body must be treated as a failure, not ignored");
+  assert.match(fn,/\/\/ fall through/,"the direct branch must fall through to the server on failure");
+  // the server call must come AFTER the direct branch, reachable from it
+  assert.ok(fn.indexOf("/api/quotes?tab=")>fn.indexOf("ticker refused"),
+    "the server path has to be downstream of the direct failure");
+  assert.match(fn,/directBackoffUntil=Date\.now\(\)\+/,"repeated failures must back off, not hammer");
+});
+
+test("the age of the price on screen is shown, and coloured as it goes stale",()=>{
+  /* A frozen price and a quiet market look identical — the only reason a stall can sit unnoticed.
+     Five separate reports of "lagging" came down to nobody being able to see the age. */
+  const vm=require("node:vm");
+  const html=require("node:fs").readFileSync(require("node:path").join(__dirname,"..","index.html"),"utf8");
+  const script=html.match(/<script>([\s\S]*)<\/script>/)[1];
+  const el={textContent:"",style:{color:""}};
+  const ctx=vm.createContext({document:{getElementById:()=>el},setInterval(){}});
+  vm.runInContext(script.slice(script.indexOf("let lastQuoteAt=0"),script.indexOf("async function pollQuotes"))+
+    ";globalThis.paint=paintQuoteAge;globalThis.set=(t,w)=>{lastQuoteAt=t;quoteWhy=w||'';};",ctx);
+
+  ctx.set(Date.now()-3000); ctx.paint();
+  assert.match(el.textContent,/3s ago/,"the age must be stated, not just the timestamp");
+  assert.strictEqual(el.style.color,"","fresh is unstyled");
+  ctx.set(Date.now()-25000); ctx.paint();
+  assert.match(el.textContent,/25s ago/);
+  assert.strictEqual(el.style.color,"#fbbf24","going stale must be amber");
+  ctx.set(Date.now()-90000,"browser feed failing, using server"); ctx.paint();
+  assert.strictEqual(el.style.color,"var(--sell)","properly stale must be red");
+  assert.match(el.textContent,/browser feed failing/,"and it must say WHY when it knows");
 });
 
 test("the page never claims a global-feed $ price matches CoinDCX",()=>{
