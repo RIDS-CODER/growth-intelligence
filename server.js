@@ -906,7 +906,11 @@ async function liveQuotesFull(tab){
   const uni=universeFor(tab),out={},usd={};
   const cryptoIds=uni.filter(a=>a.src==='cg');
   if(cryptoIds.length && !DEMO){
-    if(cgPriceCache && Date.now()-cgPriceAt<8000){Object.assign(out,cgPriceCache);Object.assign(usd,cgUsdCache||{});}
+    /* 3s, not 8s. This cache and the browser's poll are INDEPENDENT clocks that stack: an 8s cache
+       behind an 8s poll means a quote can be 16s old on screen in the worst case, and the two
+       never line up. The upstream call is one ticker request covering every market, shared by all
+       pages this server serves, so 20/min costs nothing and halves the worst case. */
+    if(cgPriceCache && Date.now()-cgPriceAt<3000){Object.assign(out,cgPriceCache);Object.assign(usd,cgUsdCache||{});}
     else if(cryptoMode==="coindcx"){
       try{await cdxGetTicker();const c={},u={};cryptoIds.forEach(x=>{const p=cdxLiveInr(x.tk)||(cdxTicker[x.sym]>0?cdxTicker[x.sym]:0);if(p>0)c[x.sym]=p;const d=cdxLiveUsd(x.tk);if(d>0)u[x.sym]=d;});
         cgPriceCache=c;cgUsdCache=u;cgPriceAt=Date.now();Object.assign(out,c);Object.assign(usd,u);}

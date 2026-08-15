@@ -857,7 +857,14 @@ function refreshStaleFlags(){
 function applyQuotes(map,usdMap){
   let touched=false;
   lastResults.forEach(r=>{const q=map[r.asset.sym];if(q&&isFinite(q)){r.sig.price=q;touched=true;
-    const u=usdMap&&+usdMap[r.asset.sym]; if(u>0)r.sig.priceUsd=u;
+    /* priceUsd must NEVER be older than price. The $ view prefers it unconditionally, so updating
+       it conditionally freezes the dollar figure the moment a tick arrives without one: ₹ keeps
+       moving, $ stops, permanently, until the next full scan replaces the object. The server's
+       own fallback path serves exactly that shape — `Object.assign(usd, cgUsdCache||{})` hands
+       back an empty map whenever the USD cache has not been filled yet — and a coin whose USDT
+       pair drops out of the ticker does the same. Clearing it makes the $ view fall back to rate
+       conversion, which is at least as fresh as the ₹ beside it. */
+    const u=+((usdMap||{})[r.asset.sym]); if(u>0)r.sig.priceUsd=u; else delete r.sig.priceUsd;
     const id=id4(r.asset.sym),txt=livePriceTxt(r);
     const el=document.getElementById('px_'+id);if(el)el.textContent=txt;
     document.querySelectorAll('.lp'+id).forEach(e=>e.textContent=txt);   // live price quoted inside the LATE/MISSED warning
@@ -1870,7 +1877,7 @@ function renderTabs(){const t=document.getElementById('tabs');t.innerHTML='';["S
 document.getElementById('tf').addEventListener('click',e=>{const d=e.target.closest('[data-tf]');if(!d)return;timeframe=d.dataset.tf;[...document.querySelectorAll('#tf div')].forEach(x=>x.classList.toggle('on',x===d));runScan();});
 document.getElementById('ccy').addEventListener('click',async e=>{const d=e.target.closest('[data-ccy]');if(!d)return;cryptoCcy=d.dataset.ccy;[...document.querySelectorAll('#ccy div')].forEach(x=>x.classList.toggle('on',x===d));if(cryptoCcy==='USDT')await ensureRate();updateCcyWarn();if(lastResults.length)render(lastResults);});
 setInterval(tickCountdown,1000);
-setInterval(pollQuotes,8000);
+setInterval(pollQuotes,5000);   // paired with the server's 3s quote cache: ~8s worst case, was ~16s
 setInterval(getStatus,60000);
 
 renderTabs();onRiskChange();onMinScore();updateTradesBtn();renderTrades();monitorPoll();checkReversals();getStatus().then(runScan);

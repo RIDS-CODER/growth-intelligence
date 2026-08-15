@@ -264,6 +264,45 @@ test("$ is the venue's OWN number, so no rate — right or wrong — can move it
     "falling back must divide by rateUsed (89.0), not the stale shared 95.1 that produced $3.43");
 });
 
+test("a $ price can never be older than the ₹ beside it",()=>{
+  /* THE FREEZE THIS PINS. The $ view prefers sig.priceUsd unconditionally, but the quote poll
+     only WROTE it when the USD map carried the symbol. So the first tick that arrived without one
+     stopped the dollar figure dead: ₹ kept moving, $ sat still, permanently, until a full rescan
+     replaced the object. The server's own fallback serves exactly that shape —
+     `Object.assign(usd, cgUsdCache||{})` hands back an empty map before the USD cache is filled —
+     and a coin whose USDT pair drops out of the ticker does the same. */
+  const vm=require("node:vm");
+  const html=require("node:fs").readFileSync(require("node:path").join(__dirname,"..","index.html"),"utf8");
+  const script=html.match(/<script>([\s\S]*)<\/script>/)[1];
+  const el=()=>({textContent:""});
+  const ctx=vm.createContext({
+    cryptoCcy:"USDT", usdtInr:89.0, lastResults:[],
+    document:{getElementById:()=>el(),querySelectorAll:()=>[]},
+    updateCcyWarn(){}, refreshStaleFlags(){}, id4:s=>s.replace(/[^a-z0-9]/gi,""),
+  });
+  vm.runInContext(
+    script.slice(script.indexOf("const usdTxt="),script.indexOf("// Currency-aware input conversion"))+
+    script.slice(script.indexOf("function cryptoPrice(v,rate)"),script.indexOf("const fmtR=r=>v=>"))+
+    "const fmtR=r=>v=>cryptoPrice(v,r.rateUsed);"+
+    script.slice(script.indexOf("function applyQuotes(map,usdMap)"),script.indexOf("async function pollQuotes"))+
+    ";globalThis.applyQuotes=applyQuotes;globalThis.livePriceTxt=livePriceTxt;",ctx);
+
+  const r={asset:{cls:"Crypto",sym:"PROMINR"},sig:{price:3.21*89,priceUsd:3.21},rateUsed:89.0};
+  ctx.lastResults=[r];
+  assert.strictEqual(ctx.livePriceTxt(r),"$3.2100","fixture check: starts on the venue's own number");
+
+  // the coin moves 10%, and this tick carries NO usd map (the server's empty-cache fallback)
+  ctx.applyQuotes({PROMINR:3.531*89},{});
+  assert.strictEqual(r.sig.priceUsd,undefined,"a $ we cannot refresh must be dropped, not kept");
+  assert.strictEqual(ctx.livePriceTxt(r),"$3.5310",
+    "the $ view must fall back to rate conversion, which is as fresh as the ₹ it divides");
+
+  // and when the venue's own number IS supplied again, it takes over
+  ctx.applyQuotes({PROMINR:3.6*89},{PROMINR:3.61});
+  assert.strictEqual(r.sig.priceUsd,3.61);
+  assert.strictEqual(ctx.livePriceTxt(r),"$3.6100","the exchange's own number wins whenever we have it");
+});
+
 test("the page never claims a global-feed $ price matches CoinDCX",()=>{
   /* It used to end the global-feed notice with "and $ USDT values are exact". Exact against the
      GLOBAL market — not against CoinDCX. The India premium explains only the ₹ gap; the coin's own
