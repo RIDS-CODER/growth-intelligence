@@ -1167,12 +1167,17 @@ let quickTimer=null;
 const qf=v=>v==null||!isFinite(v)?'—':(Math.abs(v)<5?(+v).toFixed(4):(+v).toFixed(2));
 // ₹/$ display toggle shared by Quick Trades + Volume Movers (scalpers usually think in USDT). Server values are always ₹.
 let scalpCcy='USDT', scalpRateSrc='';
-function scalpPrice(v,cls){ if(v==null||!isFinite(v))return '—';
+function scalpPrice(v,cls,rate){ if(v==null||!isFinite(v))return '—';
   // Only crypto is dual-quoted. An index level or a commodity price divided by the USDT rate
   // would be meaningless, so those always render in ₹ regardless of the toggle.
   const dual = cls==null || cls==='Crypto';
-  // Divides by the SAME rate the server used to build these ₹ values, so $ is the exact source price (no double conversion).
-  if(dual&&scalpCcy==='USDT'&&usdtInr>0){const u=v/usdtInr;return '$'+u.toLocaleString('en-US',{minimumFractionDigits:u<5?4:2,maximumFractionDigits:u<5?4:2});}
+  /* `rate` is the rate that BUILT this row's ₹, carried on the row itself. This used to divide by
+     the shared global while its comment claimed it used the building rate — an invariant asserted
+     but never enforced, which is how the same class of mispricing survived on every panel except
+     the scanner. Rows outlive their payload in cache (🎢 Dump & Bounce for 30 minutes), so only a
+     rate carried alongside the row stays paired with it. */
+  const r=(rate>0)?rate:usdtInr;
+  if(dual&&scalpCcy==='USDT'&&r>0){const u=v/r;return '$'+u.toLocaleString('en-US',{minimumFractionDigits:u<5?4:2,maximumFractionDigits:u<5?4:2});}
   return '₹'+Number(v).toLocaleString('en-IN',{minimumFractionDigits:Math.abs(v)<5?4:2,maximumFractionDigits:Math.abs(v)<5?4:2});}
 // Honest, compact statement of which currency is exact against your exchange right now.
 function scalpPriceNote(){
@@ -1308,7 +1313,7 @@ function renderQuickList(){
   el.innerHTML='<div class="cards">'+sorted.map(quickCard).join('')+'</div>';
 }
 function quickCard(q){
-  const isBuy=q.dir>0, col=isBuy?'var(--buy)':'var(--sell)', P=v=>scalpPrice(v,q.cls);
+  const isBuy=q.dir>0, col=isBuy?'var(--buy)':'var(--sell)', P=v=>scalpPrice(v,q.cls,q.rateUsed);
   const confCol=q.conf.label==='High'?'var(--buy)':q.conf.label==='Medium'?'#fbbf24':'var(--muted)';
   const verb=q.reverse?'SHORT INTO DIP':(isBuy?(q.kind==='buynow'||q.kind==='buybreak'?'BUY NOW':'BUY DIP'):(q.kind==='sellnow'||q.kind==='sellbreak'?'SHORT NOW':'SHORT BOUNCE'));
   const tag=q.regime==='correction'?'<span style="color:#f87171">₿ fade</span>':q.reverse?'<span style="color:#f59e0b">↔ reverse</span>':'<span style="color:#fbbf24">⚡ scalp</span>';
@@ -1372,7 +1377,7 @@ function renderMoversShell(){
   renderMoversList(); renderTracked('moversTracked');
 }
 function moverCard(m){
-  const s=m.setup||{}, isBuy=s.dir>0, P=v=>scalpPrice(v,m.cls);
+  const s=m.setup||{}, isBuy=s.dir>0, P=v=>scalpPrice(v,m.cls,m.rateUsed);
   const tradeable=m.verdict!=='HOLD'&&m.action&&MOVER_ACTIONABLE.includes(m.action.kind);
   const col=isBuy?'var(--buy)':'var(--sell)';
   const conf=m.conf||{label:'—',pct:null}, confCol=conf.label==='High'?'var(--buy)':conf.label==='Medium'?'#fbbf24':'var(--muted)';
@@ -1510,9 +1515,9 @@ function nlEdge(f){
 /* The bump block — the headline of every card, because it is the only part with a clock on it. */
 /* One side of the plan: entry zone, stop, three targets. The LIVE side renders in full; the
    other renders as a one-line "and then", with real levels so you can set the alert now. */
-function nlSide(s,label,note,live){
+function nlSide(s,label,note,live,rate){
   if(!s)return '';
-  const P=v=>scalpPrice(v,'Crypto'), buy=s.dir>0, col=buy?'var(--buy)':'var(--sell)';
+  const P=v=>scalpPrice(v,'Crypto',rate), buy=s.dir>0, col=buy?'var(--buy)':'var(--sell)';
   if(!live)return `<div class="sub" style="margin-top:6px;padding:6px 9px;border-radius:8px;border:1px dashed var(--line);line-height:1.5">
     <b style="color:${col}">${label}</b> — ${note} ${buy?'Buy':'Sell'} <b>${P(s.entryLo)}–${P(s.entryHi)}</b>, stop <b>${P(s.stop)}</b>, targets ${s.targets.map(t=>P(t)).join(' → ')} <span style="color:${col}">(+${s.ret.join('% / +')}%)</span> · R:R <b>${s.rrr}:1</b></div>`;
   const tg=s.targets.map((t,k)=>`<div class="lv t${k+1}"><div class="k">Target ${k+1}</div><div class="v">${P(t)}</div><div class="r" style="color:${col}">+${s.ret[k]}%</div></div>`).join('');
@@ -1527,7 +1532,7 @@ function nlSide(s,label,note,live){
 function nlPlan(r){
   if(!r.plan)return `<div class="sub" style="margin:8px 0;padding:8px 10px;border-radius:9px;border:1px solid var(--line)">
     ⏱ <b>No levels.</b> ${r.bumpErr?'The 4h history did not load ('+r.bumpErr+').':'Not enough 4h history to place a stop honestly, so none is offered.'}</div>`;
-  const p=r.plan, pi=r.planInfo||{}, col=NL_PCOL[pi.col]||'var(--muted)', P=v=>scalpPrice(v,'Crypto');
+  const p=r.plan, pi=r.planInfo||{}, col=NL_PCOL[pi.col]||'var(--muted)', P=v=>scalpPrice(v,'Crypto',r.rateUsed);
   const buyLive=p.now==='buy', shortLive=p.now==='short';
   const est=p.fromBump?'':' <span title="This coin has no completed bump on the 4h chart yet, so the target distance is estimated from its recent range instead of measured. Treat the targets as softer.">(sizes estimated, not measured)</span>';
   const wait=p.now==='wait_buy'
@@ -1538,8 +1543,8 @@ function nlPlan(r){
       <div class="sub" style="margin-top:3px;line-height:1.5;color:var(--txt)">${pi.lead||''}${est}</div>
       ${wait?`<div class="sub" style="margin-top:4px">${wait}</div>`:''}
       ${r.botTake?`<div class="sub" style="margin-top:5px;padding:5px 8px;border-radius:7px;background:rgba(255,255,255,.04);border:1px dashed var(--line);color:${r.botTake.take?'var(--buy)':'var(--muted)'}">🤖 <b>Paper bot: ${r.botTake.take?'would take this':'would skip'}</b> — ${r.botTake.why}.</div>`:''}
-      ${nlSide(p.long,'① LONG the bounce','counter-trend — take profit into strength.',buyLive||p.now==='wait_buy')}
-      ${nlSide(p.short,'② SHORT the failure','with-trend — this is the higher-probability side.',shortLive||p.now==='wait_short')}
+      ${nlSide(p.long,'① LONG the bounce','counter-trend — take profit into strength.',buyLive||p.now==='wait_buy',r.rateUsed)}
+      ${nlSide(p.short,'② SHORT the failure','with-trend — this is the higher-probability side.',shortLive||p.now==='wait_short',r.rateUsed)}
       <div class="sub" style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--line)">Floor <b>${P(p.floor)}</b> · where bumps have died <b>${P(p.roof)}</b> · ${r.stale?'price at last scan':'live'} <b>${P(p.price)}</b>${r.stale?' <span style="color:#fbbf24" title="No live quote reached the browser, so this price and the instruction above are from the last full scan and may be stale.">⚠ not live</span>':''}</div>
     </div>`;
 }
@@ -1605,7 +1610,7 @@ function nlEvidence(r){
 }
 function nlCard(r,i){
   const pi=r.planInfo||{}, pcol=NL_PCOL[pi.col]||'var(--muted)', ed=nlEdge(r.fwd), f=r.fwd||{};
-  const ph=r.phaseInfo||{}, P=v=>scalpPrice(v,'Crypto');
+  const ph=r.phaseInfo||{}, P=v=>scalpPrice(v,'Crypto',r.rateUsed);
   // Honest about what we can and cannot see: a series that hit the 400-bar fetch cap means the
   // coin is OLDER than our window, not that it listed 400 days ago.
   const age=r.verifiedListing?`listed ~<b>${r.ageDays}d</b> ago`
@@ -1722,7 +1727,7 @@ function posStatus(p){
 }
 function posRow(p){
   // Same ₹/$ toggle every other panel uses. Entries are STORED in ₹; this only changes the view.
-  const f=v=>scalpPrice(v,p.cls);
+  const f=v=>scalpPrice(v,p.cls,p.rateUsed);
   const st=posStatus(p), pnl=p.pnlPct;
   return `<div class="trow" style="border-color:${p.rev?'rgba(234,57,67,.5)':'var(--line)'}">
     <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:baseline">
@@ -1852,7 +1857,7 @@ function trackedAdvice(x){
     <b>⚠ The setup that justified this trade is gone</b> — the engine now reads ${x.dir>0?'SELL':'BUY'} on ${x.tk||x.name}, the opposite of your ${x.dir>0?'long':'short'}.
     ${x.hitT>0?`You have already banked T${x.hitT} and your stop sits at ${x.hitT===1?'entry':'T'+(x.hitT-1)}, so the rest is protected — let the stop do its job.`
       :`Standard scalp discipline is to <b>close at market now</b> rather than hold to the stop: a reversed scalp usually reaches the stop anyway, and exiting early makes the loss smaller than the planned one. Holding on turns a small planned loss into an unplanned bigger one.`}</div>`;
-  if(x.pnlNow!=null&&x.pnlNow<0)return `<div class="sub" style="margin:2px 0 6px;font-size:11.5px">Going against you but the signal still stands — the plan allows for this. Your stop at <b>${scalpPrice(x.stop)}</b> is the exit; don't move it further away.</div>`;
+  if(x.pnlNow!=null&&x.pnlNow<0)return `<div class="sub" style="margin:2px 0 6px;font-size:11.5px">Going against you but the signal still stands — the plan allows for this. Your stop at <b>${scalpPrice(x.stop,x.cls,x.rateUsed)}</b> is the exit; don't move it further away.</div>`;
   return '';
 }
 const RESOLVED_TAG={target:['✅ all targets','var(--buy)'],banked:['✅ banked (T1+)','var(--buy)'],stopped:['⛔ stopped','var(--sell)'],
@@ -1869,7 +1874,7 @@ const OUTCOME_MEANING={
 const FILLED_STATUS=new Set(['target','stopped','banked','timeout+','timeout-']);
 function historyRow(x){
   const t=RESOLVED_TAG[x.status]; if(!t)return '';
-  const P=v=>scalpPrice(v,x.cls), filled=FILLED_STATUS.has(x.status), pnl=x.pnlPct;
+  const P=v=>scalpPrice(v,x.cls,x.rateUsed), filled=FILLED_STATUS.has(x.status), pnl=x.pnlPct;
   const pc=pnl==null?'var(--muted)':pnl>0?'var(--buy)':pnl<0?'var(--sell)':'var(--muted)';
   return `<div style="padding:7px 9px;border-bottom:1px solid var(--line);font-size:12px">
     <div style="display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline">
@@ -1882,7 +1887,7 @@ function historyRow(x){
     <div class="sub" style="margin-top:2px;font-size:11.5px">${OUTCOME_MEANING[x.status]||''}</div></div>`;
 }
 function trackedRow(x){
-  const P=v=>scalpPrice(v,x.cls),st=trackedStatus(x),isL=x.dir>0;
+  const P=v=>scalpPrice(v,x.cls,x.rateUsed),st=trackedStatus(x),isL=x.dir>0;
   const nextT=x.status==='filled'&&x.hitT<3?x.targets[x.hitT]:x.targets[0];
   return `<div style="display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline;padding:6px 9px;border-bottom:1px solid var(--line);font-size:12px">
     <b style="min-width:70px">${x.tk||x.name}</b><span class="sub">${x.tf}</span>
