@@ -356,6 +356,25 @@ test("EVERY $ conversion names the rate it is dividing by",()=>{
   const bare=[...script.matchAll(/cryptoPrice\((?:[^,()]|\([^()]*\))+\)/g)].map(m=>m[0]);
   assert.deepStrictEqual(bare,[],
     "a one-argument cryptoPrice() silently divides by the shared rate — pass the build-rate explicitly");
+  /* scalpPrice is the SAME hazard on the other six panels — Quick Trades, Volume Movers,
+     🎢 Dump & Bounce, Position Watch and the tracked-setup rows. Its comment claimed it divided by
+     "the SAME rate the server used to build these ₹ values" while it actually read the shared
+     global: an invariant asserted and never enforced. */
+  const bareScalp=[...script.matchAll(/scalpPrice\((?:[^,()]|\([^()]*\))+\)/g)].map(m=>m[0]);
+  assert.deepStrictEqual(bareScalp,[],
+    "scalpPrice needs the row's own rate — every panel but the scanner was missing it");
+});
+
+test("every crypto ROW carries the rate that built its ₹, so caching cannot split the pair",()=>{
+  /* A payload-level rate is re-stamped live on every cache hit (withLiveRate), so a cached ₹ would
+     be divided by a rate from a different moment. Movers cache for 40s and 🎢 Dump & Bounce for
+     THIRTY MINUTES. Row and rate have to travel together. */
+  const src=require("node:fs").readFileSync(require("node:path").join(__dirname,"..","server.js"),"utf8");
+  assert.match(src,/const builtWith=priceRate\(\);/,"movers rows must capture the rate at BUILD time");
+  assert.match(src,/x\.cls==='Crypto'&&builtWith>0\)x\.rateUsed=builtWith/);
+  assert.match(src,/rateUsed:priceRate\(\)\|\|undefined,\n\s*\.\.\.p,fwd/,"dump & bounce rows too");
+  assert.match(src,/const setupRate=priceRate\(\)\|\|undefined;/,"tracked setups");
+  assert.match(src,/const posRate=priceRate\(\)\|\|undefined;/,"and open positions");
 });
 
 test("the research consensus carries the rate that built its ₹ figures",()=>{

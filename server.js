@@ -1073,7 +1073,12 @@ async function topMovers(tab,tf){
   });
   rows.sort((a,b)=>b.score-a.score);
   rows.length=Math.min(rows.length,MOVERS_TOP);
-  rows.forEach((x,i)=>x.rank=i+1);
+  /* Each ROW carries the rate that built its ₹, captured now and cached alongside it. A payload-
+     level rate is re-stamped live on every cache hit, so a 40s-old (or, for 🎢 Dump & Bounce, a
+     30-MINUTE-old) ₹ would be divided by a rate from a different moment. Row and rate travel
+     together, so the pair stays consistent however long the payload sits in the cache. */
+  const builtWith=priceRate();
+  rows.forEach((x,i)=>{x.rank=i+1;if(x.cls==='Crypto'&&builtWith>0)x.rateUsed=builtWith;});
   try{const keep=new Set(rows.map(x=>x.sym));trackSetups(trackable.filter(r=>keep.has(r.asset.sym)),tf,'mover');}catch(e){}
   const out={tab,tf,movers:rows,scanned:(d.results||[]).length,ts:Date.now(),demo:DEMO,cryptoMode,
     btc:d.btc||null,usdtInr:d.usdtInr||priceRate(),rateSrc:d.rateSrc||priceRateSrc(),
@@ -1657,7 +1662,9 @@ async function dumpBounce(force){
         // horizon its bounces actually take — so the number answers THIS card's question.
         const dipTh=Math.min(35,Math.max(12,Math.abs(p.drop.medPct||20)*0.8));
         const fwd=forwardStats(cl,dipTh,Math.max(3,Math.min(30,p.rally.medDays||7)),20);
+        // the rate that built these ₹, cached with the row — this payload lives for 30 MINUTES
         rows.push({a:r.a,sym:r.a.sym,tk:r.a.tk||"",name:r.a.name||r.a.tk||r.a.sym,cls:"Crypto",qv,
+          rateUsed:priceRate()||undefined,
           ...p,fwd,spark:sparkline(cl),phaseInfo:NL_PHASE[p.phase]||NL_PHASE.unclear});
       }
       rows.sort((a,b)=>b.score-a.score);
@@ -2294,9 +2301,10 @@ async function handler(req,res){
       return sendJSON(res,await dumpBounce(u.searchParams.get("force")==="1"));}
     if(p==="/api/setups"){   // 📌 tracked setups: every recommendation followed to its outcome + forward hit-rate
       const tfq=u.searchParams.get("tf")||null, lim=Math.min(200,parseInt(u.searchParams.get("limit"))||40);
+      const setupRate=priceRate()||undefined;
       const active=SETUPS.active.filter(x=>!tfq||x.tf===tfq).slice().sort((a,b)=>b.born-a.born).slice(0,60)
-        .map(x=>({...x,pnlNow:x.status==='filled'?realizedPct(x,x.live):null}));   // live unrealized %, so you know where you stand
-      const history=SETUPS.resolved.filter(x=>!tfq||x.tf===tfq).slice(-lim).reverse();
+        .map(x=>({...x,rateUsed:setupRate,pnlNow:x.status==='filled'?realizedPct(x,x.live):null}));   // live unrealized %, so you know where you stand
+      const history=SETUPS.resolved.filter(x=>!tfq||x.tf===tfq).slice(-lim).reverse().map(x=>({...x,rateUsed:setupRate}));
       return sendJSON(res,withLiveRate({active,recent:history,history,stats:setupStats(),ts:Date.now(),demo:DEMO}));}
     if(p==="/api/research"){   // one coin, several timeframes, averaged consensus (short or long horizon)
       const sym=u.searchParams.get("sym")||"", horizon=u.searchParams.get("horizon")==="long"?"long":"short";
@@ -2330,7 +2338,8 @@ async function handler(req,res){
         if(!DEMO)try{await ensureCryptoUniverse();}catch(e){}
         return sendJSON(res,await addPosition(b)); }
       const chats=await allRecipients();
-      return sendJSON(res,withLiveRate({positions:POSITIONS.slice().sort((a,b)=>b.created-a.created),
+      const posRate=priceRate()||undefined;
+      return sendJSON(res,withLiveRate({positions:POSITIONS.slice().sort((a,b)=>b.created-a.created).map(p=>({...p,rateUsed:posRate})),
         chats, hasToken:!!TG_TOKEN, explicit:!!TG_CHATS.length, ts:Date.now(), demo:DEMO})); }
     if(p==="/api/positions/sweep"){ return sendJSON(res,{sent:await positionsSweep(),positions:POSITIONS}); }
     if(p==="/api/universe"){    // symbols the watcher will accept, for the add-position picker
