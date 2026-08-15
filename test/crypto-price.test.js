@@ -342,6 +342,52 @@ test("the age of the price on screen is shown, and coloured as it goes stale",()
   assert.match(el.textContent,/browser feed failing/,"and it must say WHY when it knows");
 });
 
+test("EVERY $ conversion names the rate it is dividing by",()=>{
+  /* THE CLASS THIS CLOSES. cryptoPrice(v) with one argument silently falls back to the shared
+     global rate, which is only correct when that happens to be the reading that BUILT the ₹ it is
+     dividing. #20 fixed the main scanner and left every other panel on the bare call — so the
+     🔎 Research card went on showing a coin at a price no venue was quoting, with T1 and T2 sitting
+     at or BELOW its own live price on a BUY. The omission and the correct call looked identical in
+     review, so the rule is now mechanical: pass the rate, always, even when the answer is "the
+     shared one". */
+  const html=require("node:fs").readFileSync(require("node:path").join(__dirname,"..","index.html"),"utf8");
+  const script=html.match(/<script>([\s\S]*)<\/script>/)[1];
+  // one non-empty argument and no comma. `cryptoPrice()` with no args only ever appears in prose.
+  const bare=[...script.matchAll(/cryptoPrice\((?:[^,()]|\([^()]*\))+\)/g)].map(m=>m[0]);
+  assert.deepStrictEqual(bare,[],
+    "a one-argument cryptoPrice() silently divides by the shared rate — pass the build-rate explicitly");
+});
+
+test("the research consensus carries the rate that built its ₹ figures",()=>{
+  const src=require("node:fs").readFileSync(require("node:path").join(__dirname,"..","server.js"),"utf8");
+  const fn=src.slice(src.indexOf("function blendResearch(per)"),src.indexOf("async function researchCoin"));
+  assert.match(fn,/rateUsed:last\.rateUsed/,"without it the panel divides by whatever the page happens to hold");
+  assert.match(fn,/priceUsd:last\.sig\.priceUsd/,"and the live price should be the venue's own number");
+  const html=require("node:fs").readFileSync(require("node:path").join(__dirname,"..","index.html"),"utf8");
+  assert.match(html,/P=v=>cryptoPrice\(v,c\.rateUsed\)/,"the research renderer must actually use it");
+});
+
+test("the research card says when its targets are already behind the market",()=>{
+  /* From a real card: CONSENSUS BUY, live $0.1875, T1 $0.1785, T2 $0.1880 — the first target
+     already below the market and the second level with it, both labelled as upside (+9.1%,
+     +15.0%) because the percentages are measured from the AVERAGED ENTRY, which sat 12.8% away.
+     Nothing on the card said so. */
+  const html=require("node:fs").readFileSync(require("node:path").join(__dirname,"..","index.html"),"utf8");
+  const fn=html.slice(html.indexOf("function renderResearchResult(d)"),html.indexOf("function renderTrades()"));
+  assert.match(fn,/const passed=/,"it must notice when live has passed T1");
+  assert.match(fn,/already behind the market/,"and say so, prominently");
+  assert.match(fn,/already there/,"individual targets the price has passed must be marked");
+  assert.match(fn,/pullback|bounce/,"an entry far from the market must be named as a wait, not a buy-now");
+  assert.match(fn,/measured from the <b>entry<\/b>/,"and the % figures must state what they are measured from");
+
+  // the arithmetic the card now performs, on the exact numbers from that screenshot
+  const c={dir:1,price:0.1875,entry:0.1635,targets:[0.1785,0.1880,0.1988]};
+  const gapPct=(c.entry/c.price-1)*100;
+  assert.ok(Math.abs(gapPct+12.8)<0.1,"entry sat 12.8% below live");
+  assert.strictEqual(c.price>=c.targets[0],true,"T1 was already behind the market");
+  assert.strictEqual(c.price>=c.targets[2],false,"T3 was not — only the passed ones get struck through");
+});
+
 test("the page never claims a global-feed $ price matches CoinDCX",()=>{
   /* It used to end the global-feed notice with "and $ USDT values are exact". Exact against the
      GLOBAL market — not against CoinDCX. The India premium explains only the ₹ gap; the coin's own
