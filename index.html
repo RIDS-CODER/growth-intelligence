@@ -770,7 +770,7 @@ async function runScan(){
       if(d.error)throw new Error(d.error);
       cryptoSource='coindcx';lastCryptoMode='coindcx';setCryptoNote('coindcx');document.getElementById('pf').style.width='100%';
       render(d.results);
-      const now=new Date();document.getElementById('lastUpd').textContent='Updated '+now.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true});
+      lastQuoteAt=Date.now();paintQuoteAge();   // a scan price IS a fresh quote — one clock, one label
       document.getElementById('pstat').textContent=`✅ ${d.analyzed} coins · CoinDCX (your browser) · ${cryptoCcy}`;
       setBtcNote(d.btc);
       scanning=false;document.getElementById('scanBtn').disabled=false;scheduleRefresh();pollQuotes();return;
@@ -788,8 +788,7 @@ async function runScan(){
     setRate(d);   // freshest-wins: see setRate()
     document.getElementById('pf').style.width='100%';
     render(d.results);
-    const now=new Date();
-    document.getElementById('lastUpd').textContent='Updated '+now.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true});
+    lastQuoteAt=Date.now();paintQuoteAge();   // a scan price IS a fresh quote — one clock, one label
     if(activeTab==='Crypto'){
       const src=(d.cryptoMode==='coindcx')?'server-coindcx':'global';
       cryptoSource=(src==='server-coindcx')?'server-coindcx':'global';lastCryptoMode=src;setCryptoNote(src);
@@ -870,27 +869,56 @@ function applyQuotes(map,usdMap){
     document.querySelectorAll('.lp'+id).forEach(e=>e.textContent=txt);   // live price quoted inside the LATE/MISSED warning
   }});
   updateCcyWarn();   // the rate may have just arrived (or gone) on this same poll
-  if(touched){const now=new Date();document.getElementById('lastUpd').textContent='LTP '+now.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true});refreshStaleFlags();}
+  if(touched){lastQuoteAt=Date.now();paintQuoteAge();refreshStaleFlags();}
 }
+/* HOW OLD IS THE NUMBER ON SCREEN, SAID OUT LOUD.
+   A frozen price and a quiet market look identical, which is the only reason a stall can persist
+   unnoticed. The clock next to the price now reports the age of the last quote that actually
+   landed, and goes amber then red as it grows, so a stall announces itself instead of being
+   mistaken for calm. */
+let lastQuoteAt=0, quoteFails=0, directBackoffUntil=0, quoteWhy='';
+function paintQuoteAge(){
+  const el=document.getElementById('lastUpd'); if(!el)return;
+  if(!lastQuoteAt){el.textContent='';el.style.color='';return;}
+  const age=Math.round((Date.now()-lastQuoteAt)/1000);
+  const t=new Date(lastQuoteAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true});
+  el.textContent=`LTP ${t} · ${age}s ago`+(quoteWhy?` · ${quoteWhy}`:'');
+  el.style.color = age>40 ? 'var(--sell)' : age>15 ? '#fbbf24' : '';
+}
+setInterval(paintQuoteAge,1000);
 async function pollQuotes(){
   if(!lastResults.length||status.demo)return;
-  // Local browser-CoinDCX fast path (exact ₹, ticks every few seconds when running on your India machine)
-  if(activeTab==='Crypto' && cryptoSource==='coindcx'){
-    try{const t=await fetchT("https://api.coindcx.com/exchange/ticker",{},6000).then(r=>r.json());
-      if(Array.isArray(t)){
-        const usdtBy={};t.forEach(x=>{if(x.market&&x.market.endsWith('USDT'))usdtBy[x.market.slice(0,-4)]=+x.last_price;});
-        const rr=cdxRateFromTicker(t); if(rr>0){usdtInr=rr;markRateNow('coindcx');}
-        // two parallel maps: ₹ for the ₹ view, the venue's OWN $ for the $ view — never one from the other
-        const by={},uBy={};t.forEach(x=>{if(x.market&&x.market.endsWith('INR')){const base=x.market.slice(0,-3);const u=usdtBy[base];if(u>0)uBy[x.market]=u;by[x.market]=(u>0&&usdtInr>0)?u*usdtInr:+x.last_price;}});
-        applyQuotes(by,uBy);}
-    }catch(e){}
-    return;
+  /* Browser-direct CoinDCX, when this machine can reach it. It used to `return` unconditionally,
+     inside a bare catch — so a failed read (a rate limit, a blip, a CORS change) silently stopped
+     the price dead with no error, no fallback and no sign, until the next full rescan. A
+     non-array body such as {"message":"Too many requests"} did the same without even throwing.
+     Now a failure falls THROUGH to the server, and repeated failures back off rather than
+     hammering an endpoint that is already refusing us. */
+  const direct = activeTab==='Crypto' && cryptoSource==='coindcx' && Date.now()>=directBackoffUntil;
+  if(direct){
+    try{
+      const t=await fetchT("https://api.coindcx.com/exchange/ticker",{},6000).then(r=>r.json());
+      if(!Array.isArray(t))throw new Error('ticker refused');
+      const usdtBy={};t.forEach(x=>{if(x.market&&x.market.endsWith('USDT'))usdtBy[x.market.slice(0,-4)]=+x.last_price;});
+      const rr=cdxRateFromTicker(t); if(rr>0){usdtInr=rr;markRateNow('coindcx');}
+      // two parallel maps: ₹ for the ₹ view, the venue's OWN $ for the $ view — never one from the other
+      const by={},uBy={};t.forEach(x=>{if(x.market&&x.market.endsWith('INR')){const base=x.market.slice(0,-3);const u=usdtBy[base];if(u>0)uBy[x.market]=u;by[x.market]=(u>0&&usdtInr>0)?u*usdtInr:+x.last_price;}});
+      quoteFails=0; directBackoffUntil=0; quoteWhy='';
+      applyQuotes(by,uBy);
+      return;
+    }catch(e){
+      quoteFails++;
+      directBackoffUntil=Date.now()+Math.min(60000,5000*Math.pow(2,quoteFails));   // 10s, 20s, 40s, 60s…
+      quoteWhy='browser feed failing, using server';
+      // fall through — the server can still answer
+    }
   }
   // Everything else — including HOSTED crypto (India server reaches CoinDCX): live prices from the server every poll
   try{const d=await(await fetch('/api/quotes?tab='+encodeURIComponent(activeTab))).json();
     setRate(d);   // freshest-wins: see setRate()
     if(d.quotes)applyQuotes(d.quotes,d.usd);
-  }catch(e){}
+    if(!direct&&!quoteFails)quoteWhy='';
+  }catch(e){ quoteWhy='quotes unreachable'; paintQuoteAge(); }
 }
 
 const getMinScore=()=>+document.getElementById('minscore').value||0;
