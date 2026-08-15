@@ -388,6 +388,70 @@ test("the research card says when its targets are already behind the market",()=
   assert.strictEqual(c.price>=c.targets[2],false,"T3 was not — only the passed ones get struck through");
 });
 
+test("levels come from CoinDCX's own USDT market, not the INR pair rescaled",()=>{
+  /* Candles used to come from the thin I-<BASE>_INR pair, rescaled so only the LAST bar matched
+     the liquid USDT market. Everything below that bar — entry, stop, every target — was the INR
+     market's shape, and the $ view then divided it by a rate to get back to dollars. Two
+     conversions where the right answer is none. Reading the USDT market's own candles means the
+     series IS the exchange's series, and ₹ is one multiplication by CoinDCX's own USDT/INR —
+     exactly what the CoinDCX app does — so the round trip is lossless rather than approximate. */
+  const src=require("node:fs").readFileSync(require("node:path").join(__dirname,"..","server.js"),"utf8");
+  const fn=src.slice(src.indexOf("async function loadCoinDCX"),src.indexOf("async function loadBinance"));
+  assert.match(fn,/cdxMarketPairs\(\)/,"the USDT pair id must be looked up, not guessed");
+  assert.match(fn,/pairUsed:"usdt"/,"and the USDT market must be the preferred source");
+  assert.match(fn,/pairUsed:"inr"/,"with the INR pair still available as a labelled fallback");
+  // the pair id is read from markets_details rather than assembled from a template
+  assert.ok(!/["'`]B-\$\{|["'`]B-"\+/.test(fn),"a guessed pair id fails silently into the old path");
+
+  // ₹ built as usdt × rate divides back EXACTLY — that is the whole point
+  const rate=89.0, usdt=[0.1875,0.1902,0.1861];
+  const inr=usdt.map(v=>v*rate);
+  inr.forEach((v,i)=>assert.ok(Math.abs(v/rate-usdt[i])<1e-12,
+    "₹ ÷ the scalar that built it must return the venue's own dollar figure"));
+});
+
+test("markets_details is parsed into per-coin USDT and INR pair ids",async()=>{
+  const S2=require("../server.js");
+  assert.strictEqual(typeof S2.cdxMarketPairs,"function","the lookup must be exported to be testable");
+  const src=require("node:fs").readFileSync(require("node:path").join(__dirname,"..","server.js"),"utf8");
+  const fn=src.slice(src.indexOf("async function cdxMarketPairs"),src.indexOf("// Binance fallback"));
+  assert.match(fn,/target_currency_short_name/,"the coin is the TARGET currency in a CoinDCX market");
+  assert.match(fn,/base_currency_short_name/,"and the quote is the BASE — getting these backwards maps nothing");
+  assert.match(fn,/quote==="USDT"/);
+  assert.match(fn,/3600e3/,"the list barely changes; it should not be refetched per scan");
+});
+
+test("the browser path also reads the USDT market, not just the server",()=>{
+  /* The Crypto tab fetches its own candles when this machine can reach CoinDCX, so fixing only
+     the server would have left the deployed behaviour unchanged. */
+  const html=require("node:fs").readFileSync(require("node:path").join(__dirname,"..","index.html"),"utf8");
+  const script=html.match(/<script>([\s\S]*)<\/script>/)[1];
+  const fn=script.slice(script.indexOf("async function fetchCoinDCXCrypto"),script.indexOf("let cdxPairCache"));
+  assert.match(fn,/cdxPairMap\(\)/,"it must look the pair id up rather than template it");
+  assert.match(fn,/pairUsed:"usdt"/);
+  assert.match(fn,/pairUsed:"inr"/,"the thin pair stays as a labelled fallback");
+  assert.ok(fn.indexOf('pairUsed:"usdt"')<fn.indexOf('pairUsed:"inr"'),"USDT must be tried first");
+  const map=script.slice(script.indexOf("async function cdxPairMap"),script.indexOf("async function getStatus"));
+  assert.match(map,/target_currency_short_name/);
+  assert.match(map,/3600e3/,"cached — one extra request per hour, not per scan");
+  assert.match(map,/cdxPairCache=cdxPairCache\|\|\{\}/,"an unreachable list must degrade, not throw");
+});
+
+test("the card names which CoinDCX market its numbers came from",()=>{
+  const html=require("node:fs").readFileSync(require("node:path").join(__dirname,"..","index.html"),"utf8");
+  const script=html.match(/<script>([\s\S]*)<\/script>/)[1];
+  const vm=require("node:vm");
+  const i=script.indexOf("function venueNote(r)");
+  const ctx=vm.createContext({});
+  vm.runInContext(script.slice(i,script.indexOf("// Currency-aware input conversion"))+";globalThis.venueNote=venueNote;",ctx);
+  const mk=tag=>({asset:{cls:"Crypto"},priceTag:tag});
+  assert.match(ctx.venueNote(mk("live · CoinDCX USDT market")),/USDT market/,
+    "the good path must be identifiable, or a downgrade is invisible");
+  assert.match(ctx.venueNote(mk("live · CoinDCX INR pair")),/INR pair/,
+    "and the thinner fallback must say so");
+  assert.match(ctx.venueNote(mk("live · global ₹")),/not<\/b> CoinDCX/);
+});
+
 test("the page never claims a global-feed $ price matches CoinDCX",()=>{
   /* It used to end the global-feed notice with "and $ USDT values are exact". Exact against the
      GLOBAL market — not against CoinDCX. The India premium explains only the ₹ gap; the coin's own

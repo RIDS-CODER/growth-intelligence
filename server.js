@@ -444,6 +444,29 @@ function cdxUsdtInr(){const u=cdxTicker["USDTINR"];if(u>0)return u;const bi=cdxT
    one shared rate — so ₹ built by one got divided by the other and the cancellation broke.
    Carrying the real number means no rate can corrupt it. */
 function cdxLiveUsd(base){const u=cdxTicker[base+"USDT"];return u>0?u:0;}
+/* THE EXCHANGE'S OWN USDT MARKET, BY NAME.
+   Candles used to come from the thin I-<BASE>_INR pair and then get rescaled so only the LAST bar
+   matched the liquid USDT market. Every level below that bar — entry, stop, every target — was
+   therefore the INR market's shape, and the $ view divided it by a rate to get back to dollars:
+   two conversions where the right answer is none. CoinDCX publishes the USDT market's candles
+   under its own pair id, so we read that instead and nothing has to be reconstructed.
+   The pair string comes from markets_details rather than being guessed, because a guessed id
+   fails silently into the old behaviour and looks like nothing happened. */
+let cdxPairs=null,cdxPairsAt=0;
+async function cdxMarketPairs(){
+  if(cdxPairs&&Date.now()-cdxPairsAt<3600e3)return cdxPairs;
+  const j=await getJSON("https://api.coindcx.com/exchange/v1/markets_details",{});
+  if(!Array.isArray(j))throw new Error("markets_details");
+  const map={};
+  for(const m of j){
+    const base=m.target_currency_short_name, quote=m.base_currency_short_name, pair=m.pair;
+    if(!base||!quote||!pair)continue;
+    map[base]=map[base]||{};
+    if(quote==="USDT")map[base].usdt=pair;
+    else if(quote==="INR")map[base].inr=pair;
+  }
+  cdxPairs=map;cdxPairsAt=Date.now();return map;
+}
 // The live ₹ price the CoinDCX APP shows: liquid USDT market × CoinDCX USDT/INR. Falls back to the INR last-trade.
 function cdxLiveInr(base){const u=cdxTicker[base+"USDT"],r=cdxUsdtInr();if(u>0&&r>0)return u*r;const i=cdxTicker[base+"INR"];return i>0?i:0;}
 // Binance fallback
@@ -552,20 +575,45 @@ async function loadCrypto(asset,tf){
   }
   return loadBinance(asset,tf);
 }
-async function loadCoinDCX(asset,tf){
-  const interval=CDX_INT[tf]||"1h";
-  const j=await getJSON(`https://public.coindcx.com/market_data/candles?pair=${encodeURIComponent(asset.pair)}&interval=${interval}&limit=400`,{});
+async function cdxCandles(pair,interval){
+  const j=await getJSON(`https://public.coindcx.com/market_data/candles?pair=${encodeURIComponent(pair)}&interval=${interval}&limit=400`,{});
   if(!Array.isArray(j)||!j.length)throw new Error("no candles");
   const rows=j.slice().reverse();  // CoinDCX returns newest-first → ascending
   const close=[],high=[],low=[],times=[],vol=[];
   for(const k of rows){const c=+k.close;if(!isFinite(c))continue;close.push(c);high.push(+k.high);low.push(+k.low);times.push(+k.time);vol.push(+k.volume||0);}
   if(!close.length)throw new Error("no candles");
-  // Price like the CoinDCX APP does: liquid USDT market × CoinDCX USDT/INR (thin INR pairs have stale last-trades).
-  // Rescale the whole candle series to that live price so entry/stop/target levels stay on the right scale.
+  return {close,high,low,times,vol};
+}
+async function loadCoinDCX(asset,tf){
+  const interval=CDX_INT[tf]||"1h";
+  const rate=cdxUsdtInr();
+  /* PREFERRED: the coin's own USDT market on CoinDCX. The series then IS the exchange's series —
+     nothing is rescaled, nothing is reconstructed, and ₹ is one multiplication by CoinDCX's own
+     USDT/INR, exactly the arithmetic the CoinDCX app performs. Dividing that ₹ by the same scalar
+     returns the venue's dollar figure precisely rather than approximately. */
+  let usdtPair=null;
+  try{ const m=await cdxMarketPairs(); usdtPair=(m[asset.tk]||{}).usdt||null; }catch(e){}
+  if(usdtPair&&rate>0){
+    try{
+      const s=await cdxCandles(usdtPair,interval);
+      const liveUsd=cdxLiveUsd(asset.tk);
+      if(liveUsd>0)s.close[s.close.length-1]=liveUsd;      // pin the forming bar to the live tick
+      const close=s.close.map(v=>v*rate), high=s.high.map(v=>v*rate), low=s.low.map(v=>v*rate);
+      return {close,high,low,times:s.times,vol:s.vol,
+        price:close[close.length-1], priceUsd:s.close[s.close.length-1],
+        rateUsed:rate, pairUsed:"usdt", mtime:Date.now()};
+    }catch(e){ /* fall back to the INR pair below */ }
+  }
+  /* FALLBACK: no USDT market for this coin (or markets_details unreachable). The INR pair is thin,
+     so its last trade can be stale — pin the series to the USDT-derived live price as before, and
+     say which pair was used so a silent downgrade is visible rather than assumed. */
+  const s=await cdxCandles(asset.pair,interval);
+  const {close,high,low}=s;
   const live=cdxLiveInr(asset.tk)||(cdxTicker[asset.sym]>0?cdxTicker[asset.sym]:0);
   const rawLast=close[close.length-1];
   if(live>0&&rawLast>0){const f=live/rawLast; if(f>0.2&&f<5){for(let i=0;i<close.length;i++){close[i]*=f;high[i]*=f;low[i]*=f;}} else {close[close.length-1]=live;}}
-  return {close,high,low,times,vol,price:close[close.length-1],priceUsd:cdxLiveUsd(asset.tk),rateUsed:cdxUsdtInr()||undefined,mtime:Date.now()};
+  return {close,high,low,times:s.times,vol:s.vol,price:close[close.length-1],
+    priceUsd:cdxLiveUsd(asset.tk), rateUsed:rate||undefined, pairUsed:"inr", mtime:Date.now()};
 }
 async function loadBinance(asset,tf){
   const interval=BN_INT[tf]||"1h";
@@ -685,7 +733,11 @@ function processAsset(asset,data,tf){
   return {asset,sig,setup,since,action,reasons,scope,bt,btSide,mtf,confidence,dec,isIndex,tf,asof:fmtTime(asofMs),
     rateUsed:(data.rateUsed>0)?data.rateUsed:undefined,   // the rate that BUILT these ₹ numbers — $ display divides by exactly this
     turnover:hasVol?turnover:null, chgWin:chgWin!=null?+chgWin.toFixed(2):null,
-    priceTag:asset.src==='cg'?(cryptoMode==='coindcx'?'live · CoinDCX ₹':'live · global ₹'):(marketOpen()?'LIVE (broker)':'prev close'),series:data.close.slice(-80),
+    priceTag:asset.src==='cg'
+      ? (cryptoMode==='coindcx'
+          ? (data.pairUsed==='usdt' ? 'live · CoinDCX USDT market' : 'live · CoinDCX INR pair')
+          : 'live · global ₹')
+      : (marketOpen()?'LIVE (broker)':'prev close'),series:data.close.slice(-80),
     bars:{h:data.high.slice(-24),l:data.low.slice(-24),c:data.close.slice(-24)}};   // compact OHLC window for the Quick-tab mini candlesticks
 }
 /* ============================================================
@@ -1807,9 +1859,14 @@ function cryptoSignalsFrom(payload){
       const data={close:a.close,high:a.high,low:a.low,times:a.times,vol:a.vol,price:a.price,
         priceUsd:(+a.priceUsd>0)?+a.priceUsd:0,           // the venue's own $ number, from the browser's ticker read
         rateUsed:(+a.rateUsed>0)?+a.rateUsed:0,           // the rate the browser built its ₹ with
+        pairUsed:(a.pairUsed==="usdt"||a.pairUsed==="inr")?a.pairUsed:undefined,
         mtime:fetchedAt};
       const r=processAsset(asset,data,tf);
-      r.priceTag="live · CoinDCX ₹";     // browser-fetched from the Indian exchange
+      // browser-fetched from the Indian exchange — name the market, so a fallback to the thin
+      // INR pair is visible on the card rather than blended into a generic "CoinDCX"
+      r.priceTag = data.pairUsed==="usdt" ? "live · CoinDCX USDT market"
+                 : data.pairUsed==="inr"  ? "live · CoinDCX INR pair"
+                 : "live · CoinDCX ₹";
       results.push(r);
     }catch(e){}
   });
@@ -2315,7 +2372,7 @@ if(require.main===module){
   else console.log('  Telegram alerts: off (set TELEGRAM_BOT_TOKEN to enable — chat ID optional)');
 }
 module.exports={IND,computeSignal,buildSetup,buildReasons,confidenceOf,alertEligible,fmtAlert,sendTelegram,signalSince,actionNow,parseCandles,authURL,scan,universeFor,fmtTime,
-  loadBinance,loadCoinDCX,loadCrypto,ensureCryptoUniverse,usdInr,resampleSeries,tfCfg,getCRYPTO:()=>CRYPTO,getMode:()=>cryptoMode,
+  loadBinance,loadCoinDCX,loadCrypto,cdxCandles,cdxMarketPairs,ensureCryptoUniverse,usdInr,resampleSeries,tfCfg,getCRYPTO:()=>CRYPTO,getMode:()=>cryptoMode,
   backtestSeries,scoreSeriesArr,backtest,processAsset,blendResearch,assetBtScore,cdxLiveInr,cdxUsdtInr,cdxLiveUsd,topMovers,ticker24,
   trackSetups,sweepSetups,updateSetupWithPrice,setupStats,markReversals,realizedPct,volMetrics,priceRate,priceRateSrc,priceRateAge,cryptoSignalsFrom,
   planTrackables,fmtPlanAlert,dumpBounceAlerts,
