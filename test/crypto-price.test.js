@@ -456,6 +456,50 @@ test("the browser path also reads the USDT market, not just the server",()=>{
   assert.match(map,/cdxPairCache=cdxPairCache\|\|\{\}/,"an unreachable list must degrade, not throw");
 });
 
+test("several USDT books for one coin: the deepest ACTIVE one wins, not the last listed",()=>{
+  /* A coin can be listed on several USDT books at once, one per ecode — B- (Binance-backed and
+     deep), HB-, I-. Taking whichever appeared last in markets_details is how a live coin ends up
+     pointed at a delisted or illiquid book whose candles come back empty; that throws, and the
+     caller falls back to the INR pair with nothing to say about why. This is the most likely
+     reason a coin that plainly HAS a USDT market was showing "CoinDCX INR pair". */
+  const src=require("node:fs").readFileSync(require("node:path").join(__dirname,"..","server.js"),"utf8");
+  const fn=src.slice(src.indexOf("async function cdxMarketPairs"),src.indexOf("// Binance fallback"));
+  assert.match(fn,/RANK=\{B:3/,"the Binance-backed book must outrank the rest");
+  assert.match(fn,/status\|\|"active"\)==="active"\?10:0/,"and an active market must outrank an inactive one");
+  assert.match(fn,/if\(best\[k\]!=null&&best\[k\]>=s\)continue;/,"a weaker listing must not overwrite a stronger one");
+
+  /* AND THE BROWSER MAP MUST RANK TOO. I fixed the server's map and left the browser's on
+     last-one-wins — the same server-only mistake as #20, and the browser is the map that actually
+     runs on the Crypto tab. The reproduction caught it: the app asked HB-COW_USDT, got an empty
+     array, and fell back to the INR pair for a coin with a perfectly good B- book. */
+  const html=require("node:fs").readFileSync(require("node:path").join(__dirname,"..","index.html"),"utf8");
+  const script=html.match(/<script>([\s\S]*)<\/script>/)[1];
+  const bm=script.slice(script.indexOf("async function cdxPairMap"),script.indexOf("async function getStatus"));
+  assert.match(bm,/RANK=\{B:3/,"the browser map must rank by ecode as well");
+  assert.match(bm,/status\|\|'active'\)==='active'\?10:0/,"and by active status");
+  assert.match(bm,/if\(best\[k\]!=null&&best\[k\]>=sc\)continue;/,"last-one-wins on either side reopens this");
+});
+
+test("falling back to the INR pair records WHY, on both loaders",()=>{
+  /* Four causes — no listing, no rate, dead candles, no pair list at all — are indistinguishable
+     on screen unless each says so. Not knowing which one fired is exactly why this question could
+     not be answered from either the app or the code. */
+  const src=require("node:fs").readFileSync(require("node:path").join(__dirname,"..","server.js"),"utf8");
+  const fn=src.slice(src.indexOf("async function loadCoinDCX"),src.indexOf("async function loadBinance"));
+  for(const cause of [/no USDT market listed/,/markets_details unreachable/,/no USDT\/INR rate yet/,/candles failed/])
+    assert.match(fn,cause,"server loader must name this cause");
+  assert.match(fn,/inrWhy:inrWhy\|\|undefined/,"and carry it out with the series");
+
+  const html=require("node:fs").readFileSync(require("node:path").join(__dirname,"..","index.html"),"utf8");
+  const script=html.match(/<script>([\s\S]*)<\/script>/)[1];
+  const bf=script.slice(script.indexOf("async function fetchCoinDCXCrypto"),script.indexOf("let cdxPairCache"));
+  for(const cause of [/markets_details unavailable/,/no USDT market listed/,/no USDT\/INR rate yet/,/candles empty/,/candles failed/])
+    assert.match(bf,cause,"browser loader must name this cause too — it is the one that runs in deployment");
+  assert.match(bf,/inrWhy:inrWhy\|\|undefined/);
+  assert.match(script,/function paintPairNote\(\)/,"and the page must summarise coverage rather than requiring a hover on every card");
+  assert.match(script,/coins on CoinDCX's USDT market/);
+});
+
 test("the card names which CoinDCX market its numbers came from",()=>{
   const html=require("node:fs").readFileSync(require("node:path").join(__dirname,"..","index.html"),"utf8");
   const script=html.match(/<script>([\s\S]*)<\/script>/)[1];
