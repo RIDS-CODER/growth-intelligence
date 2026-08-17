@@ -154,6 +154,7 @@
     <div class="seg" id="tf"><div data-tf="5m">5m</div><div data-tf="15m">15m</div><div data-tf="30m" class="on">30m</div><div data-tf="1h">1h</div><div data-tf="4h">4h</div><div data-tf="6h">6h</div><div data-tf="12h">12h</div><div data-tf="daily">1D</div></div>
     <div class="seg" id="ccy" style="display:none"><div data-ccy="INR" class="on">₹ INR</div><div data-ccy="USDT">$ USDT</div></div>
     <div class="pstat" id="ccyWarn" style="display:none;color:#fbbf24"></div>
+    <div class="pstat" id="pairNote" style="display:none"></div>
     <button class="btn" id="scanBtn" onclick="runScan()">↻ Refresh now</button>
     <div class="progress"><div class="pf" id="pf"></div></div>
     <div class="pstat" id="pstat">starting…</div>
@@ -319,6 +320,25 @@ function updateCcyWarn(){
   el.style.display = bad ? 'block' : 'none';
   if(bad) el.textContent='⚠ No USDT/INR rate yet — showing ₹. Prices are correct; the $ conversion is unavailable.';
 }
+/* HOW MANY COINS ARE ACTUALLY ON THE USDT MARKET. Per-card labels answer "this one", but the
+   question that matters is "how many of them", and hovering forty cards is not an answer. When
+   some fall back, the most common reason is named too — one line beats a hunt. */
+function paintPairNote(){
+  const el=document.getElementById('pairNote'); if(!el)return;
+  const cr=lastResults.filter(r=>r.asset&&r.asset.cls==='Crypto');
+  if(activeTab!=='Crypto'||!cr.length){el.style.display='none';return;}
+  const onUsdt=cr.filter(r=>/CoinDCX USDT market/.test(r.priceTag||'')).length;
+  if(onUsdt===cr.length){
+    el.style.display='block'; el.style.color='';
+    el.textContent=`✅ all ${cr.length} coins priced off CoinDCX's USDT market`;
+    return;
+  }
+  const why={}; cr.forEach(r=>{ if(!/CoinDCX USDT market/.test(r.priceTag||'')&&r.inrWhy)
+    why[r.inrWhy.replace(/ for [A-Z0-9]+$/,'').replace(/:.*$/,'')]=(why[r.inrWhy.replace(/ for [A-Z0-9]+$/,'').replace(/:.*$/,'')]||0)+1; });
+  const top=Object.entries(why).sort((a,b)=>b[1]-a[1])[0];
+  el.style.display='block'; el.style.color='#fbbf24';
+  el.textContent=`⚠ ${onUsdt}/${cr.length} coins on CoinDCX's USDT market`+(top?` · ${cr.length-onUsdt} fell back: ${top[0]}`:'');
+}
 // crypto price in the chosen currency (server computes in ₹; convert to USDT for display via CoinDCX's rate)
 /* `rate` is the rate that BUILT this particular ₹ number, when the payload carried one. Dividing by
    anything else is how ₹ and $ drift apart: the cancellation in (price × rate) ÷ rate only holds
@@ -352,8 +372,10 @@ function venueNote(r){
   const tag=r.priceTag||'';
   if(/CoinDCX USDT market/.test(tag))
     return ' <span class="sub" title="Straight from CoinDCX\'s own USDT market — the price and every level come from that series, nothing is reconstructed.">· CoinDCX USDT market</span>';
-  if(/CoinDCX INR pair/.test(tag))
-    return ' <span class="sub" title="This coin has no USDT market on CoinDCX, so its levels come from the thinner INR pair pinned to the live price.">· CoinDCX INR pair</span>';
+  if(/CoinDCX INR pair/.test(tag)){
+    const why=r.inrWhy?(' — '+r.inrWhy):'';
+    return ` <span class="sub" style="color:#fbbf24" title="Levels come from the thinner INR pair pinned to the live price, not CoinDCX's USDT market.${why?why.replace(/"/g,'&quot;'):''}">· CoinDCX INR pair${r.inrWhy?' ⓘ':''}</span>`;
+  }
   if(/CoinDCX/.test(tag)) return ' <span class="sub">· CoinDCX</span>';
   return ' <span class="sub" style="color:#fbbf24" title="This server cannot reach CoinDCX, so prices come from the global market. On thin alt-coins the two venues can differ by several percent.">· Binance (global), <b>not</b> CoinDCX</span>';
 }
@@ -401,6 +423,11 @@ async function fetchCoinDCXCrypto(tf){
   };
   const assets=await mapLimitClient(rows,10,async r=>{
     const usdtPair=(pairs[r.base]||{}).usdt, u=usdtBy[r.base]||0;
+    /* Record WHY, don't swallow it. Four different causes — no listing, no rate, dead candles,
+       no pair list at all — are indistinguishable on screen unless each one says so. */
+    let inrWhy = !pairs||!Object.keys(pairs).length ? "markets_details unavailable"
+               : !usdtPair ? "no USDT market listed for "+r.base
+               : !(usdtInr>0) ? "no USDT/INR rate yet" : "";
     /* PREFERRED: the coin's own USDT market. The series is then the exchange's series, and ₹ is
        one multiplication by CoinDCX's own USDT/INR — the same arithmetic the CoinDCX app does.
        The INR pair below is thin: its history has a different shape, and rescaling it pins only
@@ -412,14 +439,15 @@ async function fetchCoinDCXCrypto(tf){
           return {sym:r.market,tk:r.base,name:r.base,close,high,low,times:s.times,vol:s.vol,
             price:close[close.length-1],priceUsd:s.close[s.close.length-1],rateUsed:usdtInr,pairUsed:"usdt"};
         }
-      }catch(e){}
+        inrWhy=usdtPair+" candles empty";
+      }catch(e){ inrWhy=usdtPair+" candles failed: "+String(e.message||e).slice(0,60); }
     }
     try{ const s=await bars(`I-${r.base}_INR`);
       if(!s)return null;
       const {close,high,low}=s;
       const f=r.last/close[close.length-1]; if(f>0.2&&f<5){for(let i=0;i<close.length;i++){close[i]*=f;high[i]*=f;low[i]*=f;}} else {close[close.length-1]=r.last;}
       return {sym:r.market,tk:r.base,name:r.base,close,high,low,times:s.times,vol:s.vol,
-        price:r.last,priceUsd:u,rateUsed:usdtInr||0,pairUsed:"inr"};
+        price:r.last,priceUsd:u,rateUsed:usdtInr||0,pairUsed:"inr",inrWhy:inrWhy||undefined};
     }catch(e){return null;}
   });
   return assets.filter(Boolean);
@@ -432,12 +460,22 @@ async function cdxPairMap(){
   try{
     const j=await fetchT("https://api.coindcx.com/exchange/v1/markets_details",{},7000).then(r=>r.json());
     if(!Array.isArray(j))throw new Error("markets_details");
-    const map={};
+    /* Rank, don't last-one-wins. A coin can sit on several USDT books at once, one per ecode:
+       B- (Binance-backed, deep), HB-, I-. Taking whichever appeared last is how a live coin gets
+       pointed at a delisted book whose candles come back empty — which throws, and the caller
+       drops to the INR pair. That is exactly why coins that plainly HAVE a USDT market were
+       showing "CoinDCX INR pair". Active beats inactive; B beats the rest. */
+    const RANK={B:3,HB:2,I:1};
+    const score=m=>(String(m.status||'active')==='active'?10:0)+(RANK[String(m.pair||'').split('-')[0]]||0);
+    const map={},best={};
     for(const m of j){
       const base=m.target_currency_short_name,quote=m.base_currency_short_name,pair=m.pair;
       if(!base||!quote||!pair)continue;
-      map[base]=map[base]||{};
-      if(quote==='USDT')map[base].usdt=pair; else if(quote==='INR')map[base].inr=pair;
+      if(quote!=='USDT'&&quote!=='INR')continue;
+      const k=base+'|'+quote, sc=score(m);
+      if(best[k]!=null&&best[k]>=sc)continue;
+      best[k]=sc; map[base]=map[base]||{};
+      map[base][quote==='USDT'?'usdt':'inr']=pair;
     }
     cdxPairCache=map;cdxPairCacheAt=Date.now();
   }catch(e){ cdxPairCache=cdxPairCache||{}; }   // no list -> every coin takes the INR fallback
@@ -1045,7 +1083,7 @@ function render(results){
   // Guard: an error payload (or any response without `results`) would otherwise leave
   // lastResults undefined and permanently break the quote poller until a page reload.
   lastResults=Array.isArray(results)?results:[];
-  updateCcyWarn();
+  updateCcyWarn(); paintPairNote();
   const ms=getMinScore();
   // clean (actionable) setups first, "late" ones (price already at/through the stop) pushed to the bottom
   const mAgree=r=>r.mtf?r.mtf.agree:0;   // higher timeframe agreement count

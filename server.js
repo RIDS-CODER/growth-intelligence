@@ -457,13 +457,22 @@ async function cdxMarketPairs(){
   if(cdxPairs&&Date.now()-cdxPairsAt<3600e3)return cdxPairs;
   const j=await getJSON("https://api.coindcx.com/exchange/v1/markets_details",{});
   if(!Array.isArray(j))throw new Error("markets_details");
-  const map={};
+  /* A coin can be listed on SEVERAL USDT books at once, one per ecode: B- (Binance-backed, deep),
+     HB-, I- and so on. Taking whichever appeared last in the list is how a live coin ends up
+     pointed at a delisted or illiquid book whose candles come back empty — which then throws, and
+     the caller falls back to the INR pair with nothing to say about why. Rank instead: an active
+     market beats an inactive one, and B beats everything else. */
+  const RANK={B:3,HB:2,I:1};
+  const score=m=>(String(m.status||"active")==="active"?10:0)+(RANK[String(m.pair||"").split("-")[0]]||0);
+  const map={},best={};
   for(const m of j){
     const base=m.target_currency_short_name, quote=m.base_currency_short_name, pair=m.pair;
     if(!base||!quote||!pair)continue;
-    map[base]=map[base]||{};
-    if(quote==="USDT")map[base].usdt=pair;
-    else if(quote==="INR")map[base].inr=pair;
+    if(quote!=="USDT"&&quote!=="INR")continue;
+    const k=base+"|"+quote, s=score(m);
+    if(best[k]!=null&&best[k]>=s)continue;
+    best[k]=s; map[base]=map[base]||{};
+    map[base][quote==="USDT"?"usdt":"inr"]=pair;
   }
   cdxPairs=map;cdxPairsAt=Date.now();return map;
 }
@@ -591,8 +600,17 @@ async function loadCoinDCX(asset,tf){
      nothing is rescaled, nothing is reconstructed, and ₹ is one multiplication by CoinDCX's own
      USDT/INR, exactly the arithmetic the CoinDCX app performs. Dividing that ₹ by the same scalar
      returns the venue's dollar figure precisely rather than approximately. */
-  let usdtPair=null;
-  try{ const m=await cdxMarketPairs(); usdtPair=(m[asset.tk]||{}).usdt||null; }catch(e){}
+  /* WHY the USDT market was not used, recorded rather than swallowed. Every branch below used to
+     fall through into the INR pair silently, so a coin that plainly HAS a USDT market on CoinDCX
+     would show "INR pair" with no way — from the app or from the code — to tell which step gave
+     up. Four different causes look identical on screen unless they are named. */
+  let usdtPair=null, inrWhy="";
+  try{
+    const m=await cdxMarketPairs();
+    usdtPair=(m[asset.tk]||{}).usdt||null;
+    if(!usdtPair)inrWhy="no USDT market listed for "+asset.tk;
+  }catch(e){ inrWhy="markets_details unreachable: "+String(e.message||e).slice(0,60); }
+  if(usdtPair&&!(rate>0))inrWhy="no USDT/INR rate yet";
   if(usdtPair&&rate>0){
     try{
       const s=await cdxCandles(usdtPair,interval);
@@ -602,7 +620,7 @@ async function loadCoinDCX(asset,tf){
       return {close,high,low,times:s.times,vol:s.vol,
         price:close[close.length-1], priceUsd:s.close[s.close.length-1],
         rateUsed:rate, pairUsed:"usdt", mtime:Date.now()};
-    }catch(e){ /* fall back to the INR pair below */ }
+    }catch(e){ inrWhy=usdtPair+" candles failed: "+String(e.message||e).slice(0,60); }
   }
   /* FALLBACK: no USDT market for this coin (or markets_details unreachable). The INR pair is thin,
      so its last trade can be stale — pin the series to the USDT-derived live price as before, and
@@ -613,7 +631,8 @@ async function loadCoinDCX(asset,tf){
   const rawLast=close[close.length-1];
   if(live>0&&rawLast>0){const f=live/rawLast; if(f>0.2&&f<5){for(let i=0;i<close.length;i++){close[i]*=f;high[i]*=f;low[i]*=f;}} else {close[close.length-1]=live;}}
   return {close,high,low,times:s.times,vol:s.vol,price:close[close.length-1],
-    priceUsd:cdxLiveUsd(asset.tk), rateUsed:rate||undefined, pairUsed:"inr", mtime:Date.now()};
+    priceUsd:cdxLiveUsd(asset.tk), rateUsed:rate||undefined, pairUsed:"inr",
+    inrWhy:inrWhy||undefined, mtime:Date.now()};
 }
 async function loadBinance(asset,tf){
   const interval=BN_INT[tf]||"1h";
@@ -732,6 +751,7 @@ function processAsset(asset,data,tf){
   const chgWin=cl[iBack]>0?(live/cl[iBack]-1)*100:null;
   return {asset,sig,setup,since,action,reasons,scope,bt,btSide,mtf,confidence,dec,isIndex,tf,asof:fmtTime(asofMs),
     rateUsed:(data.rateUsed>0)?data.rateUsed:undefined,   // the rate that BUILT these ₹ numbers — $ display divides by exactly this
+    inrWhy:data.inrWhy||undefined,                       // why the USDT market was not used, when it wasn't
     turnover:hasVol?turnover:null, chgWin:chgWin!=null?+chgWin.toFixed(2):null,
     priceTag:asset.src==='cg'
       ? (cryptoMode==='coindcx'
@@ -1867,6 +1887,7 @@ function cryptoSignalsFrom(payload){
         priceUsd:(+a.priceUsd>0)?+a.priceUsd:0,           // the venue's own $ number, from the browser's ticker read
         rateUsed:(+a.rateUsed>0)?+a.rateUsed:0,           // the rate the browser built its ₹ with
         pairUsed:(a.pairUsed==="usdt"||a.pairUsed==="inr")?a.pairUsed:undefined,
+        inrWhy:typeof a.inrWhy==="string"?a.inrWhy.slice(0,120):undefined,
         mtime:fetchedAt};
       const r=processAsset(asset,data,tf);
       // browser-fetched from the Indian exchange — name the market, so a fallback to the thin
