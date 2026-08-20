@@ -493,7 +493,7 @@ test("falling back to the INR pair records WHY, on both loaders",()=>{
   const html=require("node:fs").readFileSync(require("node:path").join(__dirname,"..","index.html"),"utf8");
   const script=html.match(/<script>([\s\S]*)<\/script>/)[1];
   const bf=script.slice(script.indexOf("async function fetchCoinDCXCrypto"),script.indexOf("let cdxPairCache"));
-  for(const cause of [/markets_details unavailable/,/no USDT market listed/,/no USDT\/INR rate yet/,/candles empty/,/candles failed/])
+  for(const cause of [/markets_details unavailable/,/no USDT market listed/,/no USDT\/INR rate yet/,/under 41 bars at/,/candles failed/])
     assert.match(bf,cause,"browser loader must name this cause too — it is the one that runs in deployment");
   assert.match(bf,/inrWhy:inrWhy\|\|undefined/);
   assert.match(script,/function paintPairNote\(\)/,"and the page must summarise coverage rather than requiring a hover on every card");
