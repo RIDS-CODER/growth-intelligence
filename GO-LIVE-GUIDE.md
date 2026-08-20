@@ -1,108 +1,163 @@
-# Go Live — put your platform on the internet (no command line, all in a browser)
+# Go Live — put your platform on the internet
 
-You'll end up with a real web address like **https://growth-intelligence.onrender.com** that you can open
-from your laptop or phone. Everything below is done by clicking in a web browser — no Terminal, no Node on
-your machine.
+You'll end up with a real web address you can open from your laptop or phone.
 
-**Total time:** ~15–20 minutes, once. Have your `growth-intelligence-pro` folder ready.
+**Total time:** ~20 minutes, once.
 
-> 💡 Pick your app name now. Wherever you see **YOURNAME** below, use the same word every time
-> (lowercase, no spaces — e.g. `riddhi-trades`). Your live address will be `https://YOURNAME.onrender.com`.
+> ### 🇮🇳 Host it in **India (Bangalore)** — this is not a preference, it changes your prices
+>
+> CoinDCX refuses connections from outside India. A server anywhere else silently falls back to the
+> **global** market (Binance), and on a thin alt-coin the two venues genuinely trade several percent
+> apart — so the ₹ and $ on your screen stop matching your CoinDCX app.
+>
+> The app tells you which happened. Under **Current Price** on any crypto card:
+>
+> | label | meaning |
+> |---|---|
+> | `· CoinDCX USDT market` | ✅ what you want — the coin's own CoinDCX book |
+> | `· CoinDCX INR pair` | CoinDCX, but this coin has no USDT market (or too little history); the card says which |
+> | `· Binance (global), not CoinDCX` | ⚠️ your server can't reach CoinDCX — wrong region |
+>
+> There's also a one-line summary above the cards: *"✅ all 40 coins priced off CoinDCX's USDT market"*.
 
 ---
 
 ## Part 1 — Get a free Upstox API app (≈5 min)
 
+Only needed for **stocks, ETFs, indices and commodities**. Crypto works without it.
+
 1. Go to **https://account.upstox.com/developer/apps** and log in.
 2. Click **Create New App** (Upstox API is free).
 3. Fill in:
    - **App name:** anything (e.g. Growth Intelligence)
-   - **Redirect URL:** `https://YOURNAME.onrender.com/callback`  ← use your chosen name
-4. Click create. Copy the **API Key** and **API Secret** somewhere safe — you'll paste them in Part 3.
-
-(If Upstox won't let you save that redirect yet, that's fine — you can come back and set it after Part 2.)
+   - **Redirect URL:** your app's address + `/callback` — you'll have it after Part 3, so you can
+     come back and set this then.
+4. Copy the **API Key** and **API Secret** somewhere safe.
 
 ---
 
-## Part 2 — Put the code on GitHub (≈5 min, drag & drop)
+## Part 2 — Put the code on GitHub (≈5 min)
 
 1. Go to **https://github.com** → sign up (free) or log in.
 2. Click the **+** (top-right) → **New repository**.
-3. **Repository name:** `growth-intelligence` → keep it **Public** → click **Create repository**.
-4. On the next page click the link **“uploading an existing file”**.
-5. Open your **growth-intelligence-pro** folder on your computer. Select **everything inside it**
-   (server.js, package.json, config.json, README.md, GO-LIVE-GUIDE.md, and the **public** folder) and
-   **drag it all onto the GitHub upload page.**
-   - Make sure the **public** folder uploads too (it contains index.html). GitHub will show
-     `public/index.html` in the list — that means it worked.
-6. Click the green **Commit changes**.
+3. **Repository name:** `growth-intelligence` → **Create repository**.
+4. Upload the project files — `server.js`, `paper.js`, `index.html`, `package.json`, and the `test`
+   folder. (`index.html` may live at the root or in a `public` folder; both work.)
 
-✅ Your code now lives on GitHub.
+> ⚠️ **Never upload `token.json`, `positions.json`, `setups.json` or `paper-state.json`.** They hold
+> your live broker session and your Telegram chat IDs. `.gitignore` already excludes them — just
+> don't add them by hand.
 
 ---
 
-## Part 3 — Deploy it on Render (≈5 min)
+## Part 3 — Deploy on DigitalOcean
 
-1. Go to **https://render.com** → **Get Started** → sign up with your **GitHub** account (easiest).
-2. Click **New +** → **Web Service**.
-3. Find your `growth-intelligence` repo in the list → **Connect**.
-4. Fill in the settings:
-   - **Name:** `YOURNAME`  (this sets your web address → `https://YOURNAME.onrender.com`)
-   - **Region:** Singapore (closest to India)
-   - **Branch:** main
-   - **Build Command:** leave blank (or `npm install`)
-   - **Start Command:** `node server.js`
-   - **Instance Type:** **Free**
-5. Scroll to **Environment Variables** → **Add Environment Variable**, add these three:
+Two ways. **App Platform** is click-only and redeploys itself on every push. **A Droplet** is a plain
+server you update yourself, and is cheaper to run always-on.
+
+Either way, choose the **Bangalore (BLR1)** region. See the box at the top of this page.
+
+### Option A — App Platform (no command line)
+
+1. **https://cloud.digitalocean.com/apps** → **Create App** → **GitHub** → pick `growth-intelligence`.
+2. **Region: Bangalore.** Branch `main`, **Autodeploy** on.
+3. It detects Node. Leave the build command blank; **Run command** `npm start`.
+4. **Settings → App-Level Environment Variables:**
 
    | Key | Value |
    |-----|-------|
-   | `UPSTOX_KEY` | *(paste your Upstox API Key)* |
-   | `UPSTOX_SECRET` | *(paste your Upstox API Secret)* |
-   | `REDIRECT_URI` | `https://YOURNAME.onrender.com/callback` |
+   | `UPSTOX_KEY` | *(your Upstox API Key)* |
+   | `UPSTOX_SECRET` | *(your Upstox API Secret)* |
+   | `REDIRECT_URI` | `https://YOUR-APP.ondigitalocean.app/callback` |
 
-6. Click **Create Web Service**. Render builds it for ~2–3 minutes. When it says **“Live”**, you're up. 🎉
+   Mark the two Upstox values **Encrypt**.
+5. **Create Resources.** When it goes live, open the URL.
+
+Pushing to `main` redeploys automatically.
+
+### Option B — Droplet (cheapest always-on)
+
+1. **Create → Droplet → Bangalore (BLR1)**, Ubuntu, the smallest size is plenty.
+2. SSH in, then:
+
+```bash
+apt update && apt install -y nodejs npm git
+git clone https://github.com/YOURNAME/growth-intelligence.git
+cd growth-intelligence
+```
+
+3. Create `/etc/systemd/system/growth.service` so it starts on boot and restarts on crash:
+
+```ini
+[Unit]
+Description=Growth Intelligence
+After=network.target
+
+[Service]
+WorkingDirectory=/root/growth-intelligence
+ExecStart=/usr/bin/node server.js
+Restart=always
+Environment=PORT=80
+Environment=UPSTOX_KEY=your_key_here
+Environment=UPSTOX_SECRET=your_secret_here
+Environment=REDIRECT_URI=http://YOUR_DROPLET_IP/callback
+
+[Install]
+WantedBy=multi-user.target
+```
+
+4. Start it:
+
+```bash
+systemctl enable --now growth
+systemctl status growth      # should say active (running)
+```
+
+**To update after a push — a Droplet does NOT auto-deploy:**
+
+```bash
+cd /root/growth-intelligence && git pull && systemctl restart growth
+```
+
+> If a change doesn't appear, this is almost always why. `git log --oneline -1` on the Droplet tells
+> you which commit is actually running.
 
 ---
 
 ## Part 4 — Final link-up & first login
 
-1. Go back to your **Upstox app** (Part 1) and make sure its **Redirect URL** is exactly:
-   `https://YOURNAME.onrender.com/callback`  → Save.
-2. Open **https://YOURNAME.onrender.com** in any browser (works on your phone too).
-3. Click **“Login with Upstox →”**, sign in, approve.
-4. You now have **live, broker-matching prices** on the internet. Bookmark the link.
+1. Back in your **Upstox app**, set the **Redirect URL** to exactly your address + `/callback`.
+   It must match `REDIRECT_URI` character for character, including `https://`.
+2. Open your address in any browser (works on your phone too).
+3. Click **Login with Upstox** → sign in → approve.
 
 ---
 
 ## Daily routine (15 seconds)
 
-Brokers expire access every morning for security (true everywhere, not just here). So once a day:
-
-1. Open **https://YOURNAME.onrender.com**
-2. Click **Login with Upstox**.
-
-Done for the day.
+Brokers expire access every morning for security. Once a day: open the app, click
+**Login with Upstox**. Crypto keeps working without it.
 
 ---
-
-## Good to know about the FREE plan
-
-- **It sleeps after ~15 minutes of no visitors.** The next time you open the link it takes ~30–60 seconds
-  to wake up, and you may need to click **Login with Upstox** again. That's normal for free hosting.
-- Want it always-on and instant? Render's paid plan (~$7/month) keeps it awake — optional, only if you
-  use it heavily.
-- Your API keys live **only** in Render's Environment Variables (not in the code on GitHub), so they stay private.
 
 ## If something doesn't work
-- **Page won't load / "Bad Gateway":** wait 60 seconds (it's waking up) and refresh.
-- **Login bounces back to an error:** the Upstox Redirect URL and the Render `REDIRECT_URI` must be the
-  **exact same** text, including `https://` and `/callback`. Fix to match and try again.
-- **A few stocks show as unavailable:** that's just an occasional data hiccup; the next refresh fixes it.
-- Stuck? Send me your Render URL and a screenshot of the error and I'll pinpoint it.
 
----
+**Crypto prices don't match my CoinDCX screen**
+Check the venue label under **Current Price**. `Binance (global), not CoinDCX` means the server
+isn't in India — that's a region problem, not a pricing bug. `CoinDCX INR pair` means that
+particular coin has no USDT market or too little history at that timeframe; hover the `ⓘ` and it
+says which.
 
-This is the honest fastest route to a live, broker-accurate SaaS you control. The daily one-click login is
-the only recurring step, and it's a broker security rule no platform can remove.
-```
+**The price looks frozen**
+The clock beside the price shows the age of the last quote that actually landed, and goes amber
+past 15s, red past 40s. If it says `browser feed failing, using server`, CoinDCX is rate-limiting
+your browser and the app has fallen back on its own.
+
+**A change I pushed isn't showing**
+On a Droplet, pull and restart (above). On App Platform, check the deploy actually succeeded.
+
+**Login bounces back to an error**
+The Upstox Redirect URL and `REDIRECT_URI` must be the exact same text.
+
+**Stocks are empty but crypto works**
+You're not logged in to Upstox, or the market is closed. Both are stated on the page.
