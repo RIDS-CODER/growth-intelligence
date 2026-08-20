@@ -584,14 +584,39 @@ async function loadCrypto(asset,tf){
   }
   return loadBinance(asset,tf);
 }
-async function cdxCandles(pair,interval){
-  const j=await getJSON(`https://public.coindcx.com/market_data/candles?pair=${encodeURIComponent(pair)}&interval=${interval}&limit=400`,{});
+async function cdxRawCandles(pair,interval){
+  const j=await getJSON(`https://public.coindcx.com/market_data/candles?pair=${encodeURIComponent(pair)}&interval=${interval}&limit=1000`,{});
   if(!Array.isArray(j)||!j.length)throw new Error("no candles");
   const rows=j.slice().reverse();  // CoinDCX returns newest-first → ascending
   const close=[],high=[],low=[],times=[],vol=[];
   for(const k of rows){const c=+k.close;if(!isFinite(c))continue;close.push(c);high.push(+k.high);low.push(+k.low);times.push(+k.time);vol.push(+k.volume||0);}
   if(!close.length)throw new Error("no candles");
   return {close,high,low,times,vol};
+}
+/* NOT ENOUGH HISTORY IS NOT A REASON TO CHANGE MARKET.
+   The engine needs 41 closed bars. A young listing does not have 41 of them at 4h or 1D yet — ten
+   days old is ~336 bars at 1h but only 60 at 4h and 10 at 1D — so the same coin took the USDT
+   market on fast timeframes and fell to the INR pair on slow ones. Swapping markets "fixes" the
+   bar count by moving to a different price curve, which is the very thing the USDT market was
+   adopted to avoid. Roll the SAME book up from a finer interval instead.
+   The browser demanded 41 bars while this loader demanded only 1 — two rules for one decision, and
+   the browser's is the one that runs on the Crypto tab. They agree now. */
+const CDX_FINER={"15m":["5m",3],"30m":["5m",6],"1h":["15m",4],"4h":["1h",4],"6h":["1h",6],"12h":["1h",12],"1d":["4h",6]};
+async function cdxCandles(pair,interval){
+  let d=null;
+  try{ d=await cdxRawCandles(pair,interval); }catch(e){}
+  if(d&&d.close.length>=41)return d;
+  const f=CDX_FINER[interval];
+  if(f){
+    try{ const fine=await cdxRawCandles(pair,f[0]);
+      if(fine&&fine.close.length>=41*f[1]*0.5){
+        const up=resampleSeries({...fine,mtime:Date.now()},f[1]);
+        if(up&&up.close.length>=41)return {close:up.close,high:up.high,low:up.low,times:up.times,vol:up.vol||fine.vol};
+      }
+    }catch(e){}
+  }
+  if(d&&d.close.length>=41)return d;
+  throw new Error("under 41 bars at "+interval+" (even rolled up from finer)");
 }
 async function loadCoinDCX(asset,tf){
   const interval=CDX_INT[tf]||"1h";
