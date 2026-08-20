@@ -9,7 +9,7 @@
      • Manages stop / scale-out / breakeven ratchet.
      • Hits the daily target → flattens and stands down until tomorrow.
      • Halts for the day at the daily loss limit.
-   Fees/slippage default to 0 so you can judge raw signal accuracy.
+   Costs are charged: CoinDCX taker fees and slippage, both configurable.
    ============================================================ */
 module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, dumpBounce, dumpRule }) {
   const fs = require('fs'), path = require('path');
@@ -24,7 +24,9 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, 
     running:false, halted:false, goalHit:false,
     capital:100000, riskPct:1, dailyTargetPct:10, maxLev:5, tab:'Crypto', tf:'15m',
     timeframes:['5m','15m','30m','1h'],                 // the bot hunts across ALL of these itself — more scalp opportunities, same quality bar
-    feeBps:0, slipBps:0, dayLossLimitPct:5, cooldownMin:20, maxConcurrent:20,
+    feeBps:50, slipBps:10, dayLossLimitPct:5, cooldownMin:20, maxConcurrent:20,
+    maxBarsHeld:24,           // a trade that has gone nowhere for this many bars is capital doing nothing
+    maxSameDir:4,             // and no more than this many open on ONE side — an all-crypto book moves together
     allowShort:true, allowPending:true, allowAggressive:false,   // aggressive = market-enter the strongest near-zone setups (still R:R-guarded)
     /* WHICH DESK THE BOT TRADES. Each maps to a panel you already read, so what the bot takes is
        what you would have seen. `scalpOnly` used to be the only lever here — it is now just the
@@ -63,7 +65,15 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, 
     if(raw && !raw.sources)
       st.sources = raw.scalpOnly===false ? {quick:true,normal:true,movers:false,dump:false}
                                          : {quick:true,normal:false,movers:false,dump:false};
-    st.feeBps=0; st.slipBps=0;                                   // frictionless while validating raw accuracy (remove to re-enable costs)
+    /* COSTS ARE REAL AND NO LONGER WIPED ON LOAD.
+       This line used to be `st.feeBps=0; st.slipBps=0;` unconditionally, so the config endpoint
+       could set them and the very next load threw them away — the bot reported a frictionless
+       P&L that no account could reproduce, and nothing on screen said so. CoinDCX charges 0.5%
+       taker (50 bps) each way; 10 bps of slippage is generous for the liquid pairs this trades.
+       A saved state from the frictionless era comes back with 0/0, which is indistinguishable
+       from a deliberate choice, so only an EXPLICIT zero in the raw file is honoured. */
+    if(!raw || raw.feeBps==null) st.feeBps=DEFAULTS.feeBps;
+    if(!raw || raw.slipBps==null) st.slipBps=DEFAULTS.slipBps;
     st.timeframes=DEFAULTS.timeframes.slice();                   // migrate to the current auto timeframe set
     return st; }
   function save(){ try{ fs.writeFileSync(FILE, JSON.stringify(S)); }catch(e){} }
@@ -142,6 +152,16 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, 
       if(p.taken<1 && hit(0)){ reduce(p,p.qty/3,p.targets[0],'T1'); if(p.remQty>1e-9){p.taken=1;p.stop=p.entry;} }
       if(p.taken<2 && hit(1)){ reduce(p,p.qty/3,p.targets[1],'T2'); if(p.remQty>1e-9){p.taken=2;p.stop=p.targets[0];} }
       if(p.taken<3 && hit(2)){ reduce(p,p.remQty,p.targets[2],'T3'); }
+      /* TIME STOP. A setup is a claim that something happens SOON — a 15m breakout that has not
+         reached T1 in a day is not a slow winner, it is a thesis that did not play out, and while
+         it sits there it holds margin that the next setup cannot use. Only untouched trades are
+         timed out: once T1 is banked the stop is at breakeven and the runner costs nothing to
+         hold. Exited at the market, so the cost of being wrong slowly is recorded rather than
+         hidden in an open position that never resolves. */
+      if(p.remQty>1e-9 && p.taken<1 && S.maxBarsHeld>0){
+        const bars=(Date.now()-(p.openAt||Date.now()))/(tfMin(p.tf||'15m')*60000);
+        if(bars>=S.maxBarsHeld) reduce(p,p.remQty,px,'time');
+      }
     }
   }
   function checkPending(prices){
@@ -239,7 +259,11 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, 
 
   // Why the bot passed on everything. Without this, a correctly SELECTIVE bot and a broken one
   // look identical from the panel: equity flat, no positions, no error. Counts are per tick.
-  const blankFunnel=()=>({seen:0,noDirection:0,shortsOff:0,pendingOff:0,notScalp:0,lowConf:0,noEdge:0,dumpUnconfirmed:0,eligible:0,bySource:{}});
+  /* EVERY counter starts at 0, not undefined. whyIdle sorts these buckets numerically, and one
+     undefined turns `b[0]-a[0]` into NaN — V8 then leaves the order arbitrary and the whole
+     explanation collapses to null. A counter that only exists once it has fired is a counter that
+     silently breaks the report on every pass where it did not. */
+  const blankFunnel=()=>({seen:0,noDirection:0,shortsOff:0,pendingOff:0,notScalp:0,lowConf:0,noEdge:0,dumpUnconfirmed:0,sameDir:0,costlier:0,eligible:0,bySource:{}});
   let funnel=blankFunnel();
   function eligible(r){
     funnel.seen++;
@@ -248,6 +272,15 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, 
     fs_.seen++;
     if(!r||!r.sig||!r.action||!r.setup) return false;
     const d=kindDir(r.action.kind); if(!d){ funnel.noDirection++; return false; }
+    /* THE TARGET MUST CLEAR THE COST OF GETTING THERE.
+       Charging real fees exposed something the frictionless P&L was hiding: a quick scalp's first
+       target is about +1.0%, while a round trip at CoinDCX taker (50bps each way) plus slippage
+       costs ~1.2% of notional. Every T1 exit was therefore a small LOSS dressed as a win, and the
+       bot would have ground the account down while its own report showed green. A target that
+       cannot pay for the trade is not a target. */
+    const roundTripPct = 2*(S.feeBps/10000 + S.slipBps/10000)*100;
+    const t1Pct = Math.abs(+(r.setup.ret&&r.setup.ret[0])||0);
+    if(roundTripPct>0 && t1Pct < roundTripPct*1.5){ funnel.costlier++; return false; }
     if(d<0 && !S.allowShort){ funnel.shortsOff++; return false; }
     if((r.action.kind==='waitdip'||r.action.kind==='waitbounce') && !S.allowPending){ funnel.pendingOff++; return false; }
     // SCALP-ONLY: only the quick/scalp regimes (range + correction) — never trend or breakout setups.
@@ -276,14 +309,16 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, 
       return `Scanned ${f.dumpUnconfirmed} Dump & Bounce plans, took none: no confirmation on the 4h chart — it only longs a rally that is running or basing, and only shorts a bump that is late or rolling over, never a floor that is still falling.`;
     if(!f||!f.seen) return 'The enabled desks produced no candidates on this pass.';
     if(f.eligible) return null;
-    const buckets=[[f.dumpUnconfirmed,'the Dump & Bounce plans had no confirmation on the 4h chart — it only longs a rally that is running or basing, and only shorts a bump that is late or rolling over, never a floor that is still falling'],
+    const buckets=[[f.costlier,`their first target was too small to cover the round trip — ${(2*(S.feeBps/10000+S.slipBps/10000)*100).toFixed(2)}% in fees and slippage. Lower Fees/Slippage if you trade a cheaper venue, or trade a slower timeframe where targets are wider`],
+      [f.sameDir,`they all faced the same way and ${S.maxSameDir} are already open on that side — an all-crypto book moves together, so this is one bet, not many`],
+      [f.dumpUnconfirmed,'the Dump & Bounce plans had no confirmation on the 4h chart — it only longs a rally that is running or basing, and only shorts a bump that is late or rolling over, never a floor that is still falling'],
       [f.notScalp,'none were scalp setups (range/correction) — turn off ⚡ Scalp only to widen'],
       [f.noEdge,'none had a proven backtested edge on that side — lower 📊 Proven edge / Min hist win %'],
       [f.lowConf,'none reached the confidence floor — lower Min conf %'],
       [f.noDirection,'the engine had no actionable entry on any of them'],
       [f.shortsOff,'the only candidates were shorts, and Shorts is off'],
       [f.pendingOff,'the only candidates needed a resting limit, and Dip limits is off']];
-    buckets.sort((a,b)=>b[0]-a[0]);
+    buckets.sort((a,b)=>(+b[0]||0)-(+a[0]||0));   // coerce: a missing counter must not poison the ordering
     return buckets[0][0] ? `Scanned ${f.seen} setups, took none: ${buckets[0][1]}.` : null;
   }
   const conviction = r => Math.abs(r.sig.score) + (r.mtf?r.mtf.agree*6:0) + ((r.bt&&r.bt.score)?r.bt.score*0.3:0);
@@ -297,6 +332,15 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, 
       if(S.positions.length+S.pending.length >= S.maxConcurrent) break;
       if(held(r.asset.sym)) continue;   // state changes as we place — never double-commit a coin
       const k=r.action.kind, d=kindDir(r.action.kind), lev=levFor(r);
+      /* SAME-DIRECTION CAP. maxConcurrent counts POSITIONS, and on an all-crypto universe twenty
+         positions is not twenty bets — alt-coins move with Bitcoin, so twenty longs is one bet at
+         twenty times the size, and a single BTC flush takes every stop together. Cap how many can
+         face the same way; the opposite side stays free, so a genuinely two-sided book still
+         fills. Counts pending orders too: a resting limit is committed risk, not a maybe. */
+      if(S.maxSameDir>0 && d!==0){
+        const sameDir=S.positions.filter(p=>p.dir===d).length+S.pending.filter(o=>o.dir===d).length;
+        if(sameDir>=S.maxSameDir){ funnel.sameDir++; continue; }
+      }
       const base={ sym:r.asset.sym, name:r.asset.name, tk:r.asset.tk||'', cls:r.asset.cls, dir:d, stop:r.setup.stop, targets:(r.setup.targets||[]).slice(0,3), tf:(r._tf||(S.timeframes&&S.timeframes[0])||'15m'), regime:(r.setup.regime||'trend'), src:(r._src||'quick') };
       if(base.targets.length<3) continue;
       const px0=(prices&&prices[r.asset.sym])||r.sig.price; if(!(px0>0)) continue;
@@ -367,7 +411,7 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, 
         for(const p of S.positions){ const k=o[p.src||'quick']||o.quick; k.open++; }
         for(const k of SOURCES) if(o[k].trades) o[k].winRate=Math.round(100*o[k].wins/o[k].trades);
         return o; })(),
-      config:{capital:S.capital,riskPct:S.riskPct,dailyTargetPct:S.dailyTargetPct,maxLev:S.maxLev,feeBps:S.feeBps,slipBps:S.slipBps,dayLossLimitPct:S.dayLossLimitPct,allowShort:S.allowShort,allowPending:S.allowPending,allowAggressive:S.allowAggressive,scalpOnly:S.scalpOnly,minConfPct:S.minConfPct,requireEdge:S.requireEdge,minWinRate:S.minWinRate,minEdgeTrades:S.minEdgeTrades,minStopPct:S.minStopPct,stopCooldownMin:S.stopCooldownMin,maxStopOutsPerCoin:S.maxStopOutsPerCoin,lossStreakPause:S.lossStreakPause,streakPauseMin:S.streakPauseMin},
+      config:{capital:S.capital,riskPct:S.riskPct,dailyTargetPct:S.dailyTargetPct,maxLev:S.maxLev,feeBps:S.feeBps,slipBps:S.slipBps,dayLossLimitPct:S.dayLossLimitPct,maxConcurrent:S.maxConcurrent,maxBarsHeld:S.maxBarsHeld,maxSameDir:S.maxSameDir,allowShort:S.allowShort,allowPending:S.allowPending,allowAggressive:S.allowAggressive,scalpOnly:S.scalpOnly,minConfPct:S.minConfPct,requireEdge:S.requireEdge,minWinRate:S.minWinRate,minEdgeTrades:S.minEdgeTrades,minStopPct:S.minStopPct,stopCooldownMin:S.stopCooldownMin,maxStopOutsPerCoin:S.maxStopOutsPerCoin,lossStreakPause:S.lossStreakPause,streakPauseMin:S.streakPauseMin},
       cash:S.cash, equity:eq, startEquity:S.capital, retPct:(eq/S.capital-1)*100,
       dayStartEquity:S.dayStartEquity, dayRetPct:S.dayStartEquity?(eq/S.dayStartEquity-1)*100:0, targetEquity:S.dayStartEquity*(1+S.dailyTargetPct/100),
       marginUsed:grossMargin(), openCount:S.positions.length, pendingCount:S.pending.length,
@@ -378,7 +422,7 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, 
   }
 
   function setConfig(c){
-    ['capital','riskPct','dailyTargetPct','maxLev','feeBps','slipBps','dayLossLimitPct','cooldownMin','maxConcurrent','minStopPct','stopCooldownMin','maxStopOutsPerCoin','lossStreakPause','streakPauseMin','minConfPct','minWinRate','minEdgeTrades'].forEach(k=>{ if(c[k]!=null&&!isNaN(+c[k])) S[k]=+c[k]; });
+    ['capital','riskPct','dailyTargetPct','maxLev','feeBps','slipBps','dayLossLimitPct','cooldownMin','maxConcurrent','maxBarsHeld','maxSameDir','minStopPct','stopCooldownMin','maxStopOutsPerCoin','lossStreakPause','streakPauseMin','minConfPct','minWinRate','minEdgeTrades'].forEach(k=>{ if(c[k]!=null&&!isNaN(+c[k])) S[k]=+c[k]; });
     if(c.sources&&typeof c.sources==='object'){ S.sources=S.sources||{};
       for(const k of SOURCES) if(c.sources[k]!=null) S.sources[k]=!!c.sources[k]; }
     if(c.tab)S.tab=c.tab; if(c.tf)S.tf=c.tf;
@@ -391,7 +435,7 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, 
   }
   function start(){ if(!S.startedAt){ S.startedAt=Date.now(); S.cash=S.capital; S.dayStartEquity=S.capital; } S.running=true; S.halted=false; S.goalHit=false; save(); return snapshot(); }
   function stop(){ S.running=false; save(); return snapshot(); }
-  function reset(){ const cfg={capital:S.capital,riskPct:S.riskPct,dailyTargetPct:S.dailyTargetPct,maxLev:S.maxLev,tab:S.tab,tf:S.tf,feeBps:S.feeBps,slipBps:S.slipBps,dayLossLimitPct:S.dayLossLimitPct,allowShort:S.allowShort,allowPending:S.allowPending,allowAggressive:S.allowAggressive,scalpOnly:S.scalpOnly,minConfPct:S.minConfPct,requireEdge:S.requireEdge,minWinRate:S.minWinRate,minEdgeTrades:S.minEdgeTrades,maxConcurrent:S.maxConcurrent,cooldownMin:S.cooldownMin,minStopPct:S.minStopPct,stopCooldownMin:S.stopCooldownMin,maxStopOutsPerCoin:S.maxStopOutsPerCoin,lossStreakPause:S.lossStreakPause,streakPauseMin:S.streakPauseMin};
+  function reset(){ const cfg={capital:S.capital,riskPct:S.riskPct,dailyTargetPct:S.dailyTargetPct,maxLev:S.maxLev,tab:S.tab,tf:S.tf,feeBps:S.feeBps,slipBps:S.slipBps,dayLossLimitPct:S.dayLossLimitPct,allowShort:S.allowShort,allowPending:S.allowPending,allowAggressive:S.allowAggressive,scalpOnly:S.scalpOnly,minConfPct:S.minConfPct,requireEdge:S.requireEdge,minWinRate:S.minWinRate,minEdgeTrades:S.minEdgeTrades,maxConcurrent:S.maxConcurrent,maxBarsHeld:S.maxBarsHeld,maxSameDir:S.maxSameDir,cooldownMin:S.cooldownMin,minStopPct:S.minStopPct,stopCooldownMin:S.stopCooldownMin,maxStopOutsPerCoin:S.maxStopOutsPerCoin,lossStreakPause:S.lossStreakPause,streakPauseMin:S.streakPauseMin};
     S=JSON.parse(JSON.stringify(DEFAULTS)); Object.assign(S,cfg); S.cash=S.capital; save(); return snapshot(); }
 
   return { tick, start, stop, reset, setConfig, getState:()=>snapshot(), __state:()=>S };

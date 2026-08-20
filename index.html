@@ -693,7 +693,7 @@ function renderPaper(s){
   const el=document.getElementById('paperPanel');if(!el)return;window.__paper=s;const ret=s.retPct||0;
   const sideTag=sd=>`<span style="color:var(--${sd==='SHORT'?'sell':'buy'});font-weight:700">${sd}</span>`;
   const szCell=(qty,px,lev)=>{const n=qty*px;return isFinite(n)&&n>0?`${pmoney(n)}<br><span class="sub">${pmoney(n/(lev||1))} margin</span>`:'—';};
-  const exitLabel=r=>({stop:'🛑 stop',be:'breakeven',trail:'✓ trailed',T1:'T1',T2:'T2',T3:'✓ T3',target:'🎯 goal'}[r]||r);
+  const exitLabel=r=>({stop:'🛑 stop',be:'breakeven',trail:'✓ trailed',T1:'T1',T2:'T2',T3:'✓ T3',target:'🎯 goal',time:'⏱ timed out'}[r]||r);
   const srcTag=k=>({quick:'⚡',normal:'📈',movers:'🔥',dump:'🎢'})[k]||'⚡';
   const pos=(s.positions||[]).map(p=>`<tr><td title="desk: ${p.src||'quick'}">${srcTag(p.src)} ${p.name||p.sym}</td><td>${sideTag(p.side)}</td><td>${p.tf||''}</td><td>${p.lev}×</td><td>${szCell(p.remQty,p.entry,p.lev)}</td><td>${pprice(p.entry)}</td><td>${pprice(p.stop)}</td><td>${p.taken}/3</td><td>${pprice(p.lastPx)}</td><td class="${p.uPnl>=0?'up':'down'}">${p.uPnl>=0?'+':''}${pmoney(p.uPnl)}</td></tr>`).join('')||'<tr><td colspan="10" class="sub">No open positions</td></tr>';
   const pend=(s.pending||[]).map(o=>`<tr><td title="desk: ${o.src||'quick'}">${srcTag(o.src)} ${o.name||o.sym}</td><td>${sideTag(o.side)}</td><td>${o.tf||''}</td><td>${o.lev}×</td><td>${szCell(o.qty,o.limit,o.lev)}</td><td>limit ${pprice(o.limit)}</td><td>stop ${pprice(o.stop)}</td></tr>`).join('')||'<tr><td colspan="7" class="sub">No working orders</td></tr>';

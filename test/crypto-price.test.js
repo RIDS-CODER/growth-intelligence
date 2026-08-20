@@ -713,3 +713,42 @@ test("browser-fetched crypto is stamped with the FETCH time, not the forming can
   assert.strictEqual(out.results[0].asof,server.asof,
     "the browser path must timestamp like the server path — the read time, not the bar's open");
 });
+
+/* ============================================================
+   THE SERVER AND THE BROWSER MUST AGREE.
+   Three separate bugs in this session were the same shape: the two crypto loaders making the SAME
+   decision by DIFFERENT rules, with the browser's version the one that actually runs on the Crypto
+   tab and the server's the one that got reviewed.
+       #25  the USDT/INR rate      server read USDTINR first, the browser the BTC ratio
+       #27  the USDT pair id       server ranked the books, the browser took the last listed
+       #28  the minimum bar count  browser demanded 41, the server demanded 1
+   Each was found by a user, not by review, because nothing compared the two. This does.
+   ============================================================ */
+test("the two crypto loaders decide by the SAME rules",()=>{
+  const fs=require("node:fs"), path=require("node:path");
+  const srv=fs.readFileSync(path.join(__dirname,"..","server.js"),"utf8");
+  const script=fs.readFileSync(path.join(__dirname,"..","index.html"),"utf8").match(/<script>([\s\S]*)<\/script>/)[1];
+
+  const rules=[
+    // [what is being decided, how to read it out of the server, out of the browser]
+    ["USDT/INR rate: which market is preferred",
+     /function cdxUsdtInr\(\)\{const u=cdxTicker\["USDTINR"\];if\(u>0\)return u;/,
+     /function cdxRateFromTicker\(t\)\{[\s\S]{0,400}?if\(ui>0\)return ui;/],
+    ["pair id: rank by ecode",         /const RANK=\{B:3,HB:2,I:1\}/,        /const RANK=\{B:3,HB:2,I:1\}/],
+    ["pair id: rank by active status", /\?10:0\)\+\(RANK\[/,                 /\?10:0\)\+\(RANK\[/],
+    ["minimum bars before a market may be used", /close\.length>=41/,        /close\.length>=41/],
+    ["roll a finer interval up rather than change market",
+     /CDX_FINER=\{"15m":\["5m",3\],"30m":\["5m",6\],"1h":\["15m",4\],"4h":\["1h",4\]/,
+     /FINER=\{'15m':\['5m',3\],'30m':\['5m',6\],'1h':\['15m',4\],'4h':\['1h',4\]/],
+    ["prefer the coin's own USDT market", /pairUsed:"usdt"/,                 /pairUsed:"usdt"/],
+    ["keep the INR pair as a labelled fallback", /pairUsed:"inr"/,           /pairUsed:"inr"/],
+    ["say why when the USDT market is not used", /inrWhy/,                   /inrWhy/],
+  ];
+  const missing=[];
+  for(const [what,onServer,onBrowser] of rules){
+    if(!onServer.test(srv))    missing.push(`SERVER  is missing: ${what}`);
+    if(!onBrowser.test(script))missing.push(`BROWSER is missing: ${what}`);
+  }
+  assert.deepStrictEqual(missing,[],
+    "one loader changed without the other — the browser's rule is the one that runs on the Crypto tab");
+});
