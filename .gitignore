@@ -9,8 +9,10 @@ instruments.json
 setups.json
 # paper-trading bot state
 paper-state.json
-# trades you told the watcher about (symbols, entries, Telegram chat ids)
+# trades you told the watcher about (symbols, entries, leverage, Telegram chat ids)
 positions.json
+# market-health snapshot log — grows continuously, and is what the intel backtester reads
+intel-history.jsonl
 
 node_modules/
 .DS_Store
