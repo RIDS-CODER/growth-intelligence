@@ -72,6 +72,15 @@ module.exports = function createHistory(opts) {
       funding: intel.funding && intel.funding.available ? intel.funding.medianRate : null,
       vacuum: intel.liquidity && intel.liquidity.ok ? !!intel.liquidity.marketVacuum : null,
       recovery: intel.recovery && intel.recovery.ok ? intel.recovery.recoveryProb : null,
+      /* Macro is recorded so the backtester can eventually answer the question that actually
+         matters for this feature: did degrading confidence in a low-reliability tape avoid
+         losses, or merely miss trades? That cannot be settled by argument, only by a sample. */
+      macroRisk: intel.macro && intel.macro.available ? intel.macro.riskAppetite : null,
+      taRel: intel.macro && intel.macro.available ? intel.macro.cryptoMacro.taReliability : null,
+      corrNdx: intel.macro && intel.macro.available && S.isNum(intel.macro.cryptoMacro.correlations.NDX) ? +intel.macro.cryptoMacro.correlations.NDX.toFixed(3) : null,
+      dxy: intel.macro && intel.macro.available && intel.macro.instruments.DXY ? intel.macro.instruments.DXY.level : null,
+      vix: intel.macro && intel.macro.available && intel.macro.instruments.VIX ? intel.macro.instruments.VIX.level : null,
+      evWindow: intel.eventRisk && intel.eventRisk.ok ? !!intel.eventRisk.inWindow : null,
       px
     };
     const arr = load();
@@ -170,7 +179,10 @@ module.exports = function createHistory(opts) {
     'oi-price-down': { label: 'Open interest falling while price fell', test: r => S.isNum(r.oi) && r.oi < -0.01 && S.isNum(r.breadth) && r.breadth < -20 },
     'correlation-spike': { label: 'Altcoin/BTC correlation above 0.8', test: r => S.isNum(r.corr) && r.corr > 0.8 },
     'liquidity-vacuum': { label: 'Market-wide liquidity vacuum flagged', test: r => r.vacuum === true },
-    'extreme-risk-off': { label: 'Breadth below -60', test: r => S.isNum(r.breadth) && r.breadth < -60 }
+    'extreme-risk-off': { label: 'Breadth below -60', test: r => S.isNum(r.breadth) && r.breadth < -60 },
+    'macro-risk-off': { label: 'Macro risk appetite below -50', test: r => S.isNum(r.macroRisk) && r.macroRisk < -50 },
+    'ta-unreliable': { label: 'Technical reliability below 35 (macro-driven tape)', test: r => S.isNum(r.taRel) && r.taRel < 35 },
+    'event-window': { label: 'Inside a scheduled event window', test: r => r.evWindow === true }
   };
 
   function runAll(opts2) {

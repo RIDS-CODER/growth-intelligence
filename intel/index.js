@@ -21,6 +21,9 @@ const createData = require('./data');
 const createDerivs = require('./derivs');
 const createGlobal = require('./global');
 const createHistory = require('./history');
+const createMacroData = require('./macroData');
+const createCalendar = require('./calendar');
+const { macroEngine } = require('./macro');
 const { breadth } = require('./breadth');
 const { correlation } = require('./correlation');
 const { betaEngine, coinVsMarket } = require('./beta');
@@ -45,6 +48,8 @@ module.exports = function createIntel(deps) {
   const derivs = createDerivs({ enabled: d.derivsEnabled, maxPerSymbol: DERIV_TOP, maxDepth: 8 });
   const globalStats = createGlobal({ coingeckoKey: d.coingeckoKey });
   const history = createHistory({ dir: d.dir || __dirname });
+  const macroData = createMacroData({ enabled: d.macroEnabled });
+  const calendar = createCalendar({ dir: d.dir || require('path').join(__dirname, '..') });
   const zigzag = d.zigzag || (() => []);
 
   let cache = null, cacheAt = 0, inflight = null;
@@ -73,13 +78,22 @@ module.exports = function createIntel(deps) {
     const topByVol = snap.tickers.slice().sort((a, b) => (+snap.coins[b].qv || 0) - (+snap.coins[a].qv || 0)).slice(0, DERIV_TOP);
     const wanted = Array.from(new Set(['BTC', 'ETH'].concat(topByVol, d.extraSymbols || []))).filter(t => snap.coins[t]).slice(0, DERIV_TOP);
 
-    const [fundingRaw, oiRaw, depthRaw, fundHistRaw, dom] = await Promise.all([
+    const [fundingRaw, oiRaw, depthRaw, fundHistRaw, dom, macroRaw] = await Promise.all([
       derivs.funding().catch(e => ({ available: false, reason: String(e.message || e) })),
       derivs.openInterest(wanted).catch(e => ({ available: false, reason: String(e.message || e) })),
       derivs.depth((d.depthSymbols || []).concat(wanted.slice(0, 4))).catch(e => ({ available: false, reason: String(e.message || e) })),
       derivs.fundingHistory(wanted).catch(e => ({ available: false, reason: String(e.message || e) })),
-      globalStats.dominance().catch(e => ({ available: false, reason: String(e.message || e) }))
+      globalStats.dominance().catch(e => ({ available: false, reason: String(e.message || e) })),
+      macroData.load().catch(e => ({ available: false, reason: String(e.message || e) }))
     ]);
+
+    /* Event risk is computed from a LOCAL FILE and is therefore never knocked out by a network
+       failure. That is deliberate: "do not open leverage into CPI" is the single most valuable
+       guard in this module, and it must not depend on the least reliable thing in it. */
+    let eventRisk;
+    try { eventRisk = calendar.eventRisk(); }
+    catch (e) { eventRisk = { ok: false, configured: false, inWindow: false, reason: 'calendar unreadable: ' + String(e.message || e) }; }
+    const macro = macroEngine(macroRaw, snap, eventRisk);
 
     const oi = openInterestEngine(snap, oiRaw);
     const funding = fundingEngine(snap, fundingRaw, fundHistRaw, { btcRet4h: br.ok ? br.btc.ret4h : null });
@@ -93,8 +107,8 @@ module.exports = function createIntel(deps) {
     const recovery = recoveryEngine(snap, { zigzag, oi, funding });
     const sector = sectorWeakness(snap);
 
-    const regime = classify({ breadth: br, correlation: corr, transmission: trans, liquidation, oi, funding, liquidity, recovery, sector, btcStructure });
-    const why = whyNarrative({ breadth: br, transmission: trans, liquidation, oi, funding, beta: betas, recovery, regimeInfo: regime, correlation: corr });
+    const regime = classify({ breadth: br, correlation: corr, transmission: trans, liquidation, oi, funding, liquidity, recovery, sector, btcStructure, macro });
+    const why = whyNarrative({ breadth: br, transmission: trans, liquidation, oi, funding, beta: betas, recovery, regimeInfo: regime, correlation: corr, macro });
 
     // Prices kept for the history store's forward-return scoring.
     const prices = {};
@@ -111,14 +125,17 @@ module.exports = function createIntel(deps) {
         prices: true, breadth: br.ok, correlation: corr.ok, beta: betas.ok,
         openInterest: oi.available, funding: funding.available,
         orderBookDepth: liquidity.depthAvailable, liquidations: false,
-        btcDominance: dom.available
+        btcDominance: dom.available,
+        macro: macro.available, eventCalendar: !!(eventRisk && eventRisk.configured && !eventRisk.stale)
       },
       unavailable: [
         !oi.available ? { k: 'openInterest', why: oi.reason } : null,
         !funding.available ? { k: 'funding', why: funding.reason } : null,
         !liquidity.depthAvailable ? { k: 'orderBookDepth', why: liquidity.depthReason } : null,
         { k: 'liquidations', why: 'No public REST source; only a WebSocket stream this server does not hold open. The cascade detector runs INFERRED and is confidence-capped.' },
-        !dom.available ? { k: 'btcDominance', why: dom.reason } : null
+        !dom.available ? { k: 'btcDominance', why: dom.reason } : null,
+        !macro.available ? { k: 'macro', why: macro.reason } : null,
+        (eventRisk && (!eventRisk.configured || eventRisk.stale)) ? { k: 'eventCalendar', why: eventRisk.reason } : null
       ].filter(Boolean),
       errors: snap.errors.slice(0, 8)
     };
@@ -129,6 +146,11 @@ module.exports = function createIntel(deps) {
       breadth: br, correlation: corr, beta: betas, transmission: trans,
       structure: { btc: btcStructure, eth: ethStructure },
       oi, funding, liquidity, liquidation, recovery, sector,
+      macro, eventRisk,
+      /* Hoisted to the top level because this is what other surfaces act on: the scanner
+         degrades its confidence by `confidenceMultiplier`, the paper bot refuses to open while
+         `blockNewLeverage` is set, and the position panel prints `reasons` verbatim. */
+      gate: macro.gate,
       dominance: {
         available: dom.available, value: dom.value, reason: dom.reason,
         volumeShare: globalStats.volumeShare(snap),
@@ -167,7 +189,8 @@ module.exports = function createIntel(deps) {
     return positionRisk(pos, snap, {
       breadth: intel.breadth, correlation: intel.correlation, beta: intel.beta,
       oi: intel.oi, funding: intel.funding, liquidity: intel.liquidity,
-      liquidation: intel.liquidation, recovery: intel.recovery, regimeInfo: intel.regime
+      liquidation: intel.liquidation, recovery: intel.recovery, regimeInfo: intel.regime,
+      macro: intel.macro, eventRisk: intel.eventRisk
     }, { zigzag, ...(opts || {}) });
   }
 
@@ -210,8 +233,51 @@ module.exports = function createIntel(deps) {
     return { ok: true, alerts, regime: intel.regime.regime, ts: intel.ts };
   }
 
+  /* The gate, on its own and cheap to call.
+     The paper bot asks this every minute and the scanner asks it on every render, so it must not
+     drag a full market pass behind it — `get()` is cached, and a failure here fails OPEN with the
+     reason attached rather than silently blocking every trade the platform would ever suggest. */
+  async function gate() {
+    /* THE EVENT BLOCK IS COMPUTED FIRST AND INDEPENDENTLY.
+       An earlier version read the gate straight off the cached market pass, which quietly tied
+       "do not open leverage into CPI" to two things it has no business depending on: a 45-second
+       market-data cache, and the crypto pass succeeding at all. If CoinDCX were unreachable the
+       whole intel pass would fail and the event block would vanish with it — losing the one
+       protection here that needs no network. The calendar is a local file; it is read on every
+       call, and it wins regardless of what the rest of the pass did. */
+    let ev = null;
+    try { ev = calendar.eventRisk(); } catch (e) { ev = null; }
+    const evBlock = !!(ev && ev.ok && ev.inWindow);
+    const evReason = evBlock ? ev.message : null;
+
+    const merge = base => ({
+      ...base,
+      blockNewLeverage: base.blockNewLeverage || evBlock,
+      blockLongs: base.blockLongs || evBlock,
+      blockShorts: base.blockShorts || evBlock,
+      confidenceMultiplier: evBlock ? Math.min(base.confidenceMultiplier, 0.4) : base.confidenceMultiplier,
+      degraded: base.degraded || evBlock,
+      reasons: evBlock && !base.reasons.includes(evReason) ? [evReason, ...base.reasons] : base.reasons,
+      eventRisk: ev
+    });
+
+    const permissive = reason => merge({
+      ok: false, blockNewLeverage: false, blockLongs: false, blockShorts: false,
+      confidenceMultiplier: 1, degraded: false, reasons: [reason]
+    });
+
+    try {
+      const i = await get();
+      if (i.ok && i.gate) return merge({ ...i.gate, ok: true, ts: i.ts });
+      return permissive('Market intelligence unavailable: ' + (i.reason || 'unknown') + ' — macro gating is OFF, technical signals are unchecked.');
+    } catch (e) {
+      return permissive('Macro gate errored (' + String(e.message || e).slice(0, 60) + ') — macro gating is OFF.');
+    }
+  }
+
   return {
-    get, position, coinContext, tick,
+    get, position, coinContext, tick, gate,
+    calendar, macroData,
     history,
     derivsHealth: () => derivs.health(),
     formatTelegram,

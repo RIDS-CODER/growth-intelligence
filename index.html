@@ -167,6 +167,10 @@
   .mhrung.liq{border-color:rgba(239,68,68,.55);background:rgba(239,68,68,.10);color:#fca5a5}
   .mhrung.sup{border-color:rgba(52,211,153,.4)}
   .mhchk{font-size:12px;line-height:1.7}.mhchk .pass{color:#6ee7b7}.mhchk .fail{color:#fca5a5}.mhchk .unknown{color:var(--faint)}
+  /* 🌍 MACRO */
+  .mhmacro{background:var(--panel2);border:1px solid rgba(147,197,253,.32);border-radius:12px;padding:12px 13px;margin:10px 0}
+  .mhrel{background:#0d1420;border:1px solid var(--line);border-left-width:3px;border-radius:9px;padding:10px 12px;margin:9px 0}
+  .mhblock{background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.5);color:#fecaca;border-radius:11px;padding:11px 13px;margin:10px 0;font-size:13px;line-height:1.65}
 </style>
 </head>
 <body>
@@ -709,7 +713,7 @@ async function paperControl(a){try{const s=await(await fetch('/api/paper/control
 function paperGo(){paperControl('start');}
 function paperHalt(){paperControl('stop');}
 function paperReset(){if(confirm('Reset the paper account and clear its history?'))paperControl('reset');}
-async function paperSaveConfig(){const g=id=>document.getElementById(id),c={capital:+g('ppCap').value,riskPct:+g('ppRisk').value,dailyTargetPct:+g('ppTarget').value,maxLev:+g('ppLev').value,allowShort:g('ppShort').checked,allowPending:g('ppPend').checked,allowAggressive:(g('ppAggr')||{}).checked,sources:{quick:(g('ppSrcQuick')||{}).checked,normal:(g('ppSrcNormal')||{}).checked,movers:(g('ppSrcMovers')||{}).checked,dump:(g('ppSrcDump')||{}).checked},minConfPct:+g('ppConf').value,requireEdge:(g('ppEdge')||{}).checked,minWinRate:+g('ppWin').value};try{const s=await(await fetch('/api/paper/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(c)})).json();renderPaper(s);}catch(e){}}
+async function paperSaveConfig(){const g=id=>document.getElementById(id),c={capital:+g('ppCap').value,riskPct:+g('ppRisk').value,dailyTargetPct:+g('ppTarget').value,maxLev:+g('ppLev').value,allowShort:g('ppShort').checked,allowPending:g('ppPend').checked,allowAggressive:(g('ppAggr')||{}).checked,respectMacro:(g('ppMacro')||{}).checked,sources:{quick:(g('ppSrcQuick')||{}).checked,normal:(g('ppSrcNormal')||{}).checked,movers:(g('ppSrcMovers')||{}).checked,dump:(g('ppSrcDump')||{}).checked},minConfPct:+g('ppConf').value,requireEdge:(g('ppEdge')||{}).checked,minWinRate:+g('ppWin').value};try{const s=await(await fetch('/api/paper/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(c)})).json();renderPaper(s);}catch(e){}}
 function paperCSV(){const s=window.__paper;if(!s||!s.closed||!s.closed.length){toast('No closed trades to export yet');return;}
   const rows=[['coin','side','regime','lev','exit','pnl','pnlPctOnMargin','heldMin','closedAt']].concat(s.closed.map(t=>[t.name||t.sym,t.side,t.regime||'trend',t.lev||1,t.reason,(+t.pnl).toFixed(2),(+t.pnlPct).toFixed(2),t.holdMin,new Date(t.closedAt).toISOString()]));
   const csv=rows.map(r=>r.join(',')).join('\r\n');
@@ -759,6 +763,7 @@ function renderPaper(s){
       <span class="sub" title="The bot hunts the best setup across these timeframes itself — you don't pick one.">TFs: <b>${(s.timeframes||['15m','1h','4h']).join(' · ')}</b> (auto)</span>
       <label class="rl"><input type="checkbox" id="ppShort" onchange="paperSaveConfig()" ${s.config.allowShort?'checked':''}> Shorts</label>
       <label class="rl"><input type="checkbox" id="ppPend" onchange="paperSaveConfig()" ${s.config.allowPending?'checked':''}> Dip limits</label>
+      <label class="rl" title="ON: setup confidence is reduced when crypto is trading on macro rather than its own structure, and new entries are blocked inside a scheduled-event window or a hostile macro tape. OFF: chart-only — the posture that ignores dollar, rates, volatility and CPI entirely.">🌍<input type="checkbox" id="ppMacro" onchange="paperSaveConfig()" ${s.config.respectMacro!==false?'checked':''}> Respect macro</label>
       <label class="rl" title="ON: the strongest setups (multi-TF confirmed + score ≥25) enter at market instead of waiting for the exact dip — but ONLY if buying now still leaves ≥1:1 reward:risk. More fills, slightly worse entries, never chases. OFF: patient limit entries only (best prices).">🔥<input type="checkbox" id="ppAggr" onchange="paperSaveConfig()" ${s.config.allowAggressive?'checked':''}> Aggressive fills</label>
       <span class="sub" style="margin-left:4px">Desks:</span>
       <label class="rl" title="⚡ Quick Trades — scalp regimes (range/correction) on 5m–1h. What the Quick Trades panel shows."><input type="checkbox" id="ppSrcQuick" onchange="paperSaveConfig()" ${(s.sources||{}).quick?'checked':''}> ⚡ Quick</label>
@@ -1358,6 +1363,51 @@ function renderIntel(d){
   tiles.push(mhTile('BTC dominance', d.dominance.available?d.dominance.value.toFixed(1)+'%':null,'market cap share',
     (d.dominance.reason||'')+(d.dominance.volumeShare!=null?` — traded-value share is ${d.dominance.volumeShare.toFixed(1)}%, which is NOT dominance`:'')));
 
+  /* ---- MACRO BLOCK ----
+     Rendered ABOVE the crypto-internal tiles on purpose. If the dollar is ripping or CPI lands in
+     two hours, that is the first thing worth knowing — reading breadth and correlation first gets
+     the emphasis backwards for anyone deciding whether to hold leverage. */
+  const mac=d.macro, ev=d.eventRisk, gate=d.gate||{};
+  let macroHtml='';
+  if(ev&&ev.ok&&ev.inWindow){
+    macroHtml+=`<div class="mhblock">⛔ <b>${ev.window.label}</b> — ${ev.message}</div>`;
+  }
+  if(mac&&mac.available){
+    const rel=mac.cryptoMacro.taReliability, relCol=rel==null?'var(--muted)':rel>=70?'var(--buy)':rel>=50?'#fbbf24':rel>=30?'#fb923c':'var(--sell)';
+    const mt=[];
+    mt.push(mhTile('Risk appetite', mac.riskAppetite!=null?String(mac.riskAppetite):null, mac.riskAppetiteLabel)
+      +(mac.riskAppetite!=null?mhBar(mac.riskAppetite,-100,100):''));
+    for(const k of ['DXY','US10Y','VIX','NDX','SPX','GOLD','CRUDE','USDINR','NIFTY']){
+      const x=mac.instruments[k]; if(!x)continue;
+      const lv=k==='US10Y'?x.level.toFixed(2)+'%':x.level>=1000?x.level.toLocaleString('en-IN',{maximumFractionDigits:0}):x.level.toFixed(2);
+      const ch=x.chg5d!=null?`${x.chg5d>=0?'+':''}${(x.chg5d*100).toFixed(1)}% 5d`:'';
+      mt.push(mhTile(x.name, lv, ch+(x.trend!=='unknown'?' · '+x.trend:'')));
+    }
+    macroHtml+=`<div class="mhmacro">
+      <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:baseline">
+        <b>🌍 Macro — ${mac.regime.label}</b>
+        <span class="sub">${(mac.regime.why||[]).join(' · ')} · ${mac.covered}/${mac.total} instruments</span>
+      </div>
+      <div class="mhrel" style="border-color:${relCol}">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap">
+          <b style="font-size:12px;letter-spacing:.5px">TECHNICAL RELIABILITY</b>
+          <div><b style="color:${relCol};font-size:19px">${rel==null?'—':rel+'/100'}</b> <span class="sub">${mac.cryptoMacro.band}</span></div>
+        </div>
+        <div class="sub" style="margin-top:5px;line-height:1.6">${mac.cryptoMacro.message}</div>
+        ${gate.degraded?`<div class="sub" style="margin-top:5px;color:#fcd34d">⚠ Setup confidence across the app is being reduced to <b>${Math.round(gate.confidenceMultiplier*100)}%</b> of its technical value while this holds.</div>`:''}
+      </div>
+      <div class="mhgrid">${mt.join('')}</div>
+      ${ev&&ev.ok?`<div class="sub" style="margin-top:6px">📅 ${ev.message}${ev.stale?' <b style="color:#fbbf24">CALENDAR STALE — dates dropped, edit macro-calendar.json</b>':''}${ev.unverifiedCount?` · <span style="color:#fbbf24">${ev.unverifiedCount} unverified date(s)</span>`:''}</div>`:''}
+    </div>`;
+  } else if(mac){
+    macroHtml+=`<div class="mhblock" style="background:rgba(245,158,11,.10);border-color:rgba(245,158,11,.45);color:#fde68a">
+      ⚠ <b>MACRO UNAVAILABLE</b> — ${mac.reason||''}<br>
+      <span class="sub" style="color:#fde68a">${mac.warning||''}</span></div>`;
+  }
+  if(gate.reasons&&gate.reasons.length&&!(ev&&ev.inWindow)){
+    macroHtml+=`<div class="sub" style="margin:2px 0 8px;color:#fcd34d">${gate.reasons.map(r=>'• '+r).join('<br>')}</div>`;
+  }
+
   const warn=[];
   if(c.ok&&c.synchronizedSelling.flag)warn.push(`<b>SYNCHRONIZED MARKET SELLING</b> — BTC is down and ${Math.round(c.synchronizedSelling.pctAltsDown)}% of tracked altcoins are falling with it. The board is not trading as ${c.synchronizedSelling.sample} independent coins right now.`);
   if(c.ok&&c.singleRiskAsset)warn.push(`Correlation to BTC is <b>${numS(c.avgCorrBtc)}</b> — holding several alt positions is currently closer to holding one position at several times the size. Size accordingly.`);
@@ -1373,6 +1423,7 @@ function renderIntel(d){
       <div class="r">${r.tone==='red'?'🔴':r.tone==='amber'?'🟠':r.tone==='green'?'🟢':'⚪'} ${r.label}</div>
       <div class="small" style="margin-top:5px;color:#cbd5e1">${(r.why||[]).join(' · ')}</div>
     </div>
+    ${macroHtml}
     <div class="mhgrid">${tiles.join('')}</div>
     ${warn.map(w=>`<div class="mhwarn">${w}</div>`).join('')}
     ${decoup}
@@ -1979,9 +2030,21 @@ function renderPosStress(el,d){
     ['BTC', d.marketRegime||'—'],
     ['vs market', d.vsMarket&&d.vsMarket.klass?d.vsMarket.klass.replace(/-/g,' '):'—'],
     ['structure', d.structure&&d.structure.verdict?d.structure.verdict:'unreadable'],
+    ['macro', d.macro&&d.macro.available?`${d.macro.label} (${d.macro.riskAppetite})`:'DATA UNAVAILABLE'],
     ['open interest', d.oiAvailable?'available':'DATA UNAVAILABLE'],
     ['funding', d.fundingAvailable?((d.funding.rate*100).toFixed(3)+'% / 8h'):'DATA UNAVAILABLE']
   ].map(([k,v])=>`<span class="sub">${k}: <b>${v}</b></span>`).join(' · ');
+
+  /* The exogenous half of this position's risk, given its own block. This is the part that was
+     invisible before — a chart-only card would show all of the above and none of this. */
+  const macroRow=(d.eventRisk&&d.eventRisk.inWindow)
+    ? `<div class="mhblock" style="margin:8px 0">⛔ <b>${d.eventRisk.window.label}</b> — ${d.eventRisk.message}</div>`
+    : (d.macro&&d.macro.available
+      ? `<div class="mhrel" style="border-color:${d.macro.taReliability>=50?'var(--line)':'#fb923c'};margin:8px 0">
+           <b style="font-size:11.5px">🌍 MACRO · ${d.macro.regime}</b>
+           <div class="sub" style="margin-top:3px">Technical reliability <b>${d.macro.taReliability==null?'—':d.macro.taReliability+'/100'}</b> — ${d.macro.band}. ${d.macro.message}</div>
+         </div>`
+      : `<div class="sub" style="margin:8px 0;color:#fbbf24">🌍 Macro DATA UNAVAILABLE — this position's exogenous risk (dollar, rates, volatility, scheduled events) is unchecked.</div>`);
 
   el.innerHTML=`<div style="margin-top:9px;padding:11px 12px;border-radius:11px;background:var(--panel2);border:1px solid rgba(56,189,248,.32)">
     <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:baseline">
@@ -1994,6 +2057,7 @@ function renderPosStress(el,d){
     <div class="mhladder">${rungs}</div>
     ${d.liqEstimateNote?`<div class="sub" style="color:#fbbf24;margin-bottom:6px">⚠ ${d.liqEstimateNote}</div>`:''}
     <div style="margin:7px 0">${ctx}</div>
+    ${macroRow}
     ${d.fighting&&d.fighting.fighting?`<div class="mhwarn">⚠ ${d.fighting.text}</div>`:''}
     <div style="margin-top:8px"><b style="font-size:12px">RECOVERY REQUIREMENT</b><div class="sub" style="margin-top:2px">${d.recoveryRequirement}</div></div>
     <div style="margin-top:9px"><b style="font-size:12px">SHOULD YOU ADD?</b>

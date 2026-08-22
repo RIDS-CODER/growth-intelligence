@@ -551,6 +551,50 @@ access — the same Bangalore placement that makes your CoinDCX prices correct i
 unreachable. That is a real, unresolved gap. The panel states which feeds are live every time it
 renders, so you always know what a conclusion was built on. Set `INTEL_DERIVS=off` to stop trying.
 
+### 🌍 Macro — the half that isn't on the chart
+
+Every indicator in the rest of this platform is **endogenous**: computed from an asset's own price
+history. That makes the whole system structurally blind to the most common way a technically sound
+leveraged position dies — a dollar rally, a rate shock, or a number released at 8:30am that no
+chart level prices in.
+
+**The headline output is not the risk-appetite score. It's TECHNICAL RELIABILITY (0–100)** — an
+estimate of how much crypto is currently being driven by macro rather than by its own structure.
+When BTC's 30-day correlation to the Nasdaq is 0.8 and VIX is 30, a textbook support bounce is not
+a support bounce; it's whatever the dollar does next. That is exactly the condition in which
+chart-only trading keeps producing clean-looking setups and keeps losing, with nothing on the chart
+saying so.
+
+Tracked: **DXY · US 10-year yield · VIX · S&P 500 · Nasdaq · gold · crude · USD/INR · NIFTY ·
+India VIX** (Yahoo Finance, Stooq fallback — free, no key).
+
+**What "gate and degrade" actually does:**
+
+| condition | effect |
+|---|---|
+| Technical reliability low | Every setup's confidence is multiplied by `0.5 + 0.5 × (reliability/100)`, with the reason shown. Never reaches zero — a degraded signal is still information. |
+| Macro risk appetite ≤ −50 | New leveraged **longs** blocked (and shorts in a melt-up ≥ +60). |
+| Inside a scheduled-event window | **Both** directions blocked, confidence capped at 40%, position stress floored at HIGH RISK. |
+| Macro feed unreachable | **Fails open** — multiplier stays 1.0, nothing is blocked — but raises a visible `MACRO UNCHECKED` warning and its own alert. A broken API must not silently freeze the platform, and must not silently stop protecting you either. |
+
+The paper bot honours all of this (🌍 **Respect macro**, on by default). When it sits idle because
+of macro, it says so rather than looking broken.
+
+### Scheduled events — `macro-calendar.json`
+
+There is no free API for central-bank calendars, so this is an **editable file** you maintain.
+Three rules keep it honest:
+
+1. **NFP is derived**, not configured — first Friday of the month, by rule. It can't go stale.
+2. **Shipped dates are marked `unverified: true`** and flagged on screen until you check them
+   against federalreserve.gov / bls.gov / rbi.org.in and set them to `false`.
+3. **An expired calendar drops its events** rather than showing last year's schedule as upcoming.
+   Past `validThrough` it reports `STALE` and falls back to derived NFP only.
+
+> The event gate is **deliberately independent of every network call**. It reads a local file, so
+> "don't open leverage into CPI" keeps working even when CoinDCX, Binance and Yahoo are all
+> unreachable. The single most valuable guard here is the one that can't be knocked out.
+
 ### "Has this signal worked before?"
 
 Every threshold here started as a judgement, not a measurement. The engine appends a snapshot of the
@@ -574,8 +618,12 @@ growth-intelligence-pro/
 │   ├── transmission.js  ├── liquidation.js  ├── openInterest.js
 │   ├── funding.js       ├── liquidity.js    ├── recovery.js
 │   ├── regime.js        ├── positionRisk.js ├── alerts.js     ├── history.js
+│   ├── macro.js         ← 🌍 macro regime + TECHNICAL RELIABILITY (the gate)
+│   ├── calendar.js      ← scheduled-event risk; needs no network
+│   ├── macroData.js     ← DXY/yields/VIX/equities adapter (Yahoo, Stooq fallback)
 │   ├── derivs.js        ← futures adapter (OI/funding/depth) — honest about being unreachable
 │   └── global.js        ← BTC dominance adapter
+├── macro-calendar.json  ← 📅 YOU MAINTAIN THIS — FOMC/CPI/RBI dates (NFP is derived)
 ├── config.json          ← your keys + settings
 ├── public/index.html    ← dashboard
 ├── token.json           ← auto: daily login token (private)

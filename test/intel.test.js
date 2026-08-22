@@ -82,7 +82,10 @@ function mkSeries(spec, market, n) {
     high.push(x * (1 + wick)); low.push(x * (1 - wick));
     const vspike = (spec.volSpikeAt != null && i >= n - spec.volSpikeAt) ? (spec.volSpike || 4) : 1;
     vol.push((spec.noVol ? 0 : 1000 * (1 + r()) * vspike));
-    times.push(now - (n - 1 - i) * 15 * 60000);
+    /* Bar spacing must match the timeframe. An earlier draft stamped 15-minute spacing on the
+       DAILY fixture too, so 140 "daily" bars all landed inside two calendar dates — and
+       coinDailyMap correctly refused it, because a date-keyed series needs distinct dates. */
+    times.push(now - (n - 1 - i) * (spec.__daily ? 86400000 : 15 * 60000));
   }
   return { close, high, low, vol, times, price: close[n - 1], priceUsd: close[n - 1] };
 }
@@ -99,7 +102,7 @@ async function mkSnap(specs, opts) {
     loadCrypto: async (asset, tf) => {
       const s = specs.find(x => x.tk === asset.tk);
       if (!s || s.fail) throw new Error('feed down');
-      return tf === 'daily' ? mkSeries({ ...s, drift: (s.drift || 0) * 96, idio: (s.idio || 0.001) * 10 }, dailyMarket, 140) : mkSeries(s, market, n);
+      return tf === 'daily' ? mkSeries({ ...s, __daily: true, drift: (s.drift || 0) * 96, idio: (s.idio || 0.001) * 10 }, dailyMarket, 140) : mkSeries(s, market, n);
     },
     ensureCryptoUniverse: async () => uni,
     getCRYPTO: () => uni,
@@ -772,8 +775,403 @@ test('GUARD: intel/ never reaches an exchange directly — only through injected
     const src = fs.readFileSync(path.join(dir, f), 'utf8');
     const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
     const hasFetch = /\bfetch\s*\(/.test(code);
-    // derivs.js and global.js ARE the adapters — they are the only files allowed to call out.
-    if (f === 'derivs.js' || f === 'global.js') { assert.ok(hasFetch, f + ' is an adapter and should call fetch'); continue; }
+    /* The adapters ARE the outbound boundary and are the only files allowed to call out. Keeping
+       this list explicit is the point: a new engine that quietly grew its own fetch would fail
+       here rather than becoming a second, divergent source of truth. */
+    const ADAPTERS = ['derivs.js', 'global.js', 'macroData.js'];
+    if (ADAPTERS.includes(f)) { assert.ok(hasFetch, f + ' is an adapter and should call fetch'); continue; }
     assert.ok(!hasFetch, `${f} must not open its own connection — candles come from the injected loadCrypto`);
   }
+});
+
+/* ============================================================
+   MACRO LAYER
+   The feature exists because chart-only trading blew an account up. So the tests care most about
+   two things: that macro actually GATES (a warning nobody acts on is what failed the first time),
+   and that an unreachable macro feed neither silently blocks everything nor silently stops
+   protecting anything.
+   ============================================================ */
+const createMacroData = require('../intel/macroData');
+const createCalendar = require('../intel/calendar');
+const { macroEngine, alignedReturns, buildGate, coinDailyMap } = require('../intel/macro');
+
+/* Build a macro adapter payload without touching the network. */
+function mkMacro(spec) {
+  const series = {};
+  for (const key of Object.keys(spec)) {
+    const s = spec[key];
+    const closes = {}, dates = [];
+    let x = s.start == null ? 100 : s.start;
+    // Walk BACK from today so the last date is always "now".
+    const n = s.n || 90;
+    const days = [];
+    for (let i = n - 1; i >= 0; i--) days.push(new Date(Date.now() - i * 86400000).toISOString().slice(0, 10));
+    for (let i = 0; i < n; i++) {
+      x *= (1 + (s.drift || 0) + (s.path ? s.path[i] || 0 : 0));
+      closes[days[i]] = x; dates.push(days[i]);
+    }
+    series[key] = {
+      key, name: key, invert: !!s.invert, group: 'global', why: '', source: 'test',
+      closes, dates, last: closes[days[n - 1]], lastDate: days[n - 1]
+    };
+  }
+  return { available: true, reason: null, asOf: Date.now(), data: { series, failed: [], covered: Object.keys(series).length, total: Object.keys(series).length } };
+}
+
+/* Small deterministic wobble. A perfectly flat series has no dispersion and therefore no
+   percentile — which is correct behaviour, but makes for a fixture that tests nothing. */
+const wobble = (n, amp, seed) => { const r = rng(seed); return Array.from({ length: n }, () => (r() - 0.5) * 2 * amp); };
+const CALM_MACRO = () => mkMacro({
+  DXY: { start: 100, drift: 0, invert: true, path: wobble(90, 0.002, 11) },
+  US10Y: { start: 4.2, drift: 0, invert: true, path: wobble(90, 0.004, 12) },
+  // VIX drifting DOWN into the low teens is what a calm tape looks like; it must land in the
+  // lower part of its own recent range, not the top of it.
+  VIX: { start: 22, drift: -0.006, invert: true, path: wobble(90, 0.01, 13) },
+  SPX: { start: 5000, drift: 0.0006, path: wobble(90, 0.002, 14) },
+  NDX: { start: 16000, drift: 0.0007, path: wobble(90, 0.003, 15) }
+});
+
+test('macro: a dollar squeeze with a VIX spike reads as risk-off, not neutral', () => {
+  const raw = mkMacro({
+    DXY: { start: 100, drift: 0.005, invert: true },      // dollar ripping
+    US10Y: { start: 4.2, drift: 0.004, invert: true },     // yields up
+    VIX: { start: 12, drift: 0.02, invert: true },         // vol exploding
+    SPX: { start: 5000, drift: -0.004 },
+    NDX: { start: 16000, drift: -0.006 }
+  });
+  const m = macroEngine(raw, null, { ok: true, inWindow: false, configured: true });
+  assert.ok(m.available);
+  assert.ok(m.riskAppetite < -40, 'expected clear risk-off, got ' + m.riskAppetite);
+  assert.ok(['vol-spike', 'dollar-squeeze', 'yield-shock', 'risk-off'].includes(m.regime.regime), m.regime.regime);
+  assert.strictEqual(m.gate.blockLongs, true, 'hostile macro must block new longs');
+});
+
+test('macro: a calm risk-on tape does not gate anything', () => {
+  const m = macroEngine(CALM_MACRO(), null, { ok: true, inWindow: false, configured: true });
+  assert.ok(m.riskAppetite > 0, 'got ' + m.riskAppetite);
+  assert.strictEqual(m.gate.blockNewLeverage, false);
+  assert.strictEqual(m.gate.blockLongs, false);
+});
+
+test('MACRO UNAVAILABLE fails OPEN but warns — it never silently degrades or silently blocks', () => {
+  const m = macroEngine({ available: false, reason: 'geo-blocked' }, null, { ok: true, inWindow: false, configured: true });
+  assert.strictEqual(m.available, false);
+  assert.strictEqual(m.gate.confidenceMultiplier, 1, 'a broken feed must not quietly degrade every setup');
+  assert.strictEqual(m.gate.blockNewLeverage, false, 'a broken feed must not quietly block every trade');
+  assert.match(m.warning, /MACRO UNCHECKED/);
+  assert.ok(m.gate.reasons.some(r => /unavailable/i.test(r)), 'the loss of protection must be stated');
+});
+
+test('the event window blocks leverage EVEN WITH NO MACRO FEED — it needs no network', () => {
+  const ev = { ok: true, configured: true, inWindow: true, message: 'US CPI in 2.0h.', window: { label: 'US CPI', phase: 'before', hoursAway: 2 } };
+  const m = macroEngine({ available: false, reason: 'unreachable' }, null, ev);
+  assert.strictEqual(m.available, false);
+  assert.strictEqual(m.gate.blockNewLeverage, true, 'the calendar gate must survive a dead macro API');
+  assert.strictEqual(m.gate.blockLongs, true);
+  assert.strictEqual(m.gate.blockShorts, true, 'an event window cuts both ways — direction is unknown');
+  assert.ok(m.gate.confidenceMultiplier <= 0.4);
+});
+
+test('correlations are aligned BY DATE, not by position', () => {
+  // Crypto trades weekends; macro does not. Positional pairing would silently offset the two.
+  const a = {}, b = {};
+  const base = Date.UTC(2026, 0, 1);
+  for (let i = 0; i < 40; i++) {
+    const d = new Date(base + i * 86400000);
+    const key = d.toISOString().slice(0, 10);
+    // Geometric, so the return between any two shared dates is identical for both series —
+    // which makes a correlation of exactly 1 the proof that the DATES were paired correctly.
+    a[key] = 100 * Math.pow(1.01, i);                  // every day
+    if (d.getUTCDay() !== 0 && d.getUTCDay() !== 6) b[key] = 200 * Math.pow(1.01, i);   // weekdays only
+  }
+  const al = alignedReturns(a, b, 40);
+  assert.ok(al.n > 10);
+  // Both rise by the same increment on every shared date → correlation must be ~1.
+  assert.ok(Math.abs(S.pearson(al.a, al.b) - 1) < 1e-6, 'aligned series should correlate perfectly');
+  assert.ok(Object.keys(b).length < Object.keys(a).length, 'fixture must actually have missing weekend bars');
+});
+
+test('technical reliability collapses when BTC trades as a Nasdaq proxy', async () => {
+  const snap = await mkSnap(RISK_OFF, { marketDrift: -0.0005 });
+  // Build a macro NDX series that mirrors BTC's own daily path exactly → correlation ~1.
+  const btcMap = coinDailyMap(snap.coins.BTC);
+  assert.ok(btcMap, 'fixture must produce a usable BTC daily map');
+  const dates = Object.keys(btcMap).sort();
+  const closes = {};
+  for (const d of dates) closes[d] = btcMap[d] * 3;      // perfectly proportional
+  const raw = CALM_MACRO();
+  raw.data.series.NDX = { key: 'NDX', name: 'Nasdaq', invert: false, group: 'global', why: '', source: 'test', closes, dates, last: closes[dates[dates.length - 1]], lastDate: dates[dates.length - 1] };
+  raw.data.series.VIX.closes[raw.data.series.VIX.dates[raw.data.series.VIX.dates.length - 1]] = 30;
+  raw.data.series.VIX.last = 30;
+
+  const m = macroEngine(raw, snap, { ok: true, inWindow: false, configured: true });
+  assert.ok(Math.abs(m.cryptoMacro.correlations.NDX) > 0.9, 'got ' + m.cryptoMacro.correlations.NDX);
+  assert.ok(m.cryptoMacro.taReliability < 40, 'a Nasdaq-proxy tape must read as unreliable for TA, got ' + m.cryptoMacro.taReliability);
+  assert.ok(m.gate.confidenceMultiplier < 0.8, 'confidence must be degraded, got ' + m.gate.confidenceMultiplier);
+  assert.match(m.cryptoMacro.message, /macro asset|overridden/i);
+});
+
+test('the confidence multiplier scales with reliability and never reaches zero', () => {
+  const at = rel => buildGate({ taReliability: rel, riskAppetite: 0, regime: {} }, { inWindow: false }, {}).confidenceMultiplier;
+  assert.strictEqual(at(100), 1);
+  assert.strictEqual(at(0), 0.5, 'a fully macro-driven tape halves confidence but does not erase the signal');
+  assert.ok(at(50) > at(20) && at(20) > at(0), 'must be monotonic');
+});
+
+/* ---------------- event calendar ---------------- */
+const CAL_TMP = path.join(__dirname, '..', '.test-cal');
+function writeCal(obj) {
+  fs.mkdirSync(CAL_TMP, { recursive: true });
+  const f = path.join(CAL_TMP, 'macro-calendar.json');
+  fs.writeFileSync(f, JSON.stringify(obj));
+  return f;
+}
+
+test('NFP is derived as the first Friday and needs no maintenance', () => {
+  const { nfpFor } = require('../intel/calendar');
+  const d = nfpFor(2026, 8);                    // September 2026
+  assert.strictEqual(d.getUTCDay(), 5, 'must be a Friday');
+  assert.ok(d.getUTCDate() <= 7, 'must be the FIRST Friday, got day ' + d.getUTCDate());
+});
+
+test('an event inside its window blocks leverage; outside it only warns', () => {
+  const soon = new Date(Date.now() + 2 * 3600 * 1000).toISOString();
+  const f = writeCal({ validThrough: '2099-12-31', blockHoursBefore: 6, blockHoursAfter: 2, events: [{ at: soon, kind: 'cpi', impact: 'high', label: 'US CPI', unverified: false }] });
+  const cal = createCalendar({ file: f });
+  const r = cal.eventRisk();
+  assert.strictEqual(r.inWindow, true);
+  assert.match(r.message, /US CPI/);
+  assert.match(r.message, /blocked/);
+
+  const far = new Date(Date.now() + 72 * 3600 * 1000).toISOString();
+  const f2 = writeCal({ validThrough: '2099-12-31', events: [{ at: far, kind: 'fomc', impact: 'high', label: 'FOMC', unverified: false }] });
+  const r2 = createCalendar({ file: f2 }).eventRisk();
+  assert.strictEqual(r2.inWindow, false);
+  assert.ok(r2.next && /FOMC/.test(r2.next.label));
+});
+
+test('a medium-impact event warns but does not block', () => {
+  const soon = new Date(Date.now() + 1 * 3600 * 1000).toISOString();
+  const f = writeCal({ validThrough: '2099-12-31', events: [{ at: soon, kind: 'rbi', impact: 'medium', label: 'RBI MPC', unverified: false }] });
+  const r = createCalendar({ file: f }).eventRisk();
+  assert.strictEqual(r.inWindow, false, 'only high-impact events block');
+  assert.ok(r.next && /RBI/.test(r.next.label), 'but it must still be visible as the next event');
+});
+
+test('AN EXPIRED CALENDAR DROPS ITS DATES rather than reporting stale ones as upcoming', () => {
+  const past = new Date(Date.now() + 3 * 3600 * 1000).toISOString();
+  const f = writeCal({ validThrough: '2020-01-01', events: [{ at: past, kind: 'fomc', impact: 'high', label: 'STALE FOMC', unverified: false }] });
+  const r = createCalendar({ file: f }).eventRisk();
+  assert.strictEqual(r.stale, true);
+  assert.match(r.reason, /expired/);
+  assert.ok(!r.upcoming.some(e => e.label === 'STALE FOMC'), 'an expired file must not feed events');
+  assert.strictEqual(r.inWindow, false);
+  // Derived NFP survives, because a rule cannot expire.
+  assert.ok(r.upcoming.every(e => e.derived), 'only derived events should remain: ' + JSON.stringify(r.upcoming.map(e => e.label)));
+});
+
+test('a missing calendar file degrades to derived NFP only, and says so', () => {
+  const r = createCalendar({ file: path.join(CAL_TMP, 'does-not-exist.json') }).eventRisk();
+  assert.strictEqual(r.configured, false);
+  assert.match(r.reason, /could not be read/);
+  assert.ok(r.upcoming.length > 0 && r.upcoming.every(e => e.derived));
+});
+
+test('unverified shipped dates are counted and surfaced, not passed off as fact', () => {
+  const soon = new Date(Date.now() + 3 * 3600 * 1000).toISOString();
+  const f = writeCal({ validThrough: '2099-12-31', events: [{ at: soon, kind: 'fomc', impact: 'high', label: 'FOMC', unverified: true }] });
+  const r = createCalendar({ file: f }).eventRisk();
+  assert.ok(r.unverifiedCount >= 1);
+  assert.strictEqual(r.window.unverified, true);
+  assert.match(r.message, /UNVERIFIED/);
+  try { fs.rmSync(CAL_TMP, { recursive: true, force: true }); } catch (e) { }
+});
+
+test('the shipped macro-calendar.json parses and marks its dates unverified', () => {
+  const raw = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'macro-calendar.json'), 'utf8'));
+  assert.ok(Array.isArray(raw.events) && raw.events.length > 0);
+  assert.ok(raw.validThrough, 'must declare a validity date or it can never be detected as stale');
+  for (const e of raw.events) {
+    assert.ok(isFinite(Date.parse(e.at)), 'unparseable date: ' + e.at);
+    assert.strictEqual(e.unverified, true, 'shipped dates must be flagged for the user to confirm: ' + e.label);
+  }
+});
+
+/* ---------------- macro in position risk ---------------- */
+test('an event window forces a hard NO on averaging down, whatever the chart says', async () => {
+  const { snap, engines, price } = await riskFixture();
+  const eng = {
+    ...engines,
+    macro: macroEngine(CALM_MACRO(), snap, { ok: true, inWindow: false, configured: true }),
+    eventRisk: { ok: true, configured: true, inWindow: true, message: 'US CPI in 1.5h.', window: { label: 'US CPI', phase: 'before', hoursAway: 1.5 }, next: null, hoursToNext: 1.5 }
+  };
+  const r = positionRisk({ tk: 'SUI', sym: 'SUIUSDT', side: 1, entry: price * 1.02, lev: 2 }, snap, eng, { zigzag: ZZ });
+  assert.ok(r.ok);
+  assert.strictEqual(r.averageDown.hardFail, true);
+  assert.strictEqual(r.averageDown.verdict, 'no');
+  assert.ok(r.averageDown.checks.some(c => c.k === 'noScheduledEvent' && c.state === 'fail'));
+});
+
+test('position stress rises when macro turns against the position', async () => {
+  const { snap, engines, price } = await riskFixture();
+  const calm = macroEngine(CALM_MACRO(), snap, { ok: true, inWindow: false, configured: true });
+  const hostile = macroEngine(mkMacro({
+    DXY: { start: 100, drift: 0.005, invert: true }, US10Y: { start: 4.2, drift: 0.004, invert: true },
+    VIX: { start: 12, drift: 0.02, invert: true }, SPX: { start: 5000, drift: -0.004 }, NDX: { start: 16000, drift: -0.006 }
+  }), snap, { ok: true, inWindow: false, configured: true });
+
+  const mk = macro => positionRisk({ tk: 'SUI', sym: 'SUIUSDT', side: 1, entry: price * 1.05, lev: 3 }, snap,
+    { ...engines, macro, eventRisk: { ok: true, configured: true, inWindow: false, hoursToNext: 100, next: null } }, { zigzag: ZZ });
+
+  const a = mk(calm), b = mk(hostile);
+  assert.ok(a.ok && b.ok);
+  assert.ok(b.stress > a.stress, `hostile macro should raise stress: calm ${a.stress} vs hostile ${b.stress}`);
+  assert.strictEqual(b.macro.available, true);
+  assert.ok(b.stressInputs.includes('macroAgainst'));
+});
+
+test('macro unavailable leaves it out of the stress score instead of scoring it as calm', async () => {
+  const { snap, engines, price } = await riskFixture();
+  const r = positionRisk({ tk: 'SUI', sym: 'SUIUSDT', side: 1, entry: price * 1.05, lev: 3 }, snap,
+    { ...engines, macro: macroEngine({ available: false, reason: 'x' }, snap, { ok: true, inWindow: false }), eventRisk: null }, { zigzag: ZZ });
+  assert.ok(r.ok);
+  assert.ok(r.stressMissing.includes('macroAgainst'), 'an unmeasured macro must be MISSING, not a zero');
+  assert.strictEqual(r.macro.available, false);
+});
+
+/* ---------------- macro in the regime classifier ---------------- */
+test('an event window outranks every crypto-internal regime', async () => {
+  const snap = await mkSnap(RISK_OFF, { marketDrift: -0.001 });
+  const ev = { ok: true, configured: true, inWindow: true, message: 'FOMC in 3.0h.', window: { label: 'FOMC decision', phase: 'before', hoursAway: 3 } };
+  const macro = macroEngine(CALM_MACRO(), snap, ev);
+  const r = classify({
+    breadth: breadth(snap, { zigzag: ZZ }), correlation: correlation(snap), transmission: transmission(snap),
+    liquidation: { ok: true, mode: 'inferred', cascade: { detected: true, side: 'long', confidence: 70 }, evidence: [] },
+    oi: { available: false }, funding: { available: false }, liquidity: { ok: true, marketVacuum: false },
+    recovery: { ok: true, selloff: true, verdict: 'undecided' }, sector: { available: false }, btcStructure: { ok: false }, macro
+  });
+  assert.strictEqual(r.regime, 'macro-event-window', 'got ' + r.regime);
+  assert.ok(r.why.some(w => /FOMC/.test(w)));
+});
+
+test('a macro-driven decline is named as such rather than as a BTC-led correction', async () => {
+  const snap = await mkSnap(RISK_OFF, { marketDrift: -0.001 });
+  const hostile = macroEngine(mkMacro({
+    DXY: { start: 100, drift: 0.006, invert: true }, US10Y: { start: 4.2, drift: 0.005, invert: true },
+    VIX: { start: 12, drift: 0.03, invert: true }, SPX: { start: 5000, drift: -0.005 }, NDX: { start: 16000, drift: -0.007 }
+  }), snap, { ok: true, inWindow: false, configured: true });
+  const r = classify({
+    breadth: breadth(snap, { zigzag: ZZ }), correlation: correlation(snap), transmission: transmission(snap),
+    liquidation: { ok: true, cascade: { detected: false }, evidence: [] },
+    oi: { available: false }, funding: { available: false }, liquidity: { ok: true, marketVacuum: false },
+    recovery: { ok: true, selloff: true, verdict: 'undecided' }, sector: { available: false }, btcStructure: { ok: false }, macro: hostile
+  });
+  assert.strictEqual(r.regime, 'macro-risk-off', 'got ' + r.regime + ' — ' + JSON.stringify(r.why));
+});
+
+/* ---------------- macro alerts ---------------- */
+test('macro alerts fire for event windows, hostile macro and an unavailable feed', () => {
+  const base = fakeIntel();
+  const evI = { ...base, macro: { available: true, riskAppetite: 0, riskAppetiteLabel: 'Neutral', regime: { label: 'MACRO NEUTRAL', why: [] }, cryptoMacro: { taReliability: 80, message: '' }, gate: { confidenceMultiplier: 0.4 } }, eventRisk: { ok: true, inWindow: true, message: 'US CPI in 1.0h.' } };
+  const a1 = buildAlerts(evI, {}, { now: 1000 });
+  assert.ok(a1.alerts.some(a => a.key === 'macro-event-window'), JSON.stringify(a1.alerts.map(x => x.key)));
+
+  const hostile = { ...base, macro: { available: true, riskAppetite: -70, riskAppetiteLabel: 'Severe risk-off', regime: { label: 'DOLLAR SQUEEZE', why: ['dollar +2.1% in 5d'] }, cryptoMacro: { taReliability: 40, message: '' }, gate: { confidenceMultiplier: 0.7 } }, eventRisk: { ok: true, inWindow: false } };
+  const a2 = buildAlerts(hostile, {}, { now: 1000 });
+  const m = a2.alerts.find(a => a.key === 'macro-risk-off');
+  assert.ok(m, 'hostile macro must alert');
+  assert.match(m.text, /blocked/);
+
+  const dead = { ...base, macro: { available: false, warning: 'MACRO UNCHECKED — ...' }, eventRisk: { ok: true, inWindow: false } };
+  const a3 = buildAlerts(dead, {}, { now: 1000 });
+  const u = a3.alerts.find(a => a.key === 'macro-unavailable');
+  assert.ok(u, 'losing macro protection must itself raise an alert');
+  assert.match(u.text, /gating is currently OFF/);
+});
+
+/* ---------------- adapter parsing ---------------- */
+test('macro adapter rejects malformed payloads instead of inventing a level', () => {
+  const { __parseYahoo, __parseStooq } = createMacroData;
+  assert.strictEqual(__parseYahoo({}), null);
+  assert.strictEqual(__parseYahoo({ chart: { result: [{}] } }), null);
+  assert.strictEqual(__parseYahoo({ chart: { result: [{ timestamp: [1, 2], indicators: { quote: [{ close: [1, 2] }] } }] } }), null, 'under 5 usable points is not a series');
+  assert.strictEqual(__parseStooq('<html>rate limited</html>'), null);
+  assert.strictEqual(__parseStooq('Date,Open,High,Low,Close,Volume\n2026-01-01,1,1,1,1,1\n'), null, 'one row is not a series');
+
+  const ts = [], close = [];
+  for (let i = 0; i < 10; i++) { ts.push(Math.floor(Date.UTC(2026, 0, i + 1) / 1000)); close.push(100 + i); }
+  const good = __parseYahoo({ chart: { result: [{ timestamp: ts, indicators: { quote: [{ close }] } }] } });
+  assert.ok(good && good.last === 109);
+  assert.strictEqual(Object.keys(good.closes).length, 10);
+});
+
+test('a disabled macro adapter returns the unavailable envelope', async () => {
+  const md = createMacroData({ enabled: false });
+  const r = await md.load();
+  assert.strictEqual(r.available, false);
+  assert.match(r.reason, /disabled/);
+  assert.strictEqual(r.data, null);
+});
+
+test('THE EVENT BLOCK SURVIVES A TOTAL INTEL FAILURE — it reads a local file, not the market', async () => {
+  const soon = new Date(Date.now() + 2 * 3600 * 1000).toISOString();
+  fs.mkdirSync(CAL_TMP, { recursive: true });
+  const f = path.join(CAL_TMP, 'macro-calendar.json');
+  fs.writeFileSync(f, JSON.stringify({ validThrough: '2099-12-31', blockHoursBefore: 6, blockHoursAfter: 2, events: [{ at: soon, kind: 'cpi', impact: 'high', label: 'US CPI', unverified: false }] }));
+
+  const createIntel = require('../intel');
+  // Every price fetch fails: no snapshot, no breadth, no macro. The market pass cannot run at all.
+  const intel = createIntel({
+    loadCrypto: async () => { throw new Error('exchange unreachable'); },
+    ensureCryptoUniverse: async () => [],
+    getCRYPTO: () => [{ tk: 'BTC', sym: 'BTCUSDT', name: 'BTC', cls: 'Crypto', src: 'cg' }],
+    ticker24: async () => ({}),
+    resampleSeries: server.resampleSeries, zigzag: ZZ,
+    dir: CAL_TMP, derivsEnabled: false, macroEnabled: false
+  });
+
+  const full = await intel.get(true);
+  assert.strictEqual(full.ok, false, 'the market pass must genuinely have failed for this test to mean anything');
+
+  const g = await intel.gate();
+  assert.strictEqual(g.blockNewLeverage, true, 'the CPI block must survive the market pass failing entirely');
+  assert.strictEqual(g.blockLongs, true);
+  assert.strictEqual(g.blockShorts, true);
+  assert.ok(g.confidenceMultiplier <= 0.4);
+  assert.ok(g.reasons.some(r => /US CPI/.test(r)), JSON.stringify(g.reasons));
+  assert.ok(g.reasons.some(r => /gating is OFF/.test(r)), 'and it must still say the macro half is unavailable');
+  try { fs.rmSync(CAL_TMP, { recursive: true, force: true }); } catch (e) { }
+});
+
+test('with no event and no market pass, the gate fails OPEN rather than freezing the platform', async () => {
+  const createIntel = require('../intel');
+  const empty = path.join(__dirname, '..', '.test-noCal');
+  fs.mkdirSync(empty, { recursive: true });
+  const intel = createIntel({
+    loadCrypto: async () => { throw new Error('unreachable'); },
+    ensureCryptoUniverse: async () => [], getCRYPTO: () => [],
+    ticker24: async () => ({}), resampleSeries: server.resampleSeries, zigzag: ZZ,
+    dir: empty, derivsEnabled: false, macroEnabled: false
+  });
+  const g = await intel.gate();
+  assert.strictEqual(g.blockNewLeverage, false, 'a dead feed must not silently block every trade forever');
+  assert.strictEqual(g.confidenceMultiplier, 1);
+  assert.ok(g.reasons.length > 0, 'but the loss of protection must always be stated');
+  try { fs.rmSync(empty, { recursive: true, force: true }); } catch (e) { }
+});
+
+test('position stress is floored at HIGH RISK inside an event window, so the number agrees with the block', async () => {
+  const { snap, engines, price } = await riskFixture();
+  const calm = { ok: true, configured: true, inWindow: false, hoursToNext: 200, next: null };
+  const window_ = { ok: true, configured: true, inWindow: true, message: 'US CPI in 1.0h.', window: { label: 'US CPI', phase: 'before', hoursAway: 1 }, next: null, hoursToNext: 1 };
+  const mk = ev => positionRisk({ tk: 'SUI', sym: 'SUIUSDT', side: 1, entry: price * 1.01, lev: 2 }, snap,
+    { ...engines, macro: macroEngine(CALM_MACRO(), snap, ev), eventRisk: ev }, { zigzag: ZZ });
+
+  const a = mk(calm), b = mk(window_);
+  assert.ok(a.ok && b.ok);
+  assert.ok(b.stress >= 60, 'an event window must floor stress at HIGH RISK, got ' + b.stress);
+  assert.strictEqual(b.stressFloored, true);
+  assert.match(b.statusLabel, /HIGH RISK|CRITICAL/);
+  assert.strictEqual(a.stressFloored, false, 'a calm tape must not be floored');
+  assert.ok(a.stress < 60 || a.stress >= 60, 'sanity');
 });

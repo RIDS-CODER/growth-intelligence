@@ -80,6 +80,38 @@ const RULES = [
     conf: i => Math.min(95, Math.round(i.breadth.score)),
     text: i => `Breadth ${i.breadth.score} · ${Math.round(i.breadth.pctGreen)}% green · ${Math.round(i.breadth.pctAbove20)}% back above their 20 EMA.`
   },
+  /* ---- MACRO ALERTS ----
+     These fire on conditions that have nothing to do with any coin's chart, which is exactly why
+     they need their own channel: nothing in the crypto-internal rules above would ever raise
+     them, and they are the ones that arrive before a technically clean position gets destroyed. */
+  {
+    k: 'macro-event-window', sev: 'red', icon: '🔴', title: 'SCHEDULED EVENT — LEVERAGE BLOCKED',
+    on: i => !!(i.eventRisk && i.eventRisk.ok && i.eventRisk.inWindow),
+    off: i => !(i.eventRisk && i.eventRisk.inWindow),
+    conf: () => 95,
+    text: i => i.eventRisk.message + ' New leveraged entries are blocked until the window closes.'
+  },
+  {
+    k: 'macro-risk-off', sev: 'red', icon: '🔴', title: 'MACRO RISK-OFF',
+    on: i => !!(i.macro && i.macro.available && S.isNum(i.macro.riskAppetite) && i.macro.riskAppetite <= -50),
+    off: i => !!(i.macro && i.macro.available && S.isNum(i.macro.riskAppetite) && i.macro.riskAppetite > -30),
+    conf: i => Math.min(95, Math.abs(i.macro.riskAppetite)),
+    text: i => `${i.macro.regime.label} · risk appetite ${i.macro.riskAppetite} (${i.macro.riskAppetiteLabel}). ${(i.macro.regime.why || []).join(' · ')}. New leveraged longs are blocked while macro is this hostile.`
+  },
+  {
+    k: 'ta-unreliable', sev: 'amber', icon: '🟠', title: 'TECHNICALS BEING OVERRIDDEN BY MACRO',
+    on: i => !!(i.macro && i.macro.available && S.isNum(i.macro.cryptoMacro.taReliability) && i.macro.cryptoMacro.taReliability < 35),
+    off: i => !!(i.macro && i.macro.available && S.isNum(i.macro.cryptoMacro.taReliability) && i.macro.cryptoMacro.taReliability >= 50),
+    conf: i => 100 - i.macro.cryptoMacro.taReliability,
+    text: i => `Technical reliability ${i.macro.cryptoMacro.taReliability}/100. ${i.macro.cryptoMacro.message} Setup confidence is being degraded by ${Math.round((1 - i.macro.gate.confidenceMultiplier) * 100)}%.`
+  },
+  {
+    k: 'macro-unavailable', sev: 'amber', icon: '🟠', title: 'MACRO DATA UNAVAILABLE',
+    on: i => !!(i.macro && !i.macro.available),
+    off: i => !!(i.macro && i.macro.available),
+    conf: () => null,
+    text: i => (i.macro.warning || 'Macro feed unreachable.') + ' Macro gating is currently OFF — the platform is back to chart-only, which is the state it was in before this layer existed.'
+  },
   {
     k: 'btc-alt-divergence', sev: 'amber', icon: '🟠', title: 'BTC/ALT DIVERGENCE',
     on: i => i.breadth.ok && S.isNum(i.breadth.ethVsBtc.h4) && Math.abs(i.breadth.ethVsBtc.h4) >= 0.03,

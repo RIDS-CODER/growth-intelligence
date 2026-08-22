@@ -52,6 +52,9 @@ const REGIMES = {
   'eth-led-weakness': { label: 'ETH-LED WEAKNESS', tone: 'amber', risk: 'moderate' },
   'broad-altcoin-risk-off': { label: 'BROAD ALTCOIN RISK-OFF', tone: 'red', risk: 'high' },
   'trend-reversal': { label: 'TREND REVERSAL', tone: 'red', risk: 'high' },
+  'macro-event-window': { label: 'SCHEDULED EVENT WINDOW', tone: 'amber', risk: 'high' },
+  'macro-risk-off': { label: 'MACRO-DRIVEN RISK-OFF', tone: 'red', risk: 'high' },
+  'macro-dominated': { label: 'MACRO-DRIVEN TAPE', tone: 'amber', risk: 'elevated' },
   'normal-pullback': { label: 'NORMAL PULLBACK', tone: 'amber', risk: 'moderate' },
   'broad-risk-on': { label: 'BROAD RISK-ON', tone: 'green', risk: 'low' },
   'btc-led-rally': { label: 'BTC-LED RALLY', tone: 'green', risk: 'low' },
@@ -93,7 +96,7 @@ function sectorWeakness(snap) {
 }
 
 function classify(parts) {
-  const { breadth, correlation, transmission, liquidation, oi, funding, liquidity, recovery, sector } = parts;
+  const { breadth, correlation, transmission, liquidation, oi, funding, liquidity, recovery, sector, macro } = parts;
   const why = [];
   const bs = breadth && breadth.ok ? breadth.score : null;
   const falling = transmission && transmission.ok ? transmission.falling : (S.isNum(bs) && bs < -20);
@@ -101,6 +104,31 @@ function classify(parts) {
   const pick = (key, reasons) => ({ regime: key, ...REGIMES[key], why: reasons });
 
   if (!breadth || !breadth.ok) return pick('unknown', [breadth ? breadth.reason : 'no breadth data']);
+
+  /* ---- MACRO OUTRANKS EVERYTHING BELOW IT, AND THAT ORDERING IS THE POINT ----
+     An event window or a dollar shock is not one more input to weigh against breadth — it is a
+     statement that the crypto-internal read is about to stop mattering. Classifying such a tape
+     as a "BTC-led correction" would send the trader looking for the level where it stops, when
+     the honest answer is that no level prices an unreleased number. */
+  const ev = macro && macro.eventRisk;
+  if (ev && ev.ok && ev.inWindow) {
+    why.push(ev.message);
+    if (macro.available && S.isNum(macro.cryptoMacro.taReliability)) why.push(`technical reliability ${macro.cryptoMacro.taReliability}/100`);
+    return pick('macro-event-window', why);
+  }
+  if (macro && macro.available) {
+    const m = macro.regime;
+    if (['vol-spike', 'dollar-squeeze', 'yield-shock'].includes(m.regime) && falling) {
+      why.push(...m.why);
+      why.push(`macro risk appetite ${macro.riskAppetite} — this decline has an external driver, not an internal one`);
+      return pick('macro-risk-off', why);
+    }
+    if (S.isNum(macro.riskAppetite) && macro.riskAppetite <= -50 && falling) {
+      why.push(`macro risk appetite ${macro.riskAppetite} (${macro.riskAppetiteLabel})`);
+      why.push(...m.why);
+      return pick('macro-risk-off', why);
+    }
+  }
 
   // 1 — the cascade outranks everything, in either direction.
   if (liquidation && liquidation.ok && liquidation.cascade.detected) {
@@ -164,6 +192,16 @@ function classify(parts) {
     why.push(`breadth ${bs} with BTC printing lower highs and lower lows`);
     return pick('trend-reversal', why);
   }
+  /* A tape that is quiet by every crypto-internal measure but is being driven from outside.
+     Named last, because the more specific crypto diagnoses above are more actionable when they
+     apply — but named at all, because "nothing unusual internally" plus "correlation to the
+     Nasdaq at 0.8" is not a calm market, it is a market whose chart is not the one to read. */
+  if (macro && macro.available && S.isNum(macro.cryptoMacro.taReliability) && macro.cryptoMacro.taReliability < 35) {
+    why.push(`technical reliability ${macro.cryptoMacro.taReliability}/100`);
+    why.push(macro.cryptoMacro.message);
+    return pick('macro-dominated', why);
+  }
+
   // 12/13 — the ordinary cases.
   if (S.isNum(bs) && bs < -15) {
     why.push(`breadth ${bs}, no leverage or liquidity stress detected`);
@@ -183,7 +221,7 @@ function classify(parts) {
    on an unavailable feed is simply not written, and the gap is listed at the end instead of
    being papered over. */
 function whyNarrative(parts) {
-  const { breadth, transmission, liquidation, oi, funding, beta, recovery, regimeInfo, correlation } = parts;
+  const { breadth, transmission, liquidation, oi, funding, beta, recovery, regimeInfo, correlation, macro } = parts;
   const out = [];
   const pctTxt = v => S.isNum(v) ? (v * 100).toFixed(1) + '%' : null;
 
@@ -200,6 +238,27 @@ function whyNarrative(parts) {
   if (S.isNum(breadth.eth.ret24h)) bits.push(`ETH ${breadth.eth.ret24h >= 0 ? 'up' : 'down'} ${pctTxt(Math.abs(breadth.eth.ret24h))}`);
   if (S.isNum(breadth.alt.pctRed)) bits.push(`${Math.round(up ? breadth.alt.pctGreen : breadth.alt.pctRed)}% of tracked altcoins are ${up ? 'green' : 'red'}`);
   if (bits.length) out.push(bits.join(', ') + '.');
+
+  /* ---- MACRO GOES HIGH IN THE NARRATIVE, ON PURPOSE ----
+     If the driver is external, that is the first thing worth knowing — reading four sentences of
+     crypto-internal detail before learning the dollar is up 2% gets the emphasis exactly
+     backwards for someone deciding whether to hold leverage. */
+  if (macro && macro.eventRisk && macro.eventRisk.ok && macro.eventRisk.inWindow) {
+    out.push(macro.eventRisk.message);
+  }
+  if (macro && macro.available) {
+    const bits = [];
+    for (const k of ['DXY', 'US10Y', 'VIX', 'NDX']) {
+      const x = macro.instruments[k];
+      if (x && S.isNum(x.chg5d)) bits.push(`${x.name} ${x.chg5d >= 0 ? '+' : ''}${(x.chg5d * 100).toFixed(1)}% (5d)`);
+    }
+    if (bits.length) out.push(`Macro backdrop: ${bits.join(', ')}. Risk appetite ${macro.riskAppetite} — ${macro.riskAppetiteLabel}.`);
+    if (S.isNum(macro.cryptoMacro.taReliability) && macro.cryptoMacro.taReliability < 55) {
+      out.push(macro.cryptoMacro.message);
+    }
+  } else if (macro && macro.warning) {
+    out.push(macro.warning);
+  }
 
   // Positioning — only when the feed exists.
   if (oi && oi.available && S.isNum(oi.market.oiChange)) {
@@ -233,6 +292,7 @@ function whyNarrative(parts) {
   if (!oi || !oi.available) unavailable.push('open interest');
   if (!funding || !funding.available) unavailable.push('funding');
   unavailable.push('liquidation feed');
+  if (macro && !macro.available) unavailable.push('macro (dollar, rates, volatility, equities)');
   if (unavailable.length) {
     out.push(`DATA UNAVAILABLE: ${unavailable.join(', ')}. Conclusions above are drawn without ${unavailable.length > 1 ? 'them' : 'it'}.`);
   }

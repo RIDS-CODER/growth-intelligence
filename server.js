@@ -1986,7 +1986,11 @@ async function researchCoin(rawSym,horizon){
   return {sym:base,horizon,dec:per[0].dec,cryptoMode,consensus:blendResearch(per),ts:Date.now()};
 }
 // Paper-trading engine (simulation) — reuses this server's scan + live quotes. Never places real orders.
-const paper = require('./paper.js')({ scan, liveQuotes, dir:__dirname, rate:()=>cdxUsdtInr(), topMovers, dumpBounce, dumpRule:dumpBotTakes });
+/* `macroGate` is a thunk, not the gate itself: `intel` is declared below this line and is only
+   dereferenced later, at tick time. The bot therefore gets the live gate without the two modules
+   having to be constructed in a particular order. */
+const paper = require('./paper.js')({ scan, liveQuotes, dir:__dirname, rate:()=>cdxUsdtInr(), topMovers, dumpBounce, dumpRule:dumpBotTakes,
+  macroGate:()=>intel.gate() });
 
 /* Market-wide stress & correlation engine. Same injection pattern as the paper bot: it gets THIS
    server's candle loader and pivot detector rather than opening its own connection, so the Market
@@ -2414,6 +2418,10 @@ async function handler(req,res){
       return sendJSON(res,{stats:intel.history.stats(),rows:intel.history.recent(Math.min(500,parseInt(u.searchParams.get("limit"))||100))});}
     if(p==="/api/intel/health"){   // which feeds are actually reachable from THIS server
       return sendJSON(res,{derivs:await intel.derivsHealth(),lastError:intel.lastError(),history:intel.history.stats()});}
+    if(p==="/api/intel/gate"){   // the macro gate on its own — what is being blocked and degraded, and why
+      return sendJSON(res,await intel.gate());}
+    if(p==="/api/intel/calendar"){   // scheduled event risk, straight from macro-calendar.json
+      return sendJSON(res,intel.calendar.eventRisk());}
 
     if(p==="/api/paper/state") return sendJSON(res,paper.getState());
     if(p==="/api/paper/control"){ const a=u.searchParams.get("action");

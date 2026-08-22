@@ -69,11 +69,21 @@ function stdev(arr) {
   return Math.sqrt(v.reduce((s, x) => s + (x - m) * (x - m), 0) / (v.length - 1));
 }
 
-/* Fraction of `arr` at or below `v`, 0..1. Used to ask "is today's illiquidity unusual for
-   THIS coin" rather than against a constant that means different things for BTC and a micro-cap. */
+/* Fraction of `arr` at or below `v`, 0..1. Used to ask "is today's reading unusual for THIS
+   series" rather than against a constant that means different things for BTC and a micro-cap.
+
+   A SERIES WITH NO DISPERSION HAS NO PERCENTILES. Every value in a flat sample is ≤ the current
+   one, so the naive count returns 1.0 — "the highest it has ever been" — from a series that never
+   moved. That is the same failure as pearson on a flat input, and it bites hardest on exactly the
+   inputs most likely to be stale: a halted instrument, or a feed repeating its last close. A
+   percentile term that reads 1.0 for VIX drives the risk-appetite score to maximum fear on no
+   evidence at all, so return null and let scoreParts renormalise without it. */
 function percentileOf(arr, v) {
   const s = (arr || []).filter(isNum);
-  if (!s.length || !isNum(v)) return null;
+  if (s.length < 2 || !isNum(v)) return null;
+  const lo = Math.min(...s), hi = Math.max(...s);
+  const scale = Math.max(Math.abs(lo), Math.abs(hi));
+  if (!(hi - lo > 0) || (scale > 0 && (hi - lo) / scale < 1e-9)) return null;
   let below = 0;
   for (const x of s) if (x <= v) below++;
   return below / s.length;

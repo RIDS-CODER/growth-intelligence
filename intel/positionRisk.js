@@ -138,21 +138,40 @@ function positionRisk(pos, snap, engines, opts) {
      Distance to liquidation dominates deliberately. A position 4% from liquidation in a calm
      market is in more trouble than one 40% away during a cascade, and any weighting that says
      otherwise is measuring the wrong thing. */
+  /* MACRO AND EVENT RISK ARE POSITION RISK.
+     A 4x long can be technically flawless and still be destroyed by a dollar rally or a CPI print
+     — that is the exogenous half the rest of this scoring never saw. Both terms are absent
+     (null) rather than zero when their feeds are down, so an unreachable macro API widens the
+     uncertainty instead of quietly reporting a calmer position than the trader actually has. */
+  const macro = engines.macro, evRisk = engines.eventRisk;
+  const macroAdverse = (macro && macro.available && S.isNum(macro.riskAppetite))
+    ? (side > 0 ? -macro.riskAppetite : macro.riskAppetite) : null;
+
   const parts = [
-    { k: 'distanceToLiquidation', w: 0.30, v: S.isNum(distLiq) ? S.ramp(distLiq, 0.40, 0.03) : null },
-    { k: 'unrealisedLoss', w: 0.18, v: S.isNum(roe) ? S.ramp(-roe, 0, 0.5) : S.ramp(-movePct, 0, 0.15) },
-    { k: 'marketBreadthAgainst', w: 0.12, v: S.isNum(breadthAdverse) ? S.ramp(breadthAdverse, -10, 70) : null },
-    { k: 'btcTrendAgainst', w: 0.10, v: S.isNum(btcAdverse) ? S.ramp(btcAdverse, -0.005, 0.05) : null },
-    { k: 'coinUnderperforming', w: 0.10, v: vsMarket.ok ? (vsMarket.klass === (side > 0 ? 'weaker-than-market' : 'stronger-than-market') ? 1 : vsMarket.klass === 'market-driven' ? 0.4 : 0.15) : null },
-    { k: 'structureAgainst', w: 0.09, v: fight ? (fight.fighting ? 1 : 0.15) : null },
-    { k: 'downsideAmplification', w: 0.06, v: (betaRow && betaRow.ok && side > 0) ? S.ramp(betaRow.downsideBeta, 1.0, 2.5) : null },
+    { k: 'distanceToLiquidation', w: 0.28, v: S.isNum(distLiq) ? S.ramp(distLiq, 0.40, 0.03) : null },
+    { k: 'unrealisedLoss', w: 0.16, v: S.isNum(roe) ? S.ramp(-roe, 0, 0.5) : S.ramp(-movePct, 0, 0.15) },
+    { k: 'marketBreadthAgainst', w: 0.10, v: S.isNum(breadthAdverse) ? S.ramp(breadthAdverse, -10, 70) : null },
+    { k: 'btcTrendAgainst', w: 0.09, v: S.isNum(btcAdverse) ? S.ramp(btcAdverse, -0.005, 0.05) : null },
+    { k: 'coinUnderperforming', w: 0.09, v: vsMarket.ok ? (vsMarket.klass === (side > 0 ? 'weaker-than-market' : 'stronger-than-market') ? 1 : vsMarket.klass === 'market-driven' ? 0.4 : 0.15) : null },
+    { k: 'structureAgainst', w: 0.08, v: fight ? (fight.fighting ? 1 : 0.15) : null },
+    { k: 'macroAgainst', w: 0.09, v: S.isNum(macroAdverse) ? S.ramp(macroAdverse, -20, 70) : null },
+    { k: 'scheduledEventRisk', w: 0.06, v: (evRisk && evRisk.ok) ? (evRisk.inWindow ? 1 : S.ramp(evRisk.hoursToNext, 48, 6)) : null },
+    { k: 'downsideAmplification', w: 0.05, v: (betaRow && betaRow.ok && side > 0) ? S.ramp(betaRow.downsideBeta, 1.0, 2.5) : null },
     { k: 'liquidityVacuum', w: 0.05, v: liquidity && liquidity.ok ? (coinVac ? 1 : 0) : null }
   ];
   const sp = S.scoreParts(parts);
+  const inEventWindow = !!(evRisk && evRisk.ok && evRisk.inWindow);
   /* Past the liquidation level there is nothing left to weigh. Whatever the other components
      say, this position is either already gone or about to be, and a composite score of 46 would
-     be actively misleading. */
-  const stress = pastLiquidation ? 100 : (sp ? Math.round(sp.score * 100) : null);
+     be actively misleading.
+
+     An open event window gets a FLOOR rather than a weight. Carrying leverage into a number
+     nobody has seen is high risk by definition, and as one weighted term among ten it produced
+     readings like "37/100 MODERATE" ninety minutes before CPI — technically the average of the
+     inputs, and exactly the false reassurance a trader anchors on while the warning banner two
+     lines above says the opposite. The floor makes the headline number agree with the block. */
+  let stress = pastLiquidation ? 100 : (sp ? Math.round(sp.score * 100) : null);
+  if (!pastLiquidation && inEventWindow && S.isNum(stress)) stress = Math.max(stress, 60);
 
   /* ---- THE AVERAGE-DOWN GATE ---- */
   const losing = movePct < 0;
@@ -183,13 +202,28 @@ function positionRisk(pos, snap, engines, opts) {
   add('fundingNotAgainst',
     !fundingRow ? 'unknown' : (side > 0 ? fundingRow.rate < 0.0004 : fundingRow.rate > -0.0004) ? 'pass' : 'fail',
     !fundingRow ? 'DATA UNAVAILABLE — no funding feed for this coin.' : `Funding ${(fundingRow.rate * 100).toFixed(3)}% per 8h.`);
+  add('macroNotHostile',
+    !macro || !macro.available || !S.isNum(macro.riskAppetite) ? 'unknown'
+      : (side > 0 ? macro.riskAppetite > -30 : macro.riskAppetite < 30) ? 'pass' : 'fail',
+    !macro || !macro.available ? 'DATA UNAVAILABLE — macro conditions are unchecked.'
+      : `Macro risk appetite ${macro.riskAppetite} (${macro.riskAppetiteLabel}); ${macro.regime.label}.`);
+  add('noScheduledEvent',
+    !evRisk || !evRisk.ok ? 'unknown' : evRisk.inWindow ? 'fail' : 'pass',
+    !evRisk || !evRisk.ok ? 'Event calendar unavailable.'
+      : evRisk.inWindow ? evRisk.message : (evRisk.next ? `Next event: ${evRisk.next.label} in ${evRisk.next.hoursAway}h.` : 'No scheduled high-impact events.'));
 
+  /* ADDING INTO A MACRO SHOCK OR AN EVENT WINDOW IS A HARD NO.
+     These join the existing hard blocks rather than merely counting against the tally, because
+     they are the two conditions under which the chart stops being the thing that decides the
+     outcome — which is exactly when "the level held last time" reasoning does the most damage. */
   const hardFail =
     pastLiquidation ||
     (S.isNum(distLiq) && distLiq < HARD_LIQ_DISTANCE) ||
     (cascade && cascade.ok && cascade.cascade.detected && cascade.cascade.side === (side > 0 ? 'long' : 'short')) ||
     (liquidity && liquidity.ok && (coinVac || liquidity.marketVacuum)) ||
-    (btcSt && btcSt.ok && btcSt.lastLowTag === 'LL' && side > 0);
+    (btcSt && btcSt.ok && btcSt.lastLowTag === 'LL' && side > 0) ||
+    !!(evRisk && evRisk.ok && evRisk.inWindow) ||
+    !!(macro && macro.available && S.isNum(macro.riskAppetite) && (side > 0 ? macro.riskAppetite <= -50 : macro.riskAppetite >= 60));
 
   const failed = checks.filter(x => x.state === 'fail');
   const unknown = checks.filter(x => x.state === 'unknown');
@@ -251,6 +285,10 @@ function positionRisk(pos, snap, engines, opts) {
     distanceToSupport: S.isNum(lv.support) ? (price - lv.support) / price : null,
     distanceToResistance: S.isNum(lv.resistance) ? (lv.resistance - price) / price : null,
     stress, statusLabel,
+    stressFloored: !pastLiquidation && inEventWindow,
+    stressFlooredNote: (!pastLiquidation && inEventWindow)
+      ? 'Stress is floored at 60 because a scheduled release is inside its window — leverage held into an unreleased number is high risk whatever the chart says.'
+      : null,
     stressCoverage: sp ? sp.coverage : null,
     stressInputs: sp ? sp.used : [], stressMissing: sp ? sp.missing : [],
     structure: st.ok ? { verdict: st.verdict, label: st.label, sequence: st.recent, lastHigh: st.lastHigh, lastLow: st.lastLow } : { error: st.reason },
@@ -260,6 +298,19 @@ function positionRisk(pos, snap, engines, opts) {
     funding: fundingRow || null,
     fundingAvailable: !!fundingRow,
     oiAvailable: !!(oi && oi.available),
+    macro: (macro && macro.available) ? {
+      available: true,
+      riskAppetite: macro.riskAppetite, label: macro.riskAppetiteLabel,
+      regime: macro.regime.label, tone: macro.regime.tone,
+      taReliability: macro.cryptoMacro.taReliability,
+      band: macro.cryptoMacro.band,
+      correlations: macro.cryptoMacro.correlations,
+      message: macro.cryptoMacro.message
+    } : { available: false, reason: (macro && macro.reason) || 'macro not evaluated', warning: macro && macro.warning },
+    eventRisk: evRisk && evRisk.ok ? {
+      inWindow: evRisk.inWindow, window: evRisk.window, next: evRisk.next,
+      message: evRisk.message, stale: evRisk.stale, unverifiedCount: evRisk.unverifiedCount
+    } : null,
     /* The risk map the brief asks for: CURRENT → SUPPORT → LIQUIDATION, as ordered rungs with
        the distance to each. */
     riskMap: buildRiskMap(price, lv, liq, side),
