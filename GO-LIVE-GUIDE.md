@@ -153,6 +153,19 @@ The clock beside the price shows the age of the last quote that actually landed,
 past 15s, red past 40s. If it says `browser feed failing, using server`, CoinDCX is rate-limiting
 your browser and the app has fallen back on its own.
 
+**🩺 Market Health says DATA UNAVAILABLE for open interest / funding / depth**
+Expected, and not a bug. Those come from a perpetual-futures venue (Binance), and Binance restricts
+Indian access — the same Bangalore placement that makes your CoinDCX prices correct is what blocks
+them. The panel still works: breadth, correlation, transmission, beta, structure, liquidity impact
+and the regime read all come from prices this server already has. The cascade detector drops to
+**INFERRED** mode with its confidence capped, and says so on screen. Set `INTEL_DERIVS=off` to stop
+attempting the calls, or point `INTEL_FAPI_HOSTS` at a venue you can reach.
+
+**Market Health says the liquidation feed is unavailable — can I fix that?**
+No, not over REST. There is no public REST endpoint for force-orders; the only public source is a
+WebSocket stream, which this server does not hold open. That is why the cascade detector is labelled
+INFERRED and capped at 65% confidence rather than pretending to have read one.
+
 **A change I pushed isn't showing**
 On a Droplet, pull and restart (above). On App Platform, check the deploy actually succeeded.
 

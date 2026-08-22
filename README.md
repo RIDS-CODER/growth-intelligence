@@ -496,15 +496,91 @@ running `scalpOnly:false` becomes Quick + Normal — the same setups it took bef
 Edit `STOCK_SYMS` / `ETF_SYMS` in `server.js` (plain NSE symbols). Upstox instrument keys are resolved
 automatically from the daily NSE master file — no manual IDs needed.
 
+## 🩺 Market Health — market-wide stress & correlation
+
+Every other panel looks at one coin. This one looks at the **market**, and answers the question a
+single chart cannot: *why is everything moving together right now?*
+
+"The market is bearish" is not an answer. These three markets all look identical on a price chart
+and need opposite trades:
+
+| what it looks like | what it actually is | what it means |
+|---|---|---|
+| BTC ↓, 85% of the board red | **long liquidation cascade** — positions being closed *for* their owners | mechanical, self-terminating; it stops when the leverage is gone |
+| BTC ↓, 85% of the board red | **new shorts pressing** — open interest *rising* into the fall | conviction selling with fresh money; no reason for it to stop |
+| BTC ↓, 85% of the board red | **liquidity vacuum** — barely anyone selling, the bids simply left | small orders move price several percent; reduce size |
+
+Open the panel with **🩺 Market Health**. It shows the regime, breadth, altcoin stress, correlation,
+open interest, funding, liquidity — and a **❓ Why is everything falling?** button that writes the
+whole diagnosis in plain English with the evidence it used attached.
+
+**What it detects.** Breadth (−100…+100) and altcoin stress (0–100) · rolling correlations across
+15m/1h/4h/24h, including correlation *spikes* and coins *decoupling* from BTC · BTC → ETH → altcoin
+transmission with lead–lag timing · liquidation cascades · the price×open-interest matrix · funding
+crowding · liquidity vacuums · per-coin beta and downside amplification · HH/HL/LH/LL market
+structure · recovery-vs-continuation probabilities.
+
+### On your open positions
+
+Add **Leverage ×** (and optionally your venue's own **liquidation price**) when you add a trade in
+🔔 Position Watch, then click **🩺 market risk** on it. You get a **Position Stress Score 0–100**,
+distance to liquidation and to breakeven, a `CURRENT → SUPPORT → LIQUIDATION` risk map, whether the
+coin is out- or under-performing the market, whether your position is fighting market structure, and
+the specific level that would strengthen the recovery case.
+
+> **It will not tell you to average down.** The gate starts at *no* and requires evidence to move.
+> A live cascade, a liquidity vacuum, BTC still printing lower lows, or a liquidation price inside
+> 15% each force an outright refusal. When conditions are merely unproven the answer is "wait", with
+> the level that would change it. There is no path in the code to "yes, add more".
+
+### What this platform genuinely cannot see
+
+This is the important part, and the panel repeats it on screen rather than hiding it.
+
+| data | status | consequence |
+|---|---|---|
+| prices, volume, breadth, correlation, beta, structure | ✅ available | the majority of the panel works off this |
+| **liquidations** | ❌ **never available** | no public REST source exists — only a WebSocket stream this server does not hold open. The cascade detector therefore runs **INFERRED** (reconstructed from price, volume, breadth and correlation) with its confidence **capped at 65%**, and it never claims to have seen a liquidation |
+| **open interest** | ⚠️ needs a futures venue | without it, forced long liquidation and fresh short selling are indistinguishable |
+| **funding** | ⚠️ needs a futures venue | without it, you cannot tell whether price is falling into a crowded long book or one that already reset |
+| **order-book depth** | ⚠️ needs a futures venue | falls back to a price-impact *estimate* from candles, labelled as such |
+| **BTC dominance** | ⚠️ needs CoinGecko | the volume-share figure shown instead is **not** dominance and is labelled separately |
+
+⚠️ **Hosting note.** The three ⚠️ rows come from Binance futures, and Binance restricts Indian
+access — the same Bangalore placement that makes your CoinDCX prices correct is likely to make these
+unreachable. That is a real, unresolved gap. The panel states which feeds are live every time it
+renders, so you always know what a conclusion was built on. Set `INTEL_DERIVS=off` to stop trying.
+
+### "Has this signal worked before?"
+
+Every threshold here started as a judgement, not a measurement. The engine appends a snapshot of the
+market state to `intel-history.jsonl` on each pass, and the backtest button reports what actually
+happened over the next 15m/1h/4h after each signal fired. **It refuses to state a rate below 20
+recorded occurrences** — under that it says how few it has instead of printing a percentage. Nothing
+is backfilled: the record starts when the engine does, and resets if the host redeploys with
+ephemeral storage.
+
 ## Files
 ```
 growth-intelligence-pro/
 ├── START-HERE.command   ← double-click to run
 ├── server.js            ← backend (Upstox + engine)
+├── paper.js             ← paper-trading simulator
+├── intel/               ← 🩺 market-wide stress & correlation engine
+│   ├── index.js         ← orchestrator (injected deps, no own price feed)
+│   ├── data.js          ← one shared market snapshot, reuses server.js's loaders
+│   ├── stats.js         ← correlation / beta / weighted scoring over partial evidence
+│   ├── breadth.js       ├── correlation.js  ├── beta.js       ├── structure.js
+│   ├── transmission.js  ├── liquidation.js  ├── openInterest.js
+│   ├── funding.js       ├── liquidity.js    ├── recovery.js
+│   ├── regime.js        ├── positionRisk.js ├── alerts.js     ├── history.js
+│   ├── derivs.js        ← futures adapter (OI/funding/depth) — honest about being unreachable
+│   └── global.js        ← BTC dominance adapter
 ├── config.json          ← your keys + settings
 ├── public/index.html    ← dashboard
 ├── token.json           ← auto: daily login token (private)
 ├── instruments.json     ← auto: cached symbol→key map
+├── intel-history.jsonl  ← auto: market snapshots for the intel backtester
 └── README.md
 ```
 

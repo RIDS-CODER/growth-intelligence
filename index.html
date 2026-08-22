@@ -138,6 +138,35 @@
   .reasons{font-size:12.5px;margin-top:8px}.reasons h4{font-size:11px;text-transform:uppercase;letter-spacing:.6px;margin:10px 0 5px;color:var(--muted)}.reasons .for{color:#9fe6c4}.reasons .against{color:#f3b0b5}.reasons .inval{color:#e8c766}.reasons li{margin-left:16px;margin-bottom:3px;line-height:1.45}
   .empty{color:var(--muted);font-size:13px;padding:14px;background:var(--panel);border:1px dashed var(--line);border-radius:12px}
   .small{font-size:11px;color:var(--muted);line-height:1.6}footer{margin-top:36px;font-size:11px;color:var(--faint);text-align:center;line-height:1.7}.src{font-family:var(--mono)}
+  /* 🩺 MARKET HEALTH */
+  .mh{background:linear-gradient(160deg,var(--panel),var(--panel2));border:1px solid rgba(56,189,248,.35);border-radius:14px;padding:14px 16px;margin:14px 0}
+  .mh h3{font-size:14px;margin-bottom:8px}
+  .mhregime{border-radius:12px;padding:13px 15px;margin:10px 0;border:1px solid var(--line)}
+  .mhregime .r{font-size:19px;font-weight:800;letter-spacing:.3px}
+  .mhregime.red{background:rgba(239,68,68,.10);border-color:rgba(239,68,68,.45)}.mhregime.red .r{color:#fca5a5}
+  .mhregime.amber{background:rgba(245,158,11,.10);border-color:rgba(245,158,11,.45)}.mhregime.amber .r{color:#fcd34d}
+  .mhregime.green{background:rgba(52,211,153,.10);border-color:rgba(52,211,153,.45)}.mhregime.green .r{color:#6ee7b7}
+  .mhregime.neutral{background:var(--panel2)}.mhregime.neutral .r{color:var(--muted)}
+  .mhgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:9px;margin:10px 0}
+  .mhtile{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 11px}
+  .mhtile .k{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
+  .mhtile .v{font-family:var(--mono);font-size:16px;font-weight:700;margin-top:3px}
+  .mhtile .s{font-size:11px;color:var(--muted);margin-top:2px;line-height:1.4}
+  .mhtile.na{border-style:dashed;opacity:.75}.mhtile.na .v{color:var(--faint);font-size:12px}
+  .mhbar{height:7px;border-radius:5px;background:#1a2333;overflow:hidden;margin-top:6px;position:relative}
+  .mhbar i{position:absolute;top:0;bottom:0;border-radius:5px}
+  .mhwhy{background:var(--panel2);border:1px solid rgba(56,189,248,.3);border-radius:11px;padding:12px 14px;margin:10px 0;font-size:13px;line-height:1.75}
+  .mhev{font-family:var(--mono);font-size:11.5px;color:#cbd5e1;background:#0d1420;border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-top:8px}
+  .mhev li{margin-left:15px;margin-bottom:3px}
+  .mhwarn{background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.4);border-radius:10px;padding:10px 12px;margin:10px 0;font-size:12px;color:#fde68a;line-height:1.6}
+  .mhdq{background:#0d1420;border:1px dashed var(--line);border-radius:10px;padding:9px 11px;margin-top:10px;font-size:11.5px;color:var(--muted);line-height:1.65}
+  .mhdq b{color:#93c5fd}
+  .mhladder{display:flex;flex-direction:column;gap:3px;margin:8px 0}
+  .mhrung{display:flex;justify-content:space-between;align-items:center;font-family:var(--mono);font-size:12px;padding:6px 9px;border-radius:7px;background:var(--panel2);border:1px solid var(--line)}
+  .mhrung.cur{border-color:var(--accent2);background:rgba(34,211,238,.10)}
+  .mhrung.liq{border-color:rgba(239,68,68,.55);background:rgba(239,68,68,.10);color:#fca5a5}
+  .mhrung.sup{border-color:rgba(52,211,153,.4)}
+  .mhchk{font-size:12px;line-height:1.7}.mhchk .pass{color:#6ee7b7}.mhchk .fail{color:#fca5a5}.mhchk .unknown{color:var(--faint)}
 </style>
 </head>
 <body>
@@ -179,11 +208,13 @@
     <button class="btn" id="listBtn" onclick="toggleListings()" style="border-color:#c084fc;background:rgba(192,132,252,.14);color:#e9d5ff">🎢 Dump &amp; Bounce</button>
     <button class="btn" id="posBtn" onclick="togglePositions()" style="border-color:#f472b6;background:rgba(244,114,182,.14);color:#fbcfe8">🔔 Position Watch</button>
     <button class="btn" id="paperBtn" onclick="togglePaper()" style="border-color:#34d399;background:rgba(52,211,153,.14);color:#a7f3d0">🤖 Paper Bot</button>
+    <button class="btn" id="intelBtn" onclick="toggleIntel()" style="border-color:#38bdf8;background:rgba(56,189,248,.15);color:#bae6fd">🩺 Market Health</button>
     <span class="pstat" id="filterNote"></span>
   </div>
   <div id="scoreInfo" style="display:none"></div>
   <div id="cryptoNote" style="display:none"></div>
   <div id="btcNote" style="display:none"></div>
+  <div id="intelPanel" style="display:none"></div>
   <div id="quickPanel" style="display:none"></div>
   <div id="moversPanel" style="display:none"></div>
   <div id="listPanel" style="display:none"></div>
@@ -1271,6 +1302,121 @@ function volLine(v){ if(!v)return '<span class="sub">vol —</span>';
   const c=(v.chg24||0)>=0?'var(--buy)':'var(--sell)';
   return `${v.chg24!=null?`<span style="color:${c};font-weight:700">${(v.chg24>=0?'+':'')+v.chg24.toFixed(1)}% / 24h</span> · `:''}${v.surge!=null?`<b>${v.surge.toFixed(1)}×</b> avg vol`:'vol n/a'}`;}
 function quickStartTimer(){ if(quickTimer)clearInterval(quickTimer); quickTimer=setInterval(()=>{ if(quickState.open)loadQuick(quickState.tf); }, 45000); }
+/* ================= 🩺 MARKET HEALTH — market-wide stress & correlation =================
+   RULE FOR THIS WHOLE PANEL: a number that could not be measured is rendered as an explicit
+   DATA UNAVAILABLE tile carrying the reason, never as a dash, a zero, or a blank. The panel's
+   value is that you can trust what it shows — which requires it to be equally clear about what
+   it cannot show. Every tile that is missing says why in the same breath. */
+let intelTimer=null,intelLast=null;
+function toggleIntel(){const el=document.getElementById('intelPanel');const show=el.style.display==='none';
+  el.style.display=show?'block':'none';
+  if(show){renderIntelShell();loadIntel();intelTimer=setInterval(loadIntel,45000);}
+  else if(intelTimer){clearInterval(intelTimer);intelTimer=null;}}
+function renderIntelShell(){
+  const el=document.getElementById('intelPanel');
+  if(!el.innerHTML)el.innerHTML='<div class="mh"><h3>🩺 Market Health</h3><div class="empty">Reading the market…</div></div>';}
+async function loadIntel(force){
+  try{const d=await(await fetch('/api/intel'+(force?'?force=1':''))).json();intelLast=d;renderIntel(d);}
+  catch(e){document.getElementById('intelPanel').innerHTML='<div class="mh"><h3>🩺 Market Health</h3><div class="empty">Could not reach the intelligence engine: '+e.message+'</div></div>';}}
+
+const pctS=(v,dp)=>(v==null||!isFinite(v))?null:(v*100).toFixed(dp==null?1:dp)+'%';
+const numS=(v,dp)=>(v==null||!isFinite(v))?null:(+v).toFixed(dp==null?2:dp);
+/* One tile. `val` null ⇒ the tile renders as DATA UNAVAILABLE with `why` beneath it. */
+function mhTile(k,val,sub,why){
+  if(val==null)return `<div class="mhtile na"><div class="k">${k}</div><div class="v">DATA UNAVAILABLE</div><div class="s">${why||'not measured'}</div></div>`;
+  return `<div class="mhtile"><div class="k">${k}</div><div class="v">${val}</div>${sub?`<div class="s">${sub}</div>`:''}</div>`;}
+/* Signed −100…+100 bar, centred at zero. */
+function mhBar(v,lo,hi){
+  if(v==null||!isFinite(v))return '';
+  const span=hi-lo,zero=(0-lo)/span*100,pos=(v-lo)/span*100;
+  const left=Math.min(zero,pos),w=Math.abs(pos-zero);
+  const col=v>=0?'var(--buy)':'var(--sell)';
+  return `<div class="mhbar"><i style="left:${left}%;width:${Math.max(1.5,w)}%;background:${col}"></i></div>`;}
+
+function renderIntel(d){
+  const el=document.getElementById('intelPanel');
+  if(!d||!d.ok){el.innerHTML=`<div class="mh"><h3>🩺 Market Health</h3><div class="empty"><b>Not enough market data to publish a read.</b><br>${(d&&d.reason)||''}</div></div>`;return;}
+  const b=d.breadth,c=d.correlation,q=d.dataQuality,r=d.regime;
+
+  const tiles=[];
+  tiles.push(mhTile('Market breadth', b.ok&&b.score!=null?String(b.score):null,
+    b.ok?`${b.label} · ${b.pctGreen!=null?Math.round(b.pctGreen)+'% green':''}`:'', b.ok?'':b.reason)
+    +(b.ok?mhBar(b.score,-100,100):''));
+  tiles.push(mhTile('BTC trend', b.ok&&b.btc.ret24h!=null?pctS(b.btc.ret24h):null,'24h · '+(d.structure.btc.ok?d.structure.btc.verdict:'structure unreadable')));
+  tiles.push(mhTile('ETH trend', b.ok&&b.eth.ret24h!=null?pctS(b.eth.ret24h):null,'24h'+(b.ok&&b.ethVsBtc.h24!=null?` · ${b.ethVsBtc.h24>0?'+':''}${(b.ethVsBtc.h24*100).toFixed(1)}pp vs BTC`:'')));
+  tiles.push(mhTile('Altcoin stress', b.ok&&b.altStress!=null?b.altStress+'/100':null, b.ok?b.altStressLabel:''));
+  tiles.push(mhTile('Liquidation pressure', d.liquidation.ok&&d.liquidation.cascade.confidence!=null?d.liquidation.cascade.confidence+'%':null,
+    d.liquidation.ok?`${d.liquidation.cascade.label} · ${d.liquidation.mode}`:'', d.liquidation.reason));
+  tiles.push(mhTile('Open interest', d.oi.available?pctS(d.oi.market.oiChange):null,
+    d.oi.available?d.oi.market.key:'', d.oi.reason));
+  tiles.push(mhTile('Funding crowding', d.funding.available?(d.funding.medianRate*100).toFixed(3)+'%':null,
+    d.funding.available?d.funding.crowding.replace(/-/g,' ')+' · per 8h':'', d.funding.reason));
+  tiles.push(mhTile('Liquidity', d.liquidity.ok&&d.liquidity.pctVacuum!=null?Math.round(d.liquidity.pctVacuum)+'% thin':null,
+    d.liquidity.ok?d.liquidity.tier:'', d.liquidity.reason));
+  tiles.push(mhTile('Correlation', c.ok&&c.avgCorrBtc!=null?numS(c.avgCorrBtc):null,
+    c.ok?`alt↔BTC · ${c.level} · ${c.trend}`:'', c.reason));
+  tiles.push(mhTile('BTC dominance', d.dominance.available?d.dominance.value.toFixed(1)+'%':null,'market cap share',
+    (d.dominance.reason||'')+(d.dominance.volumeShare!=null?` — traded-value share is ${d.dominance.volumeShare.toFixed(1)}%, which is NOT dominance`:'')));
+
+  const warn=[];
+  if(c.ok&&c.synchronizedSelling.flag)warn.push(`<b>SYNCHRONIZED MARKET SELLING</b> — BTC is down and ${Math.round(c.synchronizedSelling.pctAltsDown)}% of tracked altcoins are falling with it. The board is not trading as ${c.synchronizedSelling.sample} independent coins right now.`);
+  if(c.ok&&c.singleRiskAsset)warn.push(`Correlation to BTC is <b>${numS(c.avgCorrBtc)}</b> — holding several alt positions is currently closer to holding one position at several times the size. Size accordingly.`);
+  if(d.beta.ok&&d.beta.highBetaRisk)warn.push(`<b>HIGH-BETA ALTCOIN RISK</b> — ${d.beta.highBetaCoins.slice(0,5).map(x=>`${x.tk} ${x.downsideBeta}x`).join(', ')} amplify BTC's downside. On leverage these reach a liquidation price well before BTC reaches a notable level.`);
+  if(d.liquidity.ok&&d.liquidity.marketVacuum)warn.push(`<b>LIQUIDITY VACUUM</b> — ${d.liquidity.message}`);
+
+  const decoup=(c.ok&&c.decoupled.length)?`<div class="small" style="margin-top:6px">Decoupled from BTC: ${c.decoupled.slice(0,6).map(x=>`<b>${x.tk}</b> (${x.corr}, ${x.dir||'—'})`).join(' · ')}</div>`:'';
+
+  el.innerHTML=`<div class="mh">
+    <h3>🩺 Market Health <span class="sub" style="font-weight:400;color:var(--muted)">— market-wide stress &amp; correlation</span></h3>
+    <div class="mhregime ${r.tone}">
+      <div class="k" style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">Market regime</div>
+      <div class="r">${r.tone==='red'?'🔴':r.tone==='amber'?'🟠':r.tone==='green'?'🟢':'⚪'} ${r.label}</div>
+      <div class="small" style="margin-top:5px;color:#cbd5e1">${(r.why||[]).join(' · ')}</div>
+    </div>
+    <div class="mhgrid">${tiles.join('')}</div>
+    ${warn.map(w=>`<div class="mhwarn">${w}</div>`).join('')}
+    ${decoup}
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0 4px">
+      <button class="btn" onclick="loadWhy()" style="border-color:#38bdf8;background:rgba(56,189,248,.16);color:#bae6fd">❓ Why is everything ${b.ok&&b.score>15?'rising':'falling'}?</button>
+      <button class="btn" onclick="loadIntel(1)">↻ Refresh now</button>
+      <button class="btn" onclick="loadIntelBacktest()">📊 Has this signal worked before?</button>
+    </div>
+    <div id="mhWhy"></div>
+    <div id="mhBt"></div>
+    <div class="mhdq">
+      <b>Data quality.</b> ${q.coinsLoaded} coins loaded${q.coinsFailed?`, ${q.coinsFailed} failed`:''} ·
+      prices ${Math.round(q.priceAgeMs/1000)}s old${q.delayed?' · <b style="color:#fbbf24">DATA DELAYED</b>':''} ·
+      ${new Date(d.ts).toLocaleTimeString('en-IN')}
+      ${q.unavailable.length?`<br><b>DATA UNAVAILABLE:</b> ${q.unavailable.map(x=>`${x.k} <span style="color:var(--faint)">(${x.why||''})</span>`).join(' · ')}`:''}
+      <br><span style="color:var(--faint)">Every conclusion above is drawn only from the feeds listed as available. Market-structure intelligence, not financial advice.</span>
+    </div>
+  </div>`;}
+
+async function loadWhy(){
+  const el=document.getElementById('mhWhy');el.innerHTML='<div class="mhwhy">Working…</div>';
+  try{const d=await(await fetch('/api/intel/why')).json();
+    if(!d.ok){el.innerHTML=`<div class="mhwhy">${d.reason||'No read available.'}</div>`;return;}
+    const liq=intelLast&&intelLast.liquidation;
+    /* No bold label prefix here — why.text already opens with the regime name, and printing both
+       rendered it twice in a row on screen. */
+    el.innerHTML=`<div class="mhwhy">${d.why.text}
+      ${liq&&liq.ok&&liq.evidence.length?`<div class="mhev"><b>Evidence used</b><ul>${liq.evidence.map(e=>`<li>${e}</li>`).join('')}</ul>${liq.missing.length?`<div style="color:#fbbf24;margin-top:5px">Not available: ${liq.missing.join(', ')}${liq.capReason?` — confidence capped at ${liq.cap}%. ${liq.capReason}`:''}</div>`:''}</div>`:''}
+    </div>`;}
+  catch(e){el.innerHTML='<div class="mhwhy">Failed: '+e.message+'</div>';}}
+
+async function loadIntelBacktest(){
+  const el=document.getElementById('mhBt');el.innerHTML='<div class="mhwhy">Reading recorded history…</div>';
+  try{const d=await(await fetch('/api/intel/backtest')).json();
+    const rows=Object.keys(d.signals).map(k=>{const s=d.signals[k];
+      if(s.insufficient)return `<tr><td>${s.label}</td><td colspan="3" style="color:var(--faint)">${s.samples||0} occurrence(s) — below the ${s.minSample} needed to state a rate</td></tr>`;
+      return `<tr><td>${s.label}</td>${['15m','1h','4h'].map(h=>{const x=s.horizons[h];
+        return x&&x.samples?`<td style="font-family:var(--mono);color:${x.medianReturn>=0?'var(--buy)':'var(--sell)'}">${(x.medianReturn*100).toFixed(2)}% <span style="color:var(--muted)">(${Math.round(x.pctPositive)}% up, n=${x.samples})</span></td>`:'<td style="color:var(--faint)">—</td>';}).join('')}</tr>`;}).join('');
+    el.innerHTML=`<div class="mhwhy"><b>Has this signal worked before?</b>
+      <div class="small" style="margin:4px 0 8px">Measured from this server's own recorded snapshots — ${d.stats.snapshots} of them over ${d.stats.spanHours.toFixed(1)}h. Nothing here is backfilled: the record starts when the engine does, and resets if the host is redeployed with ephemeral storage.</div>
+      <table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="color:var(--muted);text-align:left"><th>Signal</th><th>next 15m</th><th>next 1h</th><th>next 4h</th></tr></thead><tbody>${rows}</tbody></table>
+      <div class="small" style="margin-top:7px">Median forward return of the tracked basket after the signal fired. A rate is only shown once there are at least ${d.stats.minSample} scored occurrences — below that it is a coincidence with a percentage sign.</div></div>`;}
+  catch(e){el.innerHTML='<div class="mhwhy">Failed: '+e.message+'</div>';}}
+
 function toggleQuick(){const el=document.getElementById('quickPanel');quickState.open=el.style.display==='none';el.style.display=quickState.open?'block':'none';
   if(quickState.open){renderQuickShell();loadQuick(quickState.tf);quickStartTimer();}else if(quickTimer){clearInterval(quickTimer);quickTimer=null;}}
 function setQuickTf(tf){quickState.tf=tf;renderQuickShell();if(quickState.data[quickState.tab+'|'+tf])renderQuickList();else loadQuick(tf);}
@@ -1759,15 +1905,21 @@ async function addPosition(){
      their fill in USDT. Sending the raw number made a $0.0067 entry land as ₹0.0067 and every
      P&L after it was nonsense. Convert here, using the same rate the server priced with. */
   const asUsdt = posCcy()==='USDT' && usdtInr>0 && posIsCrypto(g('posSym'));
+  /* The liquidation price is a PRICE and gets the identical ₹/USDT treatment as the entry.
+     Converting one and not the other would put the two on different scales and produce a
+     distance-to-liquidation that is off by the exchange rate — the single most dangerous number
+     on the card to get wrong. */
+  const typedLiq=+g('posLiq');
   const body={sym:g('posSym'),side:g('posSide'),entry:asUsdt?typed*usdtInr:typed,
     qty:+g('posQty')||null,tf:g('posTf'),
+    lev:+g('posLev')||null, liq:typedLiq>0?(asUsdt?typedLiq*usdtInr:typedLiq):null,
     chat:g('posChat'), chatName:(document.getElementById('posChat')||{}).selectedOptions?.[0]?.textContent||''};
   posState.msg='⏳ Adding…'; renderPosBody();
   try{
     const d=await(await fetch('/api/positions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
     if(d.error){posState.msg='⚠ '+d.error;}
     else{ posState.msg='✅ Watching '+(d.position.tk||d.position.sym)+(body.chat?' — a confirmation just went to '+(body.chatName||'that Telegram user'):'');
-      ['posEntry','posQty'].forEach(i=>{const el=document.getElementById(i);if(el)el.value='';}); }
+      ['posEntry','posQty','posLev','posLiq'].forEach(i=>{const el=document.getElementById(i);if(el)el.value='';}); }
   }catch(e){ posState.msg='⚠ '+String(e.message||e); }
   await loadPositions(true);
 }
@@ -1800,9 +1952,55 @@ function posRow(p){
     </div>
     <div class="sub" style="margin-top:4px;color:${st.col}">${st.txt}</div>
     <div class="sub" style="margin-top:3px">📣 alerts to <b>${p.chatName||(p.chat?'chat …'+String(p.chat).slice(-4):'nobody — no Telegram user was picked')}</b>${p.alerts?' · '+p.alerts+' sent':''}
+      ${p.cls==='Crypto'?`· <a style="color:#38bdf8;cursor:pointer" onclick="loadPosStress('${p.id}')">🩺 market risk</a>`:''}
       · <a style="color:var(--sell);cursor:pointer" onclick="removePosition('${p.id}','${(p.tk||p.sym).replace(/'/g,"")}')">stop watching</a></div>
+    <div id="stress-${p.id}"></div>
   </div>`;
 }
+
+/* ---- POSITION-SPECIFIC DASHBOARD ----
+   Deliberately NOT a buy/sell verdict. It reports the levels and the conditions, because on a
+   leveraged position the useful output is "here is what would have to happen", not a signal. */
+async function loadPosStress(id){
+  const el=document.getElementById('stress-'+id); if(!el)return;
+  if(el.innerHTML){el.innerHTML='';return;}                    // second click closes it
+  el.innerHTML='<div class="sub" style="margin-top:8px">⏳ Reading market context…</div>';
+  try{const d=await(await fetch('/api/intel/position?id='+encodeURIComponent(id))).json();renderPosStress(el,d);}
+  catch(e){el.innerHTML='<div class="sub" style="margin-top:8px;color:var(--sell)">Failed: '+e.message+'</div>';}}
+
+function renderPosStress(el,d){
+  if(!d||!d.ok){el.innerHTML=`<div class="sub" style="margin-top:8px;color:#fbbf24">${(d&&d.reason)||'No market context available.'}</div>`;return;}
+  const f=v=>scalpPrice(v,'Crypto',d.rateUsed);
+  const col=d.stress>=80?'var(--sell)':d.stress>=60?'#fb923c':d.stress>=40?'#fbbf24':'var(--buy)';
+  const rungs=(d.riskMap||[]).map(r=>`<div class="mhrung ${r.k==='current'?'cur':r.k==='liquidation'?'liq':r.k==='support'?'sup':''}">
+      <span>${r.label}</span><span>${f(r.px)}${r.distPct?` <span style="color:var(--muted)">${r.distPct>0?'+':''}${r.distPct.toFixed(1)}%</span>`:''}</span></div>`).join('');
+  const chk=(d.averageDown.checks||[]).map(c=>`<div class="${c.state}">${c.state==='pass'?'✓':c.state==='fail'?'✗':'?'} ${c.text}</div>`).join('');
+  const ctx=[
+    ['BTC', d.marketRegime||'—'],
+    ['vs market', d.vsMarket&&d.vsMarket.klass?d.vsMarket.klass.replace(/-/g,' '):'—'],
+    ['structure', d.structure&&d.structure.verdict?d.structure.verdict:'unreadable'],
+    ['open interest', d.oiAvailable?'available':'DATA UNAVAILABLE'],
+    ['funding', d.fundingAvailable?((d.funding.rate*100).toFixed(3)+'% / 8h'):'DATA UNAVAILABLE']
+  ].map(([k,v])=>`<span class="sub">${k}: <b>${v}</b></span>`).join(' · ');
+
+  el.innerHTML=`<div style="margin-top:9px;padding:11px 12px;border-radius:11px;background:var(--panel2);border:1px solid rgba(56,189,248,.32)">
+    <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:baseline">
+      <b>${d.tk} ${d.sideLabel}${d.lev?' '+d.lev+'×':' (no leverage given)'}</b>
+      <div><b style="color:${col};font-size:16px">${d.stress==null?'—':d.stress}/100</b> <span class="sub">${d.statusLabel}</span></div>
+    </div>
+    ${d.pastLiquidation?`<div class="mhwarn" style="margin:8px 0">⚠ ${d.pastLiquidationNote}</div>`:''}
+    <div class="sub" style="margin:6px 0">Entry ${f(d.entry)} · now ${f(d.price)} · move <b style="color:${d.movePct>=0?'var(--buy)':'var(--sell)'}">${(d.movePct*100).toFixed(2)}%</b>${d.roe!=null?` · ROE <b style="color:${d.roe>=0?'var(--buy)':'var(--sell)'}">${(d.roe*100).toFixed(1)}%</b>`:''}
+      · breakeven ${(d.distanceToBreakeven*100).toFixed(1)}% away</div>
+    <div class="mhladder">${rungs}</div>
+    ${d.liqEstimateNote?`<div class="sub" style="color:#fbbf24;margin-bottom:6px">⚠ ${d.liqEstimateNote}</div>`:''}
+    <div style="margin:7px 0">${ctx}</div>
+    ${d.fighting&&d.fighting.fighting?`<div class="mhwarn">⚠ ${d.fighting.text}</div>`:''}
+    <div style="margin-top:8px"><b style="font-size:12px">RECOVERY REQUIREMENT</b><div class="sub" style="margin-top:2px">${d.recoveryRequirement}</div></div>
+    <div style="margin-top:9px"><b style="font-size:12px">SHOULD YOU ADD?</b>
+      <div class="sub" style="margin:3px 0 5px;color:${d.averageDown.verdict==='no'||d.averageDown.verdict==='wait'?'#fca5a5':'var(--muted)'}"><b>${d.averageDown.text}</b></div>
+      <div class="mhchk">${chk}</div></div>
+    <div class="small" style="margin-top:8px">Stress blends distance to liquidation, unrealised loss, breadth, BTC trend, relative performance, structure and amplification — over the ${d.stressInputs.length} of ${d.stressInputs.length+d.stressMissing.length} inputs that could be measured${d.stressMissing.length?` (missing: ${d.stressMissing.join(', ')})`:''}. Levels and conditions only — not a buy or sell instruction.</div>
+  </div>`;}
 function renderPosShell(){
   const el=document.getElementById('posPanel'); if(!el)return;
   const d=posState.data||{}, uni=posState.uni;
@@ -1832,6 +2030,8 @@ function renderPosShell(){
       <input id="posEntry" class="editin" type="number" step="any" placeholder="${posEntryLabel('')}" title="Type the fill price in the currency shown beside this box. It is converted and stored in ₹ either way." style="width:150px">
       <b id="posCcyHint" class="sub" style="color:var(--accent2);font-family:var(--mono)">${posEntryLabel('').replace('Entry in ','')}</b>
       <input id="posQty" class="editin" type="number" step="any" placeholder="Qty (optional)" style="width:120px">
+      <input id="posLev" class="editin" type="number" step="any" min="1" max="125" placeholder="Leverage ×" title="Futures leverage. Supplying it unlocks the position stress score, the distance-to-liquidation read and the risk map. Leave blank for spot." style="width:110px">
+      <input id="posLiq" class="editin" type="number" step="any" placeholder="Liq. price (optional)" title="Your venue's OWN liquidation price. Every exchange runs a different maintenance-margin ladder, so if you paste theirs it is used instead of our estimate." style="width:150px">
       <select id="posTf" class="editin">${['15m','30m','1h','4h','daily'].map(t=>`<option value="${t}"${t==='1h'?' selected':''}>${t} signal</option>`).join('')}</select>
       <span class="sub">alert:</span>${chatSel}
       <button class="btn go" style="padding:6px 14px" onclick="addPosition()">+ Watch this trade</button>

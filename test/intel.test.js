@@ -1,0 +1,779 @@
+/* ============================================================
+   MARKET-WIDE STRESS & CORRELATION ENGINE — tests
+
+   Two kinds of test here, and the second kind matters more.
+
+   1. DETECTION tests: given a market that IS a cascade / a decoupling / a bearish structure,
+      does the engine say so?
+
+   2. HONESTY tests: given a market where the evidence is MISSING, does the engine refuse to
+      conclude? This platform's recurring failure mode has never been bad maths — it has been
+      confidently reporting a number built on data it did not have. So there are guard tests that
+      no score is published from nothing, that the cascade detector never claims to have seen
+      liquidations it cannot fetch, that confidence is capped when positioning data is absent,
+      and that the average-down gate has no path to "yes".
+   ============================================================ */
+
+const { test } = require('node:test');
+const assert = require('node:assert');
+const path = require('path');
+const fs = require('fs');
+
+const server = require('../server.js');
+const S = require('../intel/stats');
+const createData = require('../intel/data');
+const createDerivs = require('../intel/derivs');
+const createHistory = require('../intel/history');
+const { breadth, MIN_COINS } = require('../intel/breadth');
+const { correlation } = require('../intel/correlation');
+const { betaEngine, coinVsMarket } = require('../intel/beta');
+const { structure, fightingStructure } = require('../intel/structure');
+const { transmission, leadLag } = require('../intel/transmission');
+const { openInterestEngine, quadrantOf } = require('../intel/openInterest');
+const { fundingEngine } = require('../intel/funding');
+const { liquidityEngine } = require('../intel/liquidity');
+const { liquidationEngine, CAP_INFERRED, CAP_PARTIAL } = require('../intel/liquidation');
+const { recoveryEngine, failedRally } = require('../intel/recovery');
+const { positionRisk, estimateLiquidation } = require('../intel/positionRisk');
+const { classify, sectorWeakness } = require('../intel/regime');
+const { buildAlerts } = require('../intel/alerts');
+
+/* ---------------- fixture factory ----------------
+   Coins are generated from a shared market factor plus idiosyncratic noise, which is what makes
+   correlation and beta testable: `beta` controls how much of the common factor a coin carries,
+   `idio` how much noise drowns it out. */
+const TMP = path.join(__dirname, '..', '.test-intel');
+
+function rng(seed) { let s = seed || 1; return () => { s = (s * 16807) % 2147483647; return s / 2147483647; }; }
+
+function factor(n, driftPerBar, volPerBar, seed) {
+  const r = rng(seed); const out = [];
+  for (let i = 0; i < n; i++) out.push(driftPerBar + (r() - 0.5) * 2 * volPerBar);
+  return out;
+}
+
+/* EVERY COIN NEEDS ITS OWN SEED.
+   An earlier draft defaulted them all to the same one, so every "independent" coin drew the
+   identical noise sequence and the whole universe was one series wearing twelve names. The
+   correlation tests then passed at 0.9999 for a reason that had nothing to do with the shared
+   market factor they were meant to be measuring — and the "uncorrelated market" test was the one
+   that exposed it. Derive a distinct seed from the ticker so idiosyncratic noise is genuinely
+   idiosyncratic. */
+function seedOf(tk) { let h = 17; for (const c of String(tk)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return (h % 2147483646) + 1; }
+
+function mkSeries(spec, market, n) {
+  const r = rng(spec.seed || seedOf(spec.tk));
+  const close = [], high = [], low = [], vol = [], times = [];
+  let x = spec.start || 100; const now = Date.now();
+  for (let i = 0; i < n; i++) {
+    /* `lag` makes a coin receive the market factor N bars LATE. Without it every coin moves on
+       the same bar and there is no leadership to detect — only differing beta, which the engine
+       correctly reports as "the alts crossed first" rather than "BTC led". */
+    const mi = i - (spec.lag || 0);
+    const fac = (market && mi >= 0) ? market[mi] : 0;
+    let ret = (spec.drift || 0) + (spec.beta == null ? 1 : spec.beta) * fac + (r() - 0.5) * 2 * (spec.idio == null ? 0.001 : spec.idio);
+    if (spec.shockAt != null && i >= n - spec.shockAt) ret += (spec.shock || 0);
+    x *= (1 + ret); if (!(x > 0)) x = 0.0001;
+    close.push(x);
+    // A violent bar widens its own range; a calm one does not. Applying the wide wick to every
+    // bar would make the whole history look violent and nothing would stand out.
+    const violent = spec.shockAt != null && i >= n - spec.shockAt;
+    const wick = violent ? (spec.wick || 0.002) : (spec.calmWick || 0.002);
+    high.push(x * (1 + wick)); low.push(x * (1 - wick));
+    const vspike = (spec.volSpikeAt != null && i >= n - spec.volSpikeAt) ? (spec.volSpike || 4) : 1;
+    vol.push((spec.noVol ? 0 : 1000 * (1 + r()) * vspike));
+    times.push(now - (n - 1 - i) * 15 * 60000);
+  }
+  return { close, high, low, vol, times, price: close[n - 1], priceUsd: close[n - 1] };
+}
+
+/* Build a real snapshot through intel/data.js — so these tests exercise the data layer too,
+   not just the engines that consume it. */
+async function mkSnap(specs, opts) {
+  const o = opts || {};
+  const n = o.bars || 600;
+  const market = factor(n, o.marketDrift == null ? 0 : o.marketDrift, o.marketVol == null ? 0.004 : o.marketVol, 99);
+  const dailyMarket = factor(140, (o.marketDrift || 0) * 96, (o.marketVol || 0.004) * 10, 98);
+  const uni = specs.map(s => ({ tk: s.tk, sym: s.tk + 'USDT', name: s.tk, cls: 'Crypto', src: 'cg' }));
+  const data = createData({
+    loadCrypto: async (asset, tf) => {
+      const s = specs.find(x => x.tk === asset.tk);
+      if (!s || s.fail) throw new Error('feed down');
+      return tf === 'daily' ? mkSeries({ ...s, drift: (s.drift || 0) * 96, idio: (s.idio || 0.001) * 10 }, dailyMarket, 140) : mkSeries(s, market, n);
+    },
+    ensureCryptoUniverse: async () => uni,
+    getCRYPTO: () => uni,
+    ticker24: async () => {
+      const t = {};
+      for (const s of specs) if (!s.fail) t[s.tk] = { chg: s.chg24 != null ? s.chg24 : (s.drift || 0) * 96 * 100, qv: s.qv || 1e9 };
+      return t;
+    },
+    resampleSeries: server.resampleSeries
+  });
+  return data.snapshot();
+}
+
+const ZZ = server.zigzag;
+const RISK_OFF = [
+  { tk: 'BTC', drift: -0.0004, beta: 1.0, idio: 0.0008, qv: 1e10, start: 5000000 },
+  { tk: 'ETH', drift: -0.0005, beta: 1.1, idio: 0.0010, qv: 5e9, start: 300000 },
+  { tk: 'SOL', drift: -0.0008, beta: 1.5, idio: 0.0012, qv: 2e9, start: 15000 },
+  { tk: 'XRP', drift: -0.0007, beta: 1.3, idio: 0.0012, qv: 1e9, start: 50 },
+  { tk: 'BNB', drift: -0.0004, beta: 1.1, idio: 0.0010, qv: 9e8, start: 50000 },
+  { tk: 'DOGE', drift: -0.0010, beta: 1.7, idio: 0.0015, qv: 8e8, start: 12 },
+  { tk: 'SUI', drift: -0.0013, beta: 2.1, idio: 0.0016, qv: 5e8, start: 90 },
+  { tk: 'APT', drift: -0.0011, beta: 1.9, idio: 0.0015, qv: 4e8, start: 600 },
+  { tk: 'LINK', drift: -0.0006, beta: 1.2, idio: 0.0011, qv: 3e8, start: 1200 },
+  { tk: 'AVAX', drift: -0.0009, beta: 1.6, idio: 0.0013, qv: 3e8, start: 2500 },
+  { tk: 'ADA', drift: -0.0008, beta: 1.4, idio: 0.0012, qv: 4e8, start: 40 },
+  { tk: 'UNI', drift: -0.0008, beta: 1.4, idio: 0.0012, qv: 2e8, start: 700 }
+];
+const flip = specs => specs.map(s => ({ ...s, drift: -s.drift }));
+
+/* ==================== stats ==================== */
+test('pearson: perfect, inverse, and refusal on a short sample', () => {
+  const a = [0.01, -0.02, 0.03, -0.01, 0.02, -0.03, 0.01, 0.02, -0.01, 0.03];
+  assert.ok(Math.abs(S.pearson(a, a) - 1) < 1e-9);
+  assert.ok(Math.abs(S.pearson(a, a.map(v => -v)) + 1) < 1e-9);
+  assert.strictEqual(S.pearson([0.01, 0.02], [0.01, 0.02]), null, 'two samples must not yield a correlation');
+  assert.strictEqual(S.pearson(a, a.map(() => 0.005)), null, 'a flat series has no correlation, not a perfect one');
+});
+
+test('beta recovers a known slope; downside beta captures asymmetry', () => {
+  // At least 6 negative bars: downsideBeta refuses to fit a slope on fewer, by design.
+  const x = [0.01, -0.02, 0.03, -0.01, 0.02, -0.03, 0.015, 0.02, -0.012, 0.03, -0.02, 0.01, -0.015, 0.025, -0.018, 0.012];
+  assert.ok(Math.abs(S.beta(x.map(v => 2 * v), x) - 2) < 1e-9);
+  // Tracks 1:1 up, 3:1 down — the symmetric beta understates the downside.
+  const asym = x.map(v => v < 0 ? 3 * v : v);
+  const db = S.downsideBeta(asym, x);
+  assert.ok(db > 2.9 && db < 3.1, 'downside beta should be ~3, got ' + db);
+  assert.ok(S.beta(asym, x) < db, 'symmetric beta must understate an asymmetric downside');
+});
+
+test('amplification refuses to divide by a benchmark that barely moved', () => {
+  assert.strictEqual(S.amplification(-0.05, -0.001), null);
+  assert.ok(Math.abs(S.amplification(-0.055, -0.02) - 2.75) < 1e-9);
+});
+
+test('scoreParts renormalises over available evidence and returns null from nothing', () => {
+  const all = S.scoreParts([{ k: 'a', w: 0.5, v: 1 }, { k: 'b', w: 0.5, v: 0 }]);
+  assert.strictEqual(all.score, 0.5);
+  assert.strictEqual(all.coverage, 1);
+  // b missing: the score must reflect a alone, NOT treat b as zero.
+  const partial = S.scoreParts([{ k: 'a', w: 0.5, v: 1 }, { k: 'b', w: 0.5, v: null }]);
+  assert.strictEqual(partial.score, 1, 'a missing component must not drag the score toward zero');
+  assert.strictEqual(partial.coverage, 0.5);
+  assert.deepStrictEqual(partial.missing, ['b']);
+  assert.strictEqual(S.scoreParts([{ k: 'a', w: 1, v: null }]), null, 'no evidence must produce no score');
+});
+
+test('ramp inverts when hi < lo', () => {
+  assert.strictEqual(S.ramp(0.40, 0.40, 0.03), 0);
+  assert.strictEqual(S.ramp(0.03, 0.40, 0.03), 1);
+  assert.strictEqual(S.ramp(0.50, 0.40, 0.03), 0, 'clamped');
+});
+
+/* ==================== data layer ==================== */
+test('snapshot builds windows and h1, and excludes a failed feed instead of zeroing it', async () => {
+  const snap = await mkSnap(RISK_OFF.concat([{ tk: 'DEAD', fail: true }]));
+  assert.ok(snap.tickers.length >= 12);
+  assert.ok(!snap.tickers.includes('DEAD'), 'a coin whose feed failed must not appear as a data point');
+  assert.ok(snap.errors.some(e => e.tk === 'DEAD'), 'the failure must be recorded, not swallowed');
+  const btc = snap.coins.BTC;
+  assert.ok(btc.win['15m'] && btc.win['1h'] && btc.win['4h'] && btc.win['24h'], 'all four windows present');
+  assert.ok(btc.win['15m'].ret.length >= 30);
+  assert.ok(btc.h1.close.length > 100, 'full-length 1h series needed for a 50 EMA');
+});
+
+/* ==================== breadth ==================== */
+test('breadth: risk-off scores negative with high stress; risk-on scores positive', async () => {
+  const off = breadth(await mkSnap(RISK_OFF, { marketDrift: -0.0004 }), { zigzag: ZZ });
+  assert.ok(off.ok);
+  assert.ok(off.score < -30, 'risk-off breadth should be clearly negative, got ' + off.score);
+  assert.ok(off.pctGreen < 30);
+  assert.ok(off.altStress > 40, 'synchronised alt selling should register stress, got ' + off.altStress);
+
+  const on = breadth(await mkSnap(flip(RISK_OFF), { marketDrift: 0.0004 }), { zigzag: ZZ });
+  assert.ok(on.score > 30, 'risk-on breadth should be clearly positive, got ' + on.score);
+  assert.ok(on.altStress < 45, 'a rally must not read as alt stress, got ' + on.altStress);
+});
+
+test('breadth refuses a market-wide claim from a handful of coins', async () => {
+  const snap = await mkSnap(RISK_OFF.slice(0, 4));
+  const b = breadth(snap, { zigzag: ZZ });
+  assert.strictEqual(b.ok, false);
+  assert.match(b.reason, /below the \d+-coin floor/);
+});
+
+test('altcoin stress is one-sided: it never goes negative in a rally', async () => {
+  const b = breadth(await mkSnap(flip(RISK_OFF), { marketDrift: 0.0006 }), { zigzag: ZZ });
+  assert.ok(b.altStress >= 0 && b.altStress <= 100);
+});
+
+/* ==================== correlation ==================== */
+test('correlation: a common-factor market reads as a single risk asset', async () => {
+  // Tiny idiosyncratic noise → the shared factor dominates.
+  const tight = RISK_OFF.map(s => ({ ...s, idio: 0.0001 }));
+  const c = correlation(await mkSnap(tight, { marketVol: 0.006 }));
+  assert.ok(c.ok);
+  assert.ok(c.avgCorrBtc > 0.75, 'expected tight correlation, got ' + c.avgCorrBtc);
+  assert.strictEqual(c.singleRiskAsset, true);
+  assert.strictEqual(c.level, 'high');
+});
+
+test('correlation: idiosyncratic noise reads as a market of independent coins', async () => {
+  const loose = RISK_OFF.map(s => ({ ...s, beta: 0.05, idio: 0.02 }));
+  const c = correlation(await mkSnap(loose, { marketVol: 0.001 }));
+  assert.ok(c.avgCorrBtc < 0.4, 'expected low correlation, got ' + c.avgCorrBtc);
+  assert.strictEqual(c.singleRiskAsset, false);
+});
+
+test('SYNCHRONIZED MARKET SELLING fires only when BTC is down AND 80%+ of alts fall with it', async () => {
+  const c = correlation(await mkSnap(RISK_OFF.map(s => ({ ...s, idio: 0.0002 })), { marketDrift: -0.0012, marketVol: 0.002 }));
+  assert.strictEqual(c.synchronizedSelling.flag, true);
+  assert.ok(c.synchronizedSelling.pctAltsDown >= 80);
+
+  const up = correlation(await mkSnap(flip(RISK_OFF).map(s => ({ ...s, idio: 0.0002 })), { marketDrift: 0.0012, marketVol: 0.002 }));
+  assert.strictEqual(up.synchronizedSelling.flag, false, 'a rally must never flag synchronised SELLING');
+});
+
+test('correlation identifies a coin decoupling from BTC', async () => {
+  const specs = RISK_OFF.map(s => ({ ...s, idio: 0.0002 }));
+  specs.push({ tk: 'ODD', drift: 0.0012, beta: 0, idio: 0.004, qv: 2e8, start: 300, seed: 4242 });
+  const c = correlation(await mkSnap(specs, { marketDrift: -0.001, marketVol: 0.004 }));
+  assert.ok(c.decoupled.some(x => x.tk === 'ODD'), 'a zero-beta coin should surface as decoupled: ' + JSON.stringify(c.decoupled));
+});
+
+/* ==================== beta ==================== */
+test('beta engine ranks amplification and flags high-beta alts', async () => {
+  const b = betaEngine(await mkSnap(RISK_OFF.map(s => ({ ...s, idio: 0.0003 })), { marketVol: 0.006, marketDrift: -0.0006 }));
+  assert.ok(b.ok);
+  assert.ok(b.coins.SUI.beta > b.coins.BTC.beta, 'SUI is specified at 2.1x BTC beta');
+  assert.ok(b.coins.SUI.beta > 1.5, 'got ' + b.coins.SUI.beta);
+  assert.ok(b.highBetaCoins.length > 0, 'high-beta alts should be listed');
+  assert.ok(b.highBetaCoins.every(x => x.tk !== 'BTC'));
+});
+
+test('coinVsMarket separates "weak" from "high beta doing exactly what beta implies"', async () => {
+  const specs = RISK_OFF.map(s => ({ ...s, idio: 0.0003 }));
+  specs.push({ tk: 'WEAK', drift: -0.006, beta: 1.0, idio: 0.0003, qv: 2e8, start: 300, seed: 555 });
+  const snap = await mkSnap(specs, { marketDrift: -0.0005, marketVol: 0.004 });
+  const betas = betaEngine(snap), corrs = correlation(snap);
+  const weak = coinVsMarket('WEAK', snap, betas, corrs);
+  assert.ok(weak.ok);
+  assert.ok(['weaker-than-market', 'decoupling-bearish'].includes(weak.klass), 'got ' + weak.klass);
+  // A high-beta coin falling in line with its beta must NOT be called weak.
+  const sui = coinVsMarket('SUI', snap, betas, corrs);
+  assert.notStrictEqual(sui.klass, 'weaker-than-market', 'SUI falls hard but only as much as its beta implies');
+});
+
+/* ==================== structure ==================== */
+test('structure reads a bullish HH/HL sequence and a bearish LH/LL sequence', () => {
+  const up = [];
+  for (let leg = 0; leg < 5; leg++) {
+    const base = 100 + leg * 10;
+    for (let i = 0; i < 10; i++) up.push(base + i);          // rally
+    for (let i = 0; i < 5; i++) up.push(base + 10 - i);      // pullback, but to a higher low
+  }
+  const su = structure(up, ZZ);
+  assert.ok(su.ok, su.reason);
+  assert.strictEqual(su.verdict, 'bullish', JSON.stringify(su.sequence));
+
+  const down = up.map(v => 300 - v);
+  const sd = structure(down, ZZ);
+  assert.ok(sd.ok);
+  assert.strictEqual(sd.verdict, 'bearish', JSON.stringify(sd.sequence));
+  assert.ok(sd.invalidationLevel > 0, 'a bearish read must quote the level that would invalidate it');
+});
+
+test('a long in bearish structure is told it is fighting the structure', () => {
+  const down = [];
+  for (let leg = 0; leg < 5; leg++) {
+    const base = 200 - leg * 10;
+    for (let i = 0; i < 10; i++) down.push(base - i);
+    for (let i = 0; i < 5; i++) down.push(base - 10 + i);
+  }
+  const st = structure(down, ZZ);
+  assert.strictEqual(st.verdict, 'bearish');
+  assert.strictEqual(fightingStructure(st, 1).fighting, true);
+  assert.match(fightingStructure(st, 1).text, /fighting bearish market structure/);
+  assert.strictEqual(fightingStructure(st, -1).fighting, false);
+});
+
+test('unreadable structure returns silence, never a reassuring "not fighting"', () => {
+  const flat = new Array(40).fill(100);
+  const st = structure(flat, ZZ);
+  assert.strictEqual(st.ok, false);
+  assert.strictEqual(fightingStructure(st, 1), null, 'no structure means no claim in either direction');
+});
+
+/* ==================== transmission ==================== */
+test('lead-lag detects a follower that copies the leader two bars later', () => {
+  const lead = [];
+  for (let i = 0; i < 80; i++) lead.push(Math.sin(i / 3) * 0.01);
+  const follow = [0, 0].concat(lead.slice(0, -2));
+  const ll = leadLag(lead, follow, 4);
+  assert.strictEqual(ll.lag, 2, 'expected a 2-bar lag, got ' + ll.lag);
+  assert.strictEqual(ll.leads, true);
+});
+
+test('transmission names BTC as the leader when alts receive the move LATE', async () => {
+  // BTC on the factor immediately; everything else two bars behind it. This is what "BTC-led"
+  // actually looks like in data, as distinct from "BTC and the alts both fell".
+  const led = RISK_OFF.map(s => ({ ...s, idio: 0.0002, lag: s.tk === 'BTC' ? 0 : 2 }));
+  const t = transmission(await mkSnap(led, { marketDrift: -0.001, marketVol: 0.006 }));
+  assert.ok(t.ok);
+  assert.strictEqual(t.leader, 'BTC', 'got ' + t.leader + ' — ' + t.leaderWhy);
+  assert.strictEqual(t.leadLag.btcToAlt.leads, true);
+  assert.ok(t.leadLag.btcToAlt.lag >= 1, 'the detected lag should be positive, got ' + t.leadLag.btcToAlt.lag);
+  assert.match(t.narrative, /BTC-led/);
+  assert.match(t.caveat, /traded value/, 'tier cuts must be labelled as a market-cap proxy');
+});
+
+test('simultaneous high-beta selling is NOT reported as BTC-led', async () => {
+  // Same factor, same bar, differing beta. Nothing leads anything here — the alts simply move
+  // more — and the engine must not manufacture a leader out of magnitude alone.
+  const t = transmission(await mkSnap(RISK_OFF.map(s => ({ ...s, idio: 0.0002 })), { marketDrift: -0.001, marketVol: 0.005 }));
+  assert.ok(t.ok);
+  assert.strictEqual(t.leadLag.btcToAlt.leads, false, 'no time lag exists in this fixture');
+  assert.ok(t.narrative.length > 40);
+});
+
+/* ==================== open interest ==================== */
+test('OI quadrant matrix maps all four cells and a flat deadband', () => {
+  assert.strictEqual(quadrantOf(0.05, 0.05), 'up-up');
+  assert.strictEqual(quadrantOf(0.05, -0.05), 'up-down');
+  assert.strictEqual(quadrantOf(-0.05, 0.05), 'down-up');
+  assert.strictEqual(quadrantOf(-0.05, -0.05), 'down-down');
+  assert.strictEqual(quadrantOf(0.0001, 0.05), 'flat');
+  assert.strictEqual(quadrantOf(null, 0.05), null);
+});
+
+test('price down + OI down is named DELEVERAGING, not fresh shorts', async () => {
+  const snap = await mkSnap(RISK_OFF, { marketDrift: -0.002 });
+  const oiRaw = {
+    available: true, venue: 'test', asOf: Date.now(),
+    data: { period: '15m', series: { BTC: [{ oi: 1000, val: 1e9, t: 1 }, { oi: 990, val: 9.9e8, t: 2 }, { oi: 980, val: 9.8e8, t: 3 }, { oi: 970, val: 9.7e8, t: 4 }, { oi: 960, val: 9.6e8, t: 5 }, { oi: 950, val: 9.5e8, t: 6 }, { oi: 940, val: 9.4e8, t: 7 }, { oi: 900, val: 9e8, t: 8 }, { oi: 880, val: 8.8e8, t: 9 }] } }
+  };
+  const oi = openInterestEngine(snap, oiRaw);
+  assert.ok(oi.available);
+  assert.strictEqual(oi.market.quadrant, 'down-down');
+  assert.strictEqual(oi.market.deleveraging, true);
+  assert.strictEqual(oi.market.freshShorts, false);
+  assert.match(oi.market.meaning, /DELEVERAGING/);
+});
+
+test('no OI feed yields available:false with a reason and NO quadrant', async () => {
+  const oi = openInterestEngine(await mkSnap(RISK_OFF), { available: false, reason: 'geo-blocked' });
+  assert.strictEqual(oi.available, false);
+  assert.match(oi.reason, /geo-blocked/);
+  assert.strictEqual(oi.market, undefined, 'an unavailable feed must not produce a market quadrant');
+  assert.match(oi.note, /cannot distinguish forced long liquidation from fresh short selling/);
+});
+
+/* ==================== funding ==================== */
+test('funding names the crowded side and warns when price falls into an uncapitulated long book', async () => {
+  const snap = await mkSnap(RISK_OFF, { marketDrift: -0.002 });
+  const raw = { available: true, venue: 'test', asOf: Date.now(), data: {} };
+  for (const s of RISK_OFF) raw.data[s.tk] = { rate: 0.0008, markPrice: 1, nextFundingTime: 0 };
+  const f = fundingEngine(snap, raw, { available: false, reason: 'not fetched' }, { btcRet4h: -0.03 });
+  assert.ok(f.available);
+  assert.strictEqual(f.crowding, 'longs-heavily-crowded');
+  assert.strictEqual(f.extreme, true);
+  assert.ok(f.messages.some(m => /remains positive despite falling price/.test(m)), JSON.stringify(f.messages));
+});
+
+test('funding reports normalisation when the latest print is much smaller than prior ones', async () => {
+  const snap = await mkSnap(RISK_OFF);
+  const raw = { available: true, venue: 'test', asOf: Date.now(), data: {} };
+  for (const s of RISK_OFF) raw.data[s.tk] = { rate: 0.0001 };
+  const hist = { available: true, data: { rates: {} } };
+  for (const s of RISK_OFF) hist.data.rates[s.tk] = [0.0009, 0.0008, 0.0007, 0.0001];
+  const f = fundingEngine(snap, raw, hist, { btcRet4h: -0.03 });
+  assert.strictEqual(f.reversal.available, true);
+  assert.strictEqual(f.reversal.normalising, true);
+  assert.ok(f.messages.some(m => /less extreme/.test(m)), JSON.stringify(f.messages));
+});
+
+test('no funding feed yields available:false and no crowding verdict', async () => {
+  const f = fundingEngine(await mkSnap(RISK_OFF), { available: false, reason: 'unreachable' }, null, {});
+  assert.strictEqual(f.available, false);
+  assert.strictEqual(f.crowding, undefined);
+  assert.match(f.note, /crowded long book/);
+});
+
+/* ==================== liquidity ==================== */
+test('liquidity flags a vacuum when price impact is abnormal AND the bar is violent', async () => {
+  // A coin that suddenly moves hard on unchanged volume is, by definition, a thinner book.
+  const specs = RISK_OFF.map(s => ({ ...s }));
+  specs.push({ tk: 'THIN', drift: 0, beta: 0.2, idio: 0.0005, qv: 1e8, start: 100, seed: 31337, shockAt: 6, shock: -0.05, wick: 0.03 });
+  const snap = await mkSnap(specs, { marketVol: 0.003 });
+  const L = liquidityEngine(snap, { available: false, reason: 'no book' });
+  assert.ok(L.ok);
+  assert.strictEqual(L.depthAvailable, false);
+  assert.match(L.tier, /price-impact estimate/);
+  assert.match(L.caveat, /ESTIMATE/);
+  assert.ok(L.coins.THIN.impactPctile > 0.8, 'the shocked coin should sit in the top decile of its own impact history, got ' + L.coins.THIN.impactPctile);
+  assert.strictEqual(L.coins.THIN.vacuum, true);
+});
+
+test('a coin with no volume data is marked unavailable, not liquid', async () => {
+  const specs = RISK_OFF.map(s => ({ ...s }));
+  specs.push({ tk: 'NOVOL', drift: 0, beta: 1, idio: 0.001, qv: 0, start: 10, noVol: true, seed: 21 });
+  const L = liquidityEngine(await mkSnap(specs), { available: false, reason: 'no book' });
+  assert.strictEqual(L.coins.NOVOL.tier, 'unavailable');
+  assert.strictEqual(L.coins.NOVOL.vacuum, false);
+  assert.match(L.coins.NOVOL.reason, /no volume data|bars carry volume/);
+});
+
+/* ==================== liquidation cascade ==================== */
+test('cascade runs INFERRED and caps confidence at 65 with no positioning data at all', async () => {
+  const specs = RISK_OFF.map(s => ({ ...s, shockAt: 3, shock: -0.02, volSpikeAt: 3, volSpike: 6, idio: 0.0002 }));
+  const snap = await mkSnap(specs, { marketDrift: -0.002, marketVol: 0.004 });
+  const br = breadth(snap, { zigzag: ZZ }), c = correlation(snap);
+  const L = liquidationEngine(snap, { breadth: br, correlation: c, oi: { available: false }, funding: { available: false }, liquidations: { available: false } });
+  assert.strictEqual(L.mode, 'inferred');
+  assert.strictEqual(L.cap, CAP_INFERRED);
+  assert.ok(L.cascade.confidence <= CAP_INFERRED, 'confidence must be capped, got ' + L.cascade.confidence);
+  assert.match(L.modeNote, /No liquidation feed was read/);
+  assert.deepStrictEqual(L.missing.sort(), ['funding', 'liquidation feed', 'open interest']);
+});
+
+test('cascade evidence NEVER claims liquidations when no feed was read', async () => {
+  const specs = RISK_OFF.map(s => ({ ...s, shockAt: 3, shock: -0.03, volSpikeAt: 3, volSpike: 8, idio: 0.0002 }));
+  const snap = await mkSnap(specs, { marketDrift: -0.003 });
+  const L = liquidationEngine(snap, {
+    breadth: breadth(snap, { zigzag: ZZ }), correlation: correlation(snap),
+    oi: { available: false }, funding: { available: false }, liquidations: { available: false }
+  });
+  for (const e of L.evidence) {
+    assert.ok(!/liquidation feed|liquidations elevated/i.test(e), 'fabricated liquidation evidence: ' + e);
+  }
+});
+
+test('cascade confidence cap rises to 85 once OI and funding are present', async () => {
+  const specs = RISK_OFF.map(s => ({ ...s, shockAt: 3, shock: -0.03, volSpikeAt: 3, volSpike: 8, idio: 0.0002 }));
+  const snap = await mkSnap(specs, { marketDrift: -0.003 });
+  const L = liquidationEngine(snap, {
+    breadth: breadth(snap, { zigzag: ZZ }), correlation: correlation(snap),
+    oi: { available: true, market: { oiChange: -0.06, deleveraging: true } },
+    funding: { available: true, medianRate: 0.0007 },
+    liquidations: { available: false }
+  });
+  assert.strictEqual(L.cap, CAP_PARTIAL);
+  assert.ok(L.cascade.detected, 'a violent broad drop with OI down and funding hot is a cascade');
+  assert.strictEqual(L.cascade.side, 'long');
+  assert.ok(L.evidence.some(e => /open interest/.test(e)));
+  assert.ok(L.evidence.some(e => /funding/.test(e)));
+});
+
+test('a calm market is not a cascade', async () => {
+  const snap = await mkSnap(RISK_OFF.map(s => ({ ...s, drift: 0, idio: 0.0003 })), { marketDrift: 0, marketVol: 0.0008 });
+  const L = liquidationEngine(snap, {
+    breadth: breadth(snap, { zigzag: ZZ }), correlation: correlation(snap),
+    oi: { available: false }, funding: { available: false }, liquidations: { available: false }
+  });
+  assert.strictEqual(L.cascade.detected, false);
+});
+
+/* ==================== recovery ==================== */
+test('recovery and continuation are complementary and labelled heuristic', async () => {
+  const snap = await mkSnap(RISK_OFF, { marketDrift: -0.001 });
+  const r = recoveryEngine(snap, { zigzag: ZZ, oi: { available: false }, funding: { available: false } });
+  assert.ok(r.ok);
+  assert.strictEqual(r.recoveryProb + r.continuationRisk, 100);
+  assert.strictEqual(r.basis, 'heuristic');
+  assert.match(r.basisNote, /NOT measured historical base rates/);
+});
+
+test('a straight-line decline does not count as "no failed rally" evidence for recovery', () => {
+  const monotonic = Array.from({ length: 24 }, (_, i) => 100 - i);
+  const fr = failedRally(monotonic);
+  assert.strictEqual(fr.hadRally, false, 'there were no rallies, so there were no failed ones');
+  assert.strictEqual(fr.failed, false);
+
+  const bouncedAndFailed = [100, 98, 96, 94, 96.5, 95, 93, 90, 92, 88];
+  const fr2 = failedRally(bouncedAndFailed, 0.02);
+  assert.strictEqual(fr2.hadRally, true);
+  assert.strictEqual(fr2.failed, true, 'a bounce followed by a new low is a failed relief rally');
+});
+
+/* ==================== regime ==================== */
+test('a detected cascade outranks the plain-pullback classification', async () => {
+  const snap = await mkSnap(RISK_OFF, { marketDrift: -0.001 });
+  const br = breadth(snap, { zigzag: ZZ });
+  const r = classify({
+    breadth: br, correlation: correlation(snap), transmission: transmission(snap),
+    liquidation: { ok: true, mode: 'inferred', cascade: { detected: true, side: 'long', confidence: 62 }, evidence: ['BTC -3.1% in 30m'] },
+    oi: { available: false }, funding: { available: false }, liquidity: { ok: true, marketVacuum: false },
+    recovery: { ok: true, selloff: true, verdict: 'undecided' }, sector: { available: false }, btcStructure: { ok: false }
+  });
+  assert.strictEqual(r.regime, 'long-liquidation-cascade');
+  assert.strictEqual(r.tone, 'red');
+  assert.ok(r.why.some(w => /62%/.test(w)));
+});
+
+test('regime is INSUFFICIENT DATA when breadth could not be computed', () => {
+  const r = classify({ breadth: { ok: false, reason: 'only 3 coins loaded' }, correlation: {}, transmission: {}, liquidation: {}, oi: {}, funding: {}, liquidity: {}, recovery: {}, sector: {} });
+  assert.strictEqual(r.regime, 'unknown');
+  assert.strictEqual(r.label, 'INSUFFICIENT DATA');
+});
+
+test('sector weakness refuses to name a sector without enough mapped coins', async () => {
+  const sw = sectorWeakness(await mkSnap(RISK_OFF.slice(0, 5)));
+  assert.strictEqual(sw.available, false);
+  assert.match(sw.reason, /too few|fewer than two/);
+});
+
+/* ==================== position risk ==================== */
+test('liquidation estimate matches the isolated-margin formula for both sides', () => {
+  // 4x long at 100, 0.5% maintenance → ~75.5
+  assert.ok(Math.abs(estimateLiquidation(100, 1, 4, 0.005) - 75.5) < 1e-9);
+  assert.ok(Math.abs(estimateLiquidation(100, -1, 4, 0.005) - 124.5) < 1e-9);
+  assert.strictEqual(estimateLiquidation(100, 1, 0, 0.005), null);
+});
+
+async function riskFixture(overrides) {
+  const snap = await mkSnap(RISK_OFF, { marketDrift: -0.0008 });
+  const engines = {
+    breadth: breadth(snap, { zigzag: ZZ }), correlation: correlation(snap), beta: betaEngine(snap),
+    oi: { available: false }, funding: { available: false },
+    liquidity: liquidityEngine(snap, { available: false, reason: 'no book' }),
+    liquidation: { ok: true, cascade: { detected: false, side: 'long', confidence: 20 } },
+    recovery: recoveryEngine(snap, { zigzag: ZZ, oi: { available: false }, funding: { available: false } }),
+    regimeInfo: { label: 'BTC-LED CORRECTION' }
+  };
+  return { snap, engines, price: snap.coins.SUI.price, ...overrides };
+}
+
+test('position stress scores from available inputs and names what was missing', async () => {
+  const { snap, engines, price } = await riskFixture();
+  const r = positionRisk({ tk: 'SUI', sym: 'SUIUSDT', side: 1, entry: price * 1.1, lev: 4 }, snap, engines, { zigzag: ZZ });
+  assert.ok(r.ok, r.reason);
+  assert.ok(r.stress >= 0 && r.stress <= 100);
+  assert.strictEqual(r.liqSource, 'estimated');
+  assert.match(r.liqEstimateNote, /ESTIMATED/);
+  assert.ok(r.stressCoverage > 0 && r.stressCoverage <= 1);
+  assert.ok(r.riskMap.some(x => x.k === 'current'));
+  assert.ok(r.recoveryRequirement.length > 20);
+});
+
+test('a venue-supplied liquidation price overrides the estimate', async () => {
+  const { snap, engines, price } = await riskFixture();
+  const r = positionRisk({ tk: 'SUI', sym: 'SUIUSDT', side: 1, entry: price * 1.1, lev: 4, liq: price * 0.5 }, snap, engines, { zigzag: ZZ });
+  assert.strictEqual(r.liqSource, 'venue-supplied');
+  assert.ok(Math.abs(r.liq - price * 0.5) < 1e-9);
+  assert.strictEqual(r.liqEstimateNote, null);
+});
+
+test('a position already past its liquidation level is CRITICAL, never "91% away"', async () => {
+  const { snap, engines, price } = await riskFixture();
+  // A long whose liquidation price sits ABOVE the market is already gone.
+  const r = positionRisk({ tk: 'SUI', sym: 'SUIUSDT', side: 1, entry: price * 3, lev: 4 }, snap, engines, { zigzag: ZZ });
+  assert.strictEqual(r.pastLiquidation, true);
+  assert.strictEqual(r.stress, 100);
+  assert.strictEqual(r.statusLabel, 'PAST LIQUIDATION LEVEL');
+  assert.ok(r.distanceToLiquidation === 0, 'distance must not report a comfortable margin');
+  assert.strictEqual(r.averageDown.hardFail, true);
+  assert.strictEqual(r.averageDown.verdict, 'no');
+});
+
+test('THE AVERAGE-DOWN GATE HAS NO PATH TO "ADD"', async () => {
+  const { snap, engines, price } = await riskFixture();
+  const verdicts = new Set();
+  // Sweep a wide range of entries, leverages and market conditions.
+  for (const mult of [0.6, 0.9, 1.0, 1.05, 1.3, 2.0]) {
+    for (const lev of [1, 2, 4, 10, 25]) {
+      for (const cascade of [true, false]) {
+        const eng = { ...engines, liquidation: { ok: true, cascade: { detected: cascade, side: 'long', confidence: 75 } } };
+        const r = positionRisk({ tk: 'SUI', sym: 'SUIUSDT', side: 1, entry: price * mult, lev }, snap, eng, { zigzag: ZZ });
+        if (!r.ok) continue;
+        verdicts.add(r.averageDown.verdict);
+        assert.ok(!/\byes\b|\badd now\b|recommend adding|increase your position/i.test(r.averageDown.text),
+          'gate produced an add recommendation: ' + r.averageDown.text);
+      }
+    }
+  }
+  for (const v of verdicts) {
+    assert.ok(['no', 'wait', 'conditions-improving', 'not-applicable'].includes(v), 'unexpected verdict: ' + v);
+  }
+  assert.ok(verdicts.has('no') || verdicts.has('wait'), 'hostile conditions must produce a refusal');
+});
+
+test('an active cascade against the position forces a hard "do NOT average down"', async () => {
+  const { snap, engines, price } = await riskFixture();
+  const eng = { ...engines, liquidation: { ok: true, cascade: { detected: true, side: 'long', confidence: 80 } } };
+  const r = positionRisk({ tk: 'SUI', sym: 'SUIUSDT', side: 1, entry: price * 1.05, lev: 2 }, snap, eng, { zigzag: ZZ });
+  assert.strictEqual(r.averageDown.hardFail, true);
+  assert.match(r.averageDown.text, /Do NOT average down yet/);
+});
+
+test('an entry in the wrong currency is refused, not turned into a fake emergency', async () => {
+  const { snap, engines, price } = await riskFixture();
+  // Entries are stored in ₹; typing the USDT figure lands ~88x low. That must read as a data
+  // error, not as a position that is down 98%.
+  const r = positionRisk({ tk: 'SUI', sym: 'SUIUSDT', side: 1, entry: price / 88, lev: 4 }, snap, engines, { zigzag: ZZ });
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.unitMismatch, true);
+  assert.match(r.reason, /currency mix-up/);
+
+  const hi = positionRisk({ tk: 'SUI', sym: 'SUIUSDT', side: 1, entry: price * 88, lev: 4 }, snap, engines, { zigzag: ZZ });
+  assert.strictEqual(hi.unitMismatch, true);
+
+  // A genuinely bad trade (down 40%) must still be scored, not dismissed as a typo.
+  const real = positionRisk({ tk: 'SUI', sym: 'SUIUSDT', side: 1, entry: price * 1.67, lev: 4 }, snap, engines, { zigzag: ZZ });
+  assert.strictEqual(real.ok, true, 'a 40% drawdown is a real position, not a unit error');
+});
+
+test('the risk map always reads as a price axis, highest rung first', async () => {
+  const { snap, engines, price } = await riskFixture();
+  const r = positionRisk({ tk: 'SUI', sym: 'SUIUSDT', side: 1, entry: price * 1.1, lev: 4 }, snap, engines, { zigzag: ZZ });
+  assert.ok(r.ok);
+  const px = r.riskMap.map(x => x.px);
+  for (let i = 1; i < px.length; i++) assert.ok(px[i] <= px[i - 1], 'rungs out of price order: ' + JSON.stringify(px));
+  assert.ok(r.riskMap.some(x => x.k === 'current'));
+});
+
+test('a position in a coin outside the tracked universe is refused, not guessed', async () => {
+  const { snap, engines } = await riskFixture();
+  const r = positionRisk({ tk: 'NOTREAL', sym: 'NOTREALUSDT', side: 1, entry: 10, lev: 4 }, snap, engines, { zigzag: ZZ });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.reason, /not in the tracked universe/);
+});
+
+/* ==================== alerts ==================== */
+function fakeIntel(over) {
+  return Object.assign({
+    breadth: { ok: true, score: -70, pctRed: 88, pctGreen: 12, pctAbove20: 8, altStress: 75, alt: { pctRed: 90, medianRet4h: -0.05 }, ethVsBtc: { h4: 0.001 } },
+    regime: { label: 'BTC-LED CORRECTION' },
+    liquidation: { ok: true, mode: 'inferred', cascade: { detected: false, side: 'long', confidence: 40 }, evidence: [] },
+    funding: { available: false }, liquidity: { ok: true, marketVacuum: false, pctVacuum: 5, tier: 'estimate' },
+    recovery: { ok: true, selloff: true, verdict: 'undecided', recoveryProb: 40, continuationRisk: 60, levels: { text: '' } }
+  }, over || {});
+}
+
+test('alerts fire on the transition and stay quiet while the condition persists', () => {
+  const i = fakeIntel();
+  let st = {};
+  const a1 = buildAlerts(i, st, { now: 1000 }); st = a1.state;
+  assert.ok(a1.alerts.some(a => a.key === 'market-selloff'), 'first crossing must fire');
+  const a2 = buildAlerts(i, st, { now: 2000 }); st = a2.state;
+  assert.strictEqual(a2.alerts.length, 0, 'a persisting condition must not re-fire');
+  const a3 = buildAlerts(i, st, { now: 1000 + 60 * 60 * 1000 });
+  assert.strictEqual(a3.alerts.length, 0, 'even past the cooldown, a still-true condition must not re-fire');
+});
+
+test('alerts re-arm only after the condition clears its hysteresis band', () => {
+  let st = {};
+  st = buildAlerts(fakeIntel(), st, { now: 1000 }).state;
+  // Recovers past the re-arm band.
+  const calm = fakeIntel({ breadth: { ok: true, score: -10, pctRed: 40, pctGreen: 60, pctAbove20: 55, altStress: 20, alt: { pctRed: 40, medianRet4h: 0 }, ethVsBtc: { h4: 0 } } });
+  st = buildAlerts(calm, st, { now: 2000 }).state;
+  const back = buildAlerts(fakeIntel(), st, { now: 1000 + 60 * 60 * 1000, cooldownMs: 0 });
+  assert.ok(back.alerts.some(a => a.key === 'market-selloff'), 'a genuine new event must fire again');
+});
+
+test('a cascade alert built without a liquidation feed says so in its own text', () => {
+  const i = fakeIntel({ liquidation: { ok: true, mode: 'inferred', cascade: { detected: true, side: 'long', confidence: 61 }, evidence: ['BTC -3.1% in 30m'] } });
+  const { alerts } = buildAlerts(i, {}, { now: 1000 });
+  const c = alerts.find(a => a.key === 'liquidation-cascade');
+  assert.ok(c, 'cascade alert should fire');
+  assert.match(c.text, /No liquidation feed/);
+  assert.strictEqual(c.confidence, 61);
+});
+
+/* ==================== derivatives adapter honesty ==================== */
+test('liquidations are ALWAYS reported unavailable, with the reason', async () => {
+  const d = createDerivs({});
+  const r = await d.liquidations();
+  assert.strictEqual(r.available, false);
+  assert.strictEqual(r.data, null);
+  assert.match(r.reason, /WebSocket/);
+});
+
+test('a disabled derivatives adapter returns the unavailable envelope, never empty data', async () => {
+  const d = createDerivs({ enabled: false });
+  for (const fn of ['funding', 'openInterest', 'depth', 'fundingHistory']) {
+    const r = await d[fn](['BTC']);
+    assert.strictEqual(r.available, false, fn + ' should be unavailable');
+    assert.ok(typeof r.reason === 'string' && r.reason.length > 0, fn + ' must carry a reason');
+    assert.strictEqual(r.data, null, fn + ' must not return a data object');
+  }
+});
+
+/* ==================== history & backtest ==================== */
+test('the backtester refuses to state a rate from an insufficient sample', () => {
+  fs.mkdirSync(TMP, { recursive: true });
+  const h = createHistory({ dir: TMP });
+  h.__reset();
+  const empty = h.backtest('x', () => true);
+  assert.strictEqual(empty.ok, false);
+  assert.strictEqual(empty.insufficient, true);
+  assert.match(empty.reason, /No history recorded yet/);
+
+  // Three matching snapshots is not a base rate.
+  const base = Date.now() - 10 * 3600 * 1000;
+  for (let i = 0; i < 6; i++) {
+    h.record({ ok: true, ts: base + i * 15 * 60000, regime: { regime: 'x' }, breadth: { ok: true, score: -70, altStress: 90 }, __prices: { BTC: 100 + i, ETH: 50 + i } });
+  }
+  const few = h.backtest('stress', r => r.stress > 80);
+  assert.strictEqual(few.insufficient, true);
+  assert.match(few.note, /not a base rate/);
+  h.__reset();
+});
+
+test('the backtester measures forward returns against later snapshots', () => {
+  fs.mkdirSync(TMP, { recursive: true });
+  const h = createHistory({ dir: TMP });
+  h.__reset();
+  const base = Date.now() - 48 * 3600 * 1000;
+  // 60 snapshots 15m apart; price rises steadily so forward returns must be positive.
+  for (let i = 0; i < 60; i++) {
+    h.record({ ok: true, ts: base + i * 15 * 60000, regime: { regime: 'x' }, breadth: { ok: true, score: -70, altStress: 90 }, __prices: { BTC: 100 * Math.pow(1.01, i), ETH: 50 * Math.pow(1.01, i) } });
+  }
+  const bt = h.backtest('stress', r => r.stress > 80, { minSample: 10 });
+  assert.strictEqual(bt.ok, true);
+  assert.ok(bt.horizons['15m'].samples >= 10, JSON.stringify(bt.horizons['15m']));
+  assert.ok(bt.horizons['15m'].medianReturn > 0, 'a rising tape must produce positive forward returns');
+  assert.strictEqual(bt.horizons['15m'].pctPositive, 100);
+  assert.strictEqual(bt.insufficient, false);
+  h.__reset();
+  try { fs.rmSync(TMP, { recursive: true, force: true }); } catch (e) { }
+});
+
+/* ==================== cross-cutting honesty guards ==================== */
+test('GUARD: no engine publishes a market-wide score when nothing loaded', async () => {
+  const empty = { ts: Date.now(), coins: {}, tickers: [], alts: [], windows: [], errors: [], coverage: 0 };
+  assert.strictEqual(breadth(empty, { zigzag: ZZ }).ok, false);
+  assert.strictEqual(correlation(empty).ok, false);
+  assert.strictEqual(betaEngine(empty).ok, false);
+  assert.strictEqual(transmission(empty).ok, false);
+  assert.strictEqual(liquidationEngine(empty, {}).ok, false);
+  assert.strictEqual(recoveryEngine(empty, { zigzag: ZZ }).ok, false);
+  assert.strictEqual(liquidityEngine(empty, null).ok, false);
+});
+
+test('GUARD: every unavailable result carries a human-readable reason', async () => {
+  const snap = await mkSnap(RISK_OFF);
+  const REASON = 'futures venue unreachable from this region';
+  const results = [
+    openInterestEngine(snap, { available: false, reason: REASON }),
+    fundingEngine(snap, { available: false, reason: REASON }, null, {}),
+    liquidityEngine(snap, { available: false, reason: REASON })
+  ];
+  for (const r of results) {
+    if (r.available === false) assert.ok(typeof r.reason === 'string' && r.reason.length > 3, JSON.stringify(r).slice(0, 120));
+  }
+});
+
+test('GUARD: intel/ never reaches an exchange directly — only through injected loaders', () => {
+  const dir = path.join(__dirname, '..', 'intel');
+  for (const f of fs.readdirSync(dir).filter(x => x.endsWith('.js'))) {
+    const src = fs.readFileSync(path.join(dir, f), 'utf8');
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    const hasFetch = /\bfetch\s*\(/.test(code);
+    // derivs.js and global.js ARE the adapters — they are the only files allowed to call out.
+    if (f === 'derivs.js' || f === 'global.js') { assert.ok(hasFetch, f + ' is an adapter and should call fetch'); continue; }
+    assert.ok(!hasFetch, `${f} must not open its own connection — candles come from the injected loadCrypto`);
+  }
+});
