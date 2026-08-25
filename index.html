@@ -171,6 +171,11 @@
   .mhmacro{background:var(--panel2);border:1px solid rgba(147,197,253,.32);border-radius:12px;padding:12px 13px;margin:10px 0}
   .mhrel{background:#0d1420;border:1px solid var(--line);border-left-width:3px;border-radius:9px;padding:10px 12px;margin:9px 0}
   .mhblock{background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.5);color:#fecaca;border-radius:11px;padding:11px 13px;margin:10px 0;font-size:13px;line-height:1.65}
+  .mhdrv{display:flex;justify-content:space-between;gap:10px;align-items:baseline;font-size:12.5px;padding:5px 8px;border-radius:7px;background:#0d1420;border:1px solid var(--line);margin-bottom:4px;flex-wrap:wrap}
+  .mhfrag{background:var(--panel2);border:1px solid var(--line);border-left-width:3px;border-radius:12px;padding:12px 13px;margin:10px 0}
+  .mhlegs{margin-top:6px;font-size:12px;line-height:1.75}
+  .mhleg .x{color:var(--sell);font-weight:700}.mhleg .ok{color:var(--buy);font-weight:700}.mhleg .unk{color:var(--faint);font-weight:700}
+  .mhleg{padding:1px 0}
 </style>
 </head>
 <body>
@@ -1404,6 +1409,51 @@ function renderIntel(d){
       ⚠ <b>MACRO UNAVAILABLE</b> — ${mac.reason||''}<br>
       <span class="sub" style="color:#fde68a">${mac.warning||''}</span></div>`;
   }
+  /* ---- WHICH MACRO FACTOR IS MOVING CRYPTO ----
+     Ranked, signed toward crypto, and it names the thing. "Dragging" means bad for coins even
+     when the factor itself went up — the only framing useful to someone holding them. */
+  const at=d.attribution;
+  if(at&&at.ok&&at.drivers.length){
+    const rows=at.drivers.slice(0,5).map(x=>{
+      const col=x.direction==='boosting'?'var(--buy)':'var(--sell)';
+      const arrow=x.direction==='boosting'?'▲':'▼';
+      return `<div class="mhdrv">
+        <span><b>${x.name}</b> <span class="sub">${x.move>=0?'+':''}${(x.move*100).toFixed(1)}% · β ${x.beta} · r ${x.corr}</span></span>
+        <span style="color:${col};font-family:var(--mono)">${arrow} ${x.contribution>=0?'+':''}${(x.contribution*100).toFixed(2)}%${x.share!=null?` <span class="sub">(${Math.round(x.share*100)}% of the move)</span>`:''}</span>
+      </div>`;}).join('');
+    macroHtml+=`<div class="mhmacro" style="border-color:rgba(167,139,250,.35)">
+      <b>🎯 What is actually moving crypto</b>
+      <div class="sub" style="margin:5px 0 8px;line-height:1.65">${at.headline}</div>
+      ${rows}
+      <div class="small" style="margin-top:7px">Contribution = this factor's move × BTC's beta to it. ${at.caveat}</div>
+    </div>`;
+  }
+
+  /* ---- IS THE MOVE STANDING ON ANYTHING? ----
+     The answer to "BTC is rallying and will crash". It never says that — it says how many of the
+     move's own supports are missing, and names them. */
+  const fg=d.fragility;
+  if(fg&&fg.ok&&fg.active&&fg.score!=null){
+    const sev=fg.score>=70?'red':fg.score>=50?'amber':'ok';
+    const col=sev==='red'?'var(--sell)':sev==='amber'?'#fbbf24':'var(--buy)';
+    /* Three marks, not two. A support that could not be MEASURED gets a grey "?" — never a green
+       tick, which would read as "checked and fine" for something nothing checked. */
+    const mark={missing:['x','✗'],ok:['ok','✓'],unknown:['unk','?']};
+    const legs=fg.signals.map(sx=>{const [cls,ch]=mark[sx.state]||mark.unknown;
+      return `<div class="mhleg"><span class="${cls}">${ch}</span> ${sx.detail}</div>`;}).join('');
+    macroHtml+=`<div class="mhfrag" style="border-left-color:${col}">
+      <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:baseline">
+        <b>${fg.direction==='up'?'📈':'📉'} ${fg.direction==='up'?'RALLY':'DECLINE'} SUPPORT — BTC ${fg.move>=0?'+':''}${(fg.move*100).toFixed(1)}% / 24h</b>
+        <div><b style="color:${col};font-size:18px">${fg.score}/100</b> <span class="sub">fragility · ${fg.label}</span></div>
+      </div>
+      <div class="sub" style="margin:6px 0;line-height:1.65">${fg.headline}</div>
+      <div class="mhlegs">${legs}</div>
+      ${fg.score>=50?`<div class="sub" style="margin-top:6px;color:#9fe6c4">↻ ${fg.repairedBy}</div>`:''}
+      ${fg.uncheckedNote?`<div class="sub" style="margin-top:6px;color:#fbbf24">⚠ ${fg.uncheckedNote}</div>`:''}
+      <div class="small" style="margin-top:6px">${fg.disclaimer}</div>
+    </div>`;
+  }
+
   if(gate.reasons&&gate.reasons.length&&!(ev&&ev.inWindow)){
     macroHtml+=`<div class="sub" style="margin:2px 0 8px;color:#fcd34d">${gate.reasons.map(r=>'• '+r).join('<br>')}</div>`;
   }

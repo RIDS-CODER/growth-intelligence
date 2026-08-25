@@ -24,6 +24,8 @@ const createHistory = require('./history');
 const createMacroData = require('./macroData');
 const createCalendar = require('./calendar');
 const { macroEngine } = require('./macro');
+const { attribution } = require('./attribution');
+const { fragility } = require('./fragility');
 const { breadth } = require('./breadth');
 const { correlation } = require('./correlation');
 const { betaEngine, coinVsMarket } = require('./beta');
@@ -94,6 +96,10 @@ module.exports = function createIntel(deps) {
     try { eventRisk = calendar.eventRisk(); }
     catch (e) { eventRisk = { ok: false, configured: false, inWindow: false, reason: 'calendar unreadable: ' + String(e.message || e) }; }
     const macro = macroEngine(macroRaw, snap, eventRisk);
+    /* WHICH factor is moving crypto, and whether the current move is supported by its own
+       internals. Attribution runs first — fragility consumes it to spot a rally that is
+       decoupling upward from the equity benchmark it normally tracks. */
+    const attrib = attribution(macroRaw, snap);
 
     const oi = openInterestEngine(snap, oiRaw);
     const funding = fundingEngine(snap, fundingRaw, fundHistRaw, { btcRet4h: br.ok ? br.btc.ret4h : null });
@@ -107,8 +113,10 @@ module.exports = function createIntel(deps) {
     const recovery = recoveryEngine(snap, { zigzag, oi, funding });
     const sector = sectorWeakness(snap);
 
-    const regime = classify({ breadth: br, correlation: corr, transmission: trans, liquidation, oi, funding, liquidity, recovery, sector, btcStructure, macro });
-    const why = whyNarrative({ breadth: br, transmission: trans, liquidation, oi, funding, beta: betas, recovery, regimeInfo: regime, correlation: corr, macro });
+    const frag = fragility(snap, { zigzag, IND: d.IND, breadth: br, macro, attribution: attrib, funding, oi });
+
+    const regime = classify({ breadth: br, correlation: corr, transmission: trans, liquidation, oi, funding, liquidity, recovery, sector, btcStructure, macro, fragility: frag });
+    const why = whyNarrative({ breadth: br, transmission: trans, liquidation, oi, funding, beta: betas, recovery, regimeInfo: regime, correlation: corr, macro, attribution: attrib, fragility: frag });
 
     // Prices kept for the history store's forward-return scoring.
     const prices = {};
@@ -146,7 +154,7 @@ module.exports = function createIntel(deps) {
       breadth: br, correlation: corr, beta: betas, transmission: trans,
       structure: { btc: btcStructure, eth: ethStructure },
       oi, funding, liquidity, liquidation, recovery, sector,
-      macro, eventRisk,
+      macro, eventRisk, attribution: attrib, fragility: frag,
       /* Hoisted to the top level because this is what other surfaces act on: the scanner
          degrades its confidence by `confidenceMultiplier`, the paper bot refuses to open while
          `blockNewLeverage` is set, and the position panel prints `reasons` verbatim. */

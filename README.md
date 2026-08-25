@@ -580,6 +580,51 @@ India VIX** (Yahoo Finance, Stooq fallback — free, no key).
 The paper bot honours all of this (🌍 **Respect macro**, on by default). When it sits idle because
 of macro, it says so rather than looking broken.
 
+### 🎯 What is actually moving crypto
+
+Not "macro is risk-off" — that's a mood. This names the factor, sizes it, and signs it toward
+*your coins*:
+
+> *"US Dollar Index is +1.4% over the window. With BTC's −0.8 beta to it, that alone accounts for
+> about −1.1% of BTC's −1.9% move — the dollar is the main thing dragging crypto right now. That's
+> roughly 82% of the whole move, so this is being imported from outside crypto rather than driven
+> by crypto demand — it will turn when the dollar turns, whatever the chart is doing."*
+
+Each factor gets `contribution = its move × BTC's beta to it`, ranked by size. **A factor with no
+measurable correlation to crypto is excluded**, however large its own move — a beta fitted through
+noise will happily "explain" a move it has nothing to do with.
+
+Betas are univariate on purpose. A joint regression across DXY, Nasdaq and yields is statistically
+tidier and practically useless: they're collinear, so the coefficients flip sign between refreshes.
+A panel that says "the dollar is dragging you" and then "the dollar is supporting you" twenty
+minutes later, from the same data, is worse than none. The rank order is what's actionable, and the
+rank order is stable — the trade-off is that shares overlap and don't sum to 100%, which is stated
+wherever the numbers appear.
+
+### 📈 Is this rally standing on anything?
+
+**Technical analysis isn't bulletproof, and this is the panel that admits it.** A rally can be
+carried by broad participation, expanding volume and improving macro — or it can be four coins, a
+thinning book, a crowded long and an equity market already rolling over. Both print the same green
+candle. Every tell of the second one is measurable *before* the reversal.
+
+Eight legs are checked: participation · trend quality · volume trend · momentum divergence (price
+higher high, RSI lower high) · **macro pointing against the move** · equity decoupling · crowded
+positioning · leveraged chase. Plus extension from the mean.
+
+Each leg reads **✓ confirmed**, **✗ missing**, or **? not measured** — three states, not two. A
+green tick beside "macro UNCHECKED" would be the exact failure this platform exists to prevent, and
+the headline counts only the legs it could actually check.
+
+> **It never predicts a crash.** Nothing here forecasts a fall, and nothing built on this data
+> honestly could. It says *"this rally is largely unsupported: 4 of the 6 internal supports that
+> could be checked are missing — it is resting on fewer legs than the price implies."* That is a
+> claim the data carries. "It will crash" is not. It also always states what would repair the move,
+> so you have something to watch rather than only something to fear.
+
+Works in both directions — the mirror case is a decline making new lows while breadth, volume and
+macro all improve underneath it, which is usually the better entry of the two.
+
 ### Scheduled events — `macro-calendar.json`
 
 There is no free API for central-bank calendars, so this is an **editable file** you maintain.
@@ -619,6 +664,8 @@ growth-intelligence-pro/
 │   ├── funding.js       ├── liquidity.js    ├── recovery.js
 │   ├── regime.js        ├── positionRisk.js ├── alerts.js     ├── history.js
 │   ├── macro.js         ← 🌍 macro regime + TECHNICAL RELIABILITY (the gate)
+│   ├── attribution.js   ← 🎯 which macro factor is moving crypto, and by how much
+│   ├── fragility.js     ← 📈 is this move supported by its own internals?
 │   ├── calendar.js      ← scheduled-event risk; needs no network
 │   ├── macroData.js     ← DXY/yields/VIX/equities adapter (Yahoo, Stooq fallback)
 │   ├── derivs.js        ← futures adapter (OI/funding/depth) — honest about being unreachable

@@ -81,6 +81,9 @@ module.exports = function createHistory(opts) {
       dxy: intel.macro && intel.macro.available && intel.macro.instruments.DXY ? intel.macro.instruments.DXY.level : null,
       vix: intel.macro && intel.macro.available && intel.macro.instruments.VIX ? intel.macro.instruments.VIX.level : null,
       evWindow: intel.eventRisk && intel.eventRisk.ok ? !!intel.eventRisk.inWindow : null,
+      frag: intel.fragility && intel.fragility.active ? intel.fragility.score : null,
+      fragDir: intel.fragility && intel.fragility.active ? intel.fragility.direction : null,
+      driver: intel.attribution && intel.attribution.ok && intel.attribution.dominant ? intel.attribution.dominant.key : null,
       px
     };
     const arr = load();
@@ -182,7 +185,11 @@ module.exports = function createHistory(opts) {
     'extreme-risk-off': { label: 'Breadth below -60', test: r => S.isNum(r.breadth) && r.breadth < -60 },
     'macro-risk-off': { label: 'Macro risk appetite below -50', test: r => S.isNum(r.macroRisk) && r.macroRisk < -50 },
     'ta-unreliable': { label: 'Technical reliability below 35 (macro-driven tape)', test: r => S.isNum(r.taRel) && r.taRel < 35 },
-    'event-window': { label: 'Inside a scheduled event window', test: r => r.evWindow === true }
+    'event-window': { label: 'Inside a scheduled event window', test: r => r.evWindow === true },
+    /* The question this feature has to answer eventually: when the engine called a rally
+       unsupported, what actually happened next? Until there is a sample it reports the count. */
+    'fragile-rally': { label: 'Rally flagged largely unsupported (fragility > 65)', test: r => S.isNum(r.frag) && r.frag > 65 && r.fragDir === 'up' },
+    'fragile-decline': { label: 'Decline flagged largely unsupported (fragility > 65)', test: r => S.isNum(r.frag) && r.frag > 65 && r.fragDir === 'down' }
   };
 
   function runAll(opts2) {

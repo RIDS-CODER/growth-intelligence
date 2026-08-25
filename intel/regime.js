@@ -55,6 +55,8 @@ const REGIMES = {
   'macro-event-window': { label: 'SCHEDULED EVENT WINDOW', tone: 'amber', risk: 'high' },
   'macro-risk-off': { label: 'MACRO-DRIVEN RISK-OFF', tone: 'red', risk: 'high' },
   'macro-dominated': { label: 'MACRO-DRIVEN TAPE', tone: 'amber', risk: 'elevated' },
+  'fragile-rally': { label: 'UNSUPPORTED RALLY', tone: 'amber', risk: 'elevated' },
+  'fragile-decline': { label: 'UNSUPPORTED DECLINE', tone: 'amber', risk: 'elevated' },
   'normal-pullback': { label: 'NORMAL PULLBACK', tone: 'amber', risk: 'moderate' },
   'broad-risk-on': { label: 'BROAD RISK-ON', tone: 'green', risk: 'low' },
   'btc-led-rally': { label: 'BTC-LED RALLY', tone: 'green', risk: 'low' },
@@ -96,7 +98,7 @@ function sectorWeakness(snap) {
 }
 
 function classify(parts) {
-  const { breadth, correlation, transmission, liquidation, oi, funding, liquidity, recovery, sector, macro } = parts;
+  const { breadth, correlation, transmission, liquidation, oi, funding, liquidity, recovery, sector, macro, fragility } = parts;
   const why = [];
   const bs = breadth && breadth.ok ? breadth.score : null;
   const falling = transmission && transmission.ok ? transmission.falling : (S.isNum(bs) && bs < -20);
@@ -192,6 +194,16 @@ function classify(parts) {
     why.push(`breadth ${bs} with BTC printing lower highs and lower lows`);
     return pick('trend-reversal', why);
   }
+  /* ---- AN UNSUPPORTED MOVE ----
+     Sits below the acute regimes (a cascade in progress matters more than a rally being thin) but
+     above the ordinary ones, because "everything looks fine" is exactly the reading this is meant
+     to interrupt. A rally with most of its internal supports missing is not a calm market. */
+  if (fragility && fragility.ok && fragility.active && S.isNum(fragility.score) && fragility.score >= 60) {
+    why.push(`${fragility.firedCount} of ${fragility.totalSignals} internal supports missing`);
+    for (const sg of fragility.signals.filter(x => x.fired).slice(0, 3)) why.push(sg.detail);
+    return pick(fragility.direction === 'up' ? 'fragile-rally' : 'fragile-decline', why);
+  }
+
   /* A tape that is quiet by every crypto-internal measure but is being driven from outside.
      Named last, because the more specific crypto diagnoses above are more actionable when they
      apply — but named at all, because "nothing unusual internally" plus "correlation to the
@@ -221,7 +233,7 @@ function classify(parts) {
    on an unavailable feed is simply not written, and the gap is listed at the end instead of
    being papered over. */
 function whyNarrative(parts) {
-  const { breadth, transmission, liquidation, oi, funding, beta, recovery, regimeInfo, correlation, macro } = parts;
+  const { breadth, transmission, liquidation, oi, funding, beta, recovery, regimeInfo, correlation, macro, attribution, fragility } = parts;
   const out = [];
   const pctTxt = v => S.isNum(v) ? (v * 100).toFixed(1) + '%' : null;
 
@@ -253,6 +265,9 @@ function whyNarrative(parts) {
       if (x && S.isNum(x.chg5d)) bits.push(`${x.name} ${x.chg5d >= 0 ? '+' : ''}${(x.chg5d * 100).toFixed(1)}% (5d)`);
     }
     if (bits.length) out.push(`Macro backdrop: ${bits.join(', ')}. Risk appetite ${macro.riskAppetite} — ${macro.riskAppetiteLabel}.`);
+    /* NAME THE DRIVER. "Macro is risk-off" is a mood; "the dollar is up 1.4% and that accounts
+       for most of BTC's move" is something you can watch and act on. */
+    if (attribution && attribution.ok && attribution.headline) out.push(attribution.headline);
     if (S.isNum(macro.cryptoMacro.taReliability) && macro.cryptoMacro.taReliability < 55) {
       out.push(macro.cryptoMacro.message);
     }
@@ -280,6 +295,15 @@ function whyNarrative(parts) {
   }
   if (correlation && correlation.ok && correlation.singleRiskAsset) {
     out.push(`Correlation to BTC is ${correlation.avgCorrBtc.toFixed(2)} — the board is trading as a single risk asset, so holding eight alt positions is currently closer to holding one position at eight times the size.`);
+  }
+
+  /* Is the move standing on anything? Placed before the recovery odds, because "this rally has
+     four of its seven supports missing" changes how much weight those odds deserve. */
+  if (fragility && fragility.ok && fragility.active && fragility.headline) {
+    out.push(fragility.headline);
+    const fired = fragility.signals.filter(s2 => s2.fired);
+    if (fired.length) out.push('Missing: ' + fired.map(s2 => s2.detail).join('; ') + '.');
+    if (S.isNum(fragility.score) && fragility.score >= 50) out.push(fragility.repairedBy);
   }
 
   // What happens next, and what would prove it.

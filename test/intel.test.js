@@ -1175,3 +1175,240 @@ test('position stress is floored at HIGH RISK inside an event window, so the num
   assert.strictEqual(a.stressFloored, false, 'a calm tape must not be floored');
   assert.ok(a.stress < 60 || a.stress >= 60, 'sanity');
 });
+
+/* ============================================================
+   MACRO ATTRIBUTION — "which factor is moving crypto?"
+   ============================================================ */
+const { attribution } = require('../intel/attribution');
+const { fragility, volumeTrend, momentumDivergence } = require('../intel/fragility');
+const IND = server.IND;
+
+/* Build a macro payload whose factor is a deterministic function of BTC's own daily path, so the
+   beta is known in advance and attribution can be checked against a right answer. */
+async function attribFixture(opts) {
+  const o = opts || {};
+  const snap = await mkSnap(RISK_OFF, { marketDrift: o.drift == null ? -0.0006 : o.drift });
+  const btcMap = require('../intel/macro').coinDailyMap(snap.coins.BTC);
+  const dates = Object.keys(btcMap).sort();
+
+  const mkFactor = (name, beta, invert) => {
+    // factorReturn = btcReturn / beta  → BTC's beta ON the factor comes back as `beta`.
+    const closes = {}; let x = 100;
+    closes[dates[0]] = x;
+    for (let i = 1; i < dates.length; i++) {
+      const br = btcMap[dates[i]] / btcMap[dates[i - 1]] - 1;
+      x *= (1 + br / beta);
+      closes[dates[i]] = x;
+    }
+    return { key: name, name, invert: !!invert, group: 'global', why: '', source: 'test', closes, dates: dates.slice(), last: closes[dates[dates.length - 1]], lastDate: dates[dates.length - 1] };
+  };
+  const series = { DXY: mkFactor('DXY', o.dxyBeta == null ? -0.8 : o.dxyBeta, true), NDX: mkFactor('NDX', o.ndxBeta == null ? 0.9 : o.ndxBeta, false) };
+  // An unrelated factor: pure noise, no link to BTC at all.
+  const noise = {}; let y = 50; const r = rng(999);
+  for (const dte of dates) { y *= (1 + (r() - 0.5) * 0.02); noise[dte] = y; }
+  series.GOLD = { key: 'GOLD', name: 'GOLD', invert: false, group: 'global', why: '', source: 'test', closes: noise, dates: dates.slice(), last: y, lastDate: dates[dates.length - 1] };
+
+  return { snap, raw: { available: true, reason: null, asOf: Date.now(), data: { series, failed: [], covered: 3, total: 3 } } };
+}
+
+test('attribution recovers a known beta and ranks the dominant driver', async () => {
+  const { snap, raw } = await attribFixture({ dxyBeta: -0.8, ndxBeta: 0.9 });
+  const a = attribution(raw, snap);
+  assert.ok(a.ok, a.reason);
+  const dxy = a.drivers.find(x => x.key === 'DXY');
+  const ndx = a.drivers.find(x => x.key === 'NDX');
+  assert.ok(dxy && ndx, 'both linked factors should appear: ' + JSON.stringify(a.drivers.map(x => x.key)));
+  assert.ok(Math.abs(dxy.beta - (-0.8)) < 0.05, 'DXY beta should be ~-0.8, got ' + dxy.beta);
+  assert.ok(Math.abs(ndx.beta - 0.9) < 0.05, 'NDX beta should be ~0.9, got ' + ndx.beta);
+  assert.ok(a.dominant, 'a dominant driver must be named');
+  assert.ok(a.headline.length > 40);
+});
+
+test('attribution EXCLUDES a factor with no measurable link rather than attributing through noise', async () => {
+  const { snap, raw } = await attribFixture({});
+  const a = attribution(raw, snap);
+  assert.ok(!a.drivers.some(x => x.key === 'GOLD'), 'an unrelated factor must not be given a contribution');
+  const gold = a.unlinked.find(x => x.key === 'GOLD');
+  assert.ok(gold, 'it must still be reported, as unlinked');
+  assert.match(gold.reason, /no measurable link|aligned days/);
+});
+
+test('attribution signs contribution toward CRYPTO — a rising dollar reads as "dragging"', async () => {
+  // Falling BTC with a -0.8 beta to DXY ⇒ DXY rose ⇒ its contribution to BTC is negative.
+  const { snap, raw } = await attribFixture({ drift: -0.001, dxyBeta: -0.8 });
+  const a = attribution(raw, snap);
+  const dxy = a.drivers.find(x => x.key === 'DXY');
+  assert.ok(dxy, 'DXY should be linked');
+  assert.ok(dxy.move > 0, 'the dollar should have risen in this fixture, got ' + dxy.move);
+  assert.strictEqual(dxy.direction, 'dragging', 'a rising dollar with a negative beta drags crypto');
+  assert.ok(dxy.contribution < 0);
+});
+
+test('attribution says so plainly when a move is imported rather than crypto-driven', async () => {
+  const { snap, raw } = await attribFixture({ drift: 0.0012, ndxBeta: 1.0 });
+  const a = attribution(raw, snap);
+  assert.ok(a.material, 'BTC must have moved enough to attribute');
+  if (a.externallyDriven) {
+    assert.match(a.headline, /imported from outside crypto|accounts for/);
+  } else {
+    assert.ok(a.headline.length > 20, 'a headline is always produced');
+  }
+});
+
+test('attribution is unavailable — not fabricated — without macro data', async () => {
+  const snap = await mkSnap(RISK_OFF);
+  const a = attribution({ available: false, reason: 'geo-blocked' }, snap);
+  assert.strictEqual(a.ok, false);
+  assert.deepStrictEqual(a.drivers, []);
+  assert.strictEqual(a.dominant, null);
+  assert.match(a.reason, /geo-blocked/);
+});
+
+/* ============================================================
+   FRAGILITY — "this rally is not supported"
+   ============================================================ */
+test('a flat tape is not called fragile — there is no move to judge', async () => {
+  const snap = await mkSnap(RISK_OFF.map(s => ({ ...s, drift: 0, idio: 0.0002 })), { marketDrift: 0, marketVol: 0.0005 });
+  const f = fragility(snap, { zigzag: ZZ, IND, breadth: breadth(snap, { zigzag: ZZ }) });
+  assert.ok(f.ok);
+  assert.strictEqual(f.active, false);
+  assert.strictEqual(f.direction, 'flat');
+  assert.strictEqual(f.score, null, 'no move means no fragility score, not a zero');
+});
+
+test('a rally with broad participation and supportive macro scores as WELL SUPPORTED', async () => {
+  const specs = flip(RISK_OFF).map(s => ({ ...s, idio: 0.0003, volSpikeAt: 20, volSpike: 1.6 }));
+  const snap = await mkSnap(specs, { marketDrift: 0.0012, marketVol: 0.004 });
+  const br = breadth(snap, { zigzag: ZZ });
+  const macro = macroEngine(CALM_MACRO(), snap, { ok: true, inWindow: false, configured: true });
+  const f = fragility(snap, { zigzag: ZZ, IND, breadth: br, macro });
+  assert.ok(f.ok && f.active);
+  assert.strictEqual(f.direction, 'up');
+  assert.ok(f.score < 55, 'a broad, well-backed rally should not read as fragile, got ' + f.score + ' ' + JSON.stringify(f.signals.filter(s => s.fired).map(s => s.k)));
+});
+
+test('a rally into DETERIORATING MACRO is flagged as unsupported — the case that wiped the account', async () => {
+  const specs = flip(RISK_OFF).map(s => ({ ...s, idio: 0.0003 }));
+  const snap = await mkSnap(specs, { marketDrift: 0.0012, marketVol: 0.004 });
+  const br = breadth(snap, { zigzag: ZZ });
+  // Crypto rallying while the dollar rips, yields jump and VIX explodes.
+  const hostile = macroEngine(mkMacro({
+    DXY: { start: 100, drift: 0.006, invert: true }, US10Y: { start: 4.2, drift: 0.005, invert: true },
+    VIX: { start: 12, drift: 0.03, invert: true }, SPX: { start: 5000, drift: -0.005 }, NDX: { start: 16000, drift: -0.007 }
+  }), snap, { ok: true, inWindow: false, configured: true });
+
+  const calm = fragility(snap, { zigzag: ZZ, IND, breadth: br, macro: macroEngine(CALM_MACRO(), snap, { ok: true, inWindow: false }) });
+  const bad = fragility(snap, { zigzag: ZZ, IND, breadth: br, macro: hostile });
+
+  assert.ok(bad.score > calm.score, `hostile macro must raise fragility: calm ${calm.score} vs hostile ${bad.score}`);
+  const macroLeg = bad.signals.find(s => s.k === 'macro');
+  assert.ok(macroLeg && macroLeg.fired, 'the macro leg must be flagged as missing: ' + JSON.stringify(macroLeg));
+  assert.match(macroLeg.detail, /pointing against a rally/);
+});
+
+test('fragility NEVER predicts a crash — it reports missing supports and says so', async () => {
+  const specs = flip(RISK_OFF).map(s => ({ ...s, idio: 0.0003 }));
+  const snap = await mkSnap(specs, { marketDrift: 0.0012 });
+  const f = fragility(snap, { zigzag: ZZ, IND, breadth: breadth(snap, { zigzag: ZZ }) });
+  const text = [f.headline, f.disclaimer, f.repairedBy].concat(f.signals.map(s => s.detail)).join(' ');
+  assert.ok(!/will (crash|fall|drop|reverse|dump)|going to (crash|fall|drop)|imminent (crash|reversal)/i.test(text),
+    'fragility must never forecast a reversal: ' + text.slice(0, 300));
+  assert.match(f.disclaimer, /does NOT predict/);
+  assert.ok(f.repairedBy.length > 20, 'it must also say what would repair the move');
+});
+
+test('momentum divergence: higher high in price with a lower high in RSI', () => {
+  // Two clean pushes; the second goes higher on visibly weaker momentum.
+  const cl = [];
+  const push = (from, to, steps) => { for (let i = 1; i <= steps; i++) cl.push(from + (to - from) * i / steps); };
+  push(100, 100, 30);
+  push(100, 130, 20);   // strong first leg
+  push(130, 112, 12);   // pullback
+  push(112, 134, 40);   // higher high, but grindingly slow → weaker RSI
+  push(134, 126, 8);
+  const d = momentumDivergence(cl, ZZ, IND, 1);
+  assert.ok(d, 'a divergence read should be produced');
+  assert.ok(d.priceTo > d.priceFrom, 'fixture must make a higher high');
+  assert.strictEqual(d.diverging, true, `expected divergence, rsi ${d.rsiFrom} → ${d.rsiTo}`);
+});
+
+test('volume trend detects a fading move', () => {
+  const close = new Array(30).fill(100);
+  const strong = close.map((_, i) => 1000 + i * 50);      // rising
+  const fading = close.map((_, i) => 3000 - i * 80);      // falling
+  assert.strictEqual(volumeTrend(close, fading).fading, true);
+  assert.strictEqual(volumeTrend(close, strong).fading, false);
+  assert.strictEqual(volumeTrend(close, null), null, 'no volume means no claim');
+});
+
+test('fragility renormalises over available legs instead of scoring an absent macro as calm', async () => {
+  const specs = flip(RISK_OFF).map(s => ({ ...s, idio: 0.0003 }));
+  const snap = await mkSnap(specs, { marketDrift: 0.0012 });
+  const f = fragility(snap, { zigzag: ZZ, IND, breadth: breadth(snap, { zigzag: ZZ }), macro: { available: false } });
+  assert.ok(f.active);
+  assert.ok(f.missing.includes('macroAgainstTheMove'), 'an unmeasured macro must be MISSING: ' + JSON.stringify(f.missing));
+  assert.ok(f.coverage < 1);
+  const macroLeg = f.signals.find(s => s.k === 'macro');
+  assert.match(macroLeg.detail, /UNCHECKED/, 'and the gap must be visible on the leg itself');
+});
+
+test('an unsupported rally becomes its own regime rather than reading as BROAD RISK-ON', async () => {
+  const specs = flip(RISK_OFF).map(s => ({ ...s, idio: 0.0003 }));
+  const snap = await mkSnap(specs, { marketDrift: 0.0012 });
+  const br = breadth(snap, { zigzag: ZZ });
+  const frag = { ok: true, active: true, direction: 'up', score: 72, firedCount: 4, totalSignals: 7,
+    signals: [{ k: 'macro', fired: true, detail: 'macro risk appetite -60 — pointing against a rally' }] };
+  const r = classify({
+    breadth: br, correlation: correlation(snap), transmission: transmission(snap),
+    liquidation: { ok: true, cascade: { detected: false }, evidence: [] },
+    oi: { available: false }, funding: { available: false }, liquidity: { ok: true, marketVacuum: false },
+    recovery: { ok: true, selloff: false, verdict: 'undecided' }, sector: { available: false },
+    btcStructure: { ok: false }, macro: { available: false, eventRisk: { ok: true, inWindow: false } }, fragility: frag
+  });
+  assert.strictEqual(r.regime, 'fragile-rally', 'got ' + r.regime);
+  assert.strictEqual(r.label, 'UNSUPPORTED RALLY');
+  assert.ok(r.why.some(w => /supports missing/.test(w)));
+});
+
+test('the driver and fragility alerts fire with the factor named', () => {
+  const base = fakeIntel();
+  const withDriver = { ...base,
+    attribution: { ok: true, material: true, externallyDriven: true, explainedShare: 0.82,
+      headline: 'US Dollar Index is +1.4% over the window. With BTC\'s -0.8 beta to it, that alone accounts for about -1.1% of BTC\'s -1.9%.' },
+    fragility: { ok: true, active: false } };
+  const a1 = buildAlerts(withDriver, {}, { now: 1000 });
+  const drv = a1.alerts.find(a => a.key === 'macro-driver');
+  assert.ok(drv, 'a dominant external driver must alert');
+  assert.match(drv.text, /Dollar/);
+
+  const withFrag = { ...base, attribution: { ok: false },
+    fragility: { ok: true, active: true, direction: 'up', score: 74, firedCount: 4, totalSignals: 7,
+      signals: [{ k: 'macro', fired: true, detail: 'macro pointing against a rally' }, { k: 'volume', fired: true, detail: 'volume fading' }],
+      disclaimer: 'Fragility does NOT predict a reversal.' } };
+  const a2 = buildAlerts(withFrag, {}, { now: 1000 });
+  const fr = a2.alerts.find(a => a.key === 'fragile-move');
+  assert.ok(fr, 'a fragile move must alert');
+  assert.strictEqual(fr.confidence, 74);
+  assert.match(fr.text, /does NOT predict/, 'the alert must carry the disclaimer too');
+});
+
+test('an UNMEASURED fragility leg is marked unknown, never as a passing support', async () => {
+  const specs = flip(RISK_OFF).map(s => ({ ...s, idio: 0.0003 }));
+  const snap = await mkSnap(specs, { marketDrift: 0.0012 });
+  // No macro, no funding, no OI — three legs cannot be measured at all.
+  const f = fragility(snap, { zigzag: ZZ, IND, breadth: breadth(snap, { zigzag: ZZ }), macro: { available: false } });
+  const macroLeg = f.signals.find(s => s.k === 'macro');
+  assert.strictEqual(macroLeg.state, 'unknown', 'an unavailable macro is UNKNOWN, not OK');
+  assert.strictEqual(macroLeg.fired, false);
+  assert.ok(f.signals.every(s => ['missing', 'ok', 'unknown'].includes(s.state)), 'every leg carries a tri-state');
+  // The critical assertion: nothing that says UNCHECKED may be marked as a confirmed support.
+  for (const s of f.signals) {
+    if (/UNCHECKED|unavailable|not enough history|no clean pivot pair yet/i.test(s.detail)) {
+      assert.strictEqual(s.state, 'unknown', 'leg claims to be unmeasured but is marked ' + s.state + ': ' + s.detail);
+    }
+  }
+  assert.ok(f.uncheckedCount >= 3, 'got ' + f.uncheckedCount);
+  assert.match(f.uncheckedNote, /could not be measured/);
+  assert.ok(f.measuredCount + f.uncheckedCount === f.totalSignals);
+  assert.match(f.headline, /that could be checked/, 'the headline must count measured legs, not all legs');
+});

@@ -105,6 +105,26 @@ const RULES = [
     conf: i => 100 - i.macro.cryptoMacro.taReliability,
     text: i => `Technical reliability ${i.macro.cryptoMacro.taReliability}/100. ${i.macro.cryptoMacro.message} Setup confidence is being degraded by ${Math.round((1 - i.macro.gate.confidenceMultiplier) * 100)}%.`
   },
+  /* ---- THE TWO THE USER ASKED FOR BY NAME ---- */
+  {
+    /* Names the factor and the direction: "the dollar is dragging crypto", not "macro is bad". */
+    k: 'macro-driver', sev: 'amber', icon: '🟠', title: 'MACRO FACTOR MOVING CRYPTO',
+    on: i => !!(i.attribution && i.attribution.ok && i.attribution.externallyDriven && i.attribution.material),
+    off: i => !(i.attribution && i.attribution.ok && i.attribution.externallyDriven),
+    conf: i => Math.min(90, Math.round(Math.abs(i.attribution.explainedShare) * 100)),
+    text: i => i.attribution.headline
+  },
+  {
+    /* The "it looks like a rally but nothing is holding it up" warning. Careful wording: this
+       never claims a reversal is coming, only that fewer things are supporting the move than the
+       price implies — which is a claim the data can actually carry. */
+    k: 'fragile-move', sev: 'amber', icon: '🟠', title: 'MOVE NOT SUPPORTED BY ITS INTERNALS',
+    on: i => !!(i.fragility && i.fragility.ok && i.fragility.active && S.isNum(i.fragility.score) && i.fragility.score >= 65),
+    off: i => !(i.fragility && i.fragility.ok && i.fragility.active && S.isNum(i.fragility.score) && i.fragility.score >= 50),
+    conf: i => i.fragility.score,
+    text: i => `${i.fragility.direction === 'up' ? 'Rally' : 'Decline'} fragility ${i.fragility.score}/100 — ${i.fragility.firedCount} of ${i.fragility.totalSignals} internal supports missing. ` +
+      i.fragility.signals.filter(s => s.fired).slice(0, 3).map(s => s.detail).join('; ') + '. ' + i.fragility.disclaimer
+  },
   {
     k: 'macro-unavailable', sev: 'amber', icon: '🟠', title: 'MACRO DATA UNAVAILABLE',
     on: i => !!(i.macro && !i.macro.available),

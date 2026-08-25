@@ -1996,7 +1996,7 @@ const paper = require('./paper.js')({ scan, liveQuotes, dir:__dirname, rate:()=>
    server's candle loader and pivot detector rather than opening its own connection, so the Market
    Health panel can never disagree with the card next to it about what a coin just did. */
 const intel = require('./intel')({
-  loadCrypto, ensureCryptoUniverse, getCRYPTO:()=>CRYPTO, ticker24, resampleSeries, zigzag,
+  loadCrypto, ensureCryptoUniverse, getCRYPTO:()=>CRYPTO, ticker24, resampleSeries, zigzag, IND,
   dir:__dirname, coingeckoKey:COINGECKO_KEY
 });
 
