@@ -580,6 +580,50 @@ India VIX** (Yahoo Finance, Stooq fallback — free, no key).
 The paper bot honours all of this (🌍 **Respect macro**, on by default). When it sits idle because
 of macro, it says so rather than looking broken.
 
+### ⚡ Live momentum — the vertical moves the platform used to miss
+
+**This closes a real blind spot.** `buildSetup` marks a setup as a scalp when `ADX < 26`; a coin
+going vertical has a high ADX by definition, so it lands in `breakout`/`trend` — and every fast
+surface filtered exactly those out:
+
+```
+index.html  ⚡ Quick Trades   filter(regime === 'range' || 'correction')
+server.js   trackSetups / alertEligible      — same test
+paper.js    isScalp                          — same test
+```
+
+A coin doing +45% in an hour could not appear in Quick Trades, could not be tracked, and **could
+never fire an alert**. Only 🔥 Volume Movers showed it, and Movers has no alerting. Three more
+things made the candle path structurally too slow: `processAsset` drops the forming bar (a 5m
+signal is up to 5 minutes stale), the scan is cached 40s behind a 45s poll, and the universe is
+the top 120 by *yesterday's* volume — so a coin often only joins it after the move.
+
+**The fix reads the ticker, not the candles.** `cdxGetTicker()` already returns every market on
+the exchange in one request, every few seconds, to price live quotes. Recording those snapshots
+gives sub-minute resolution, no forming-bar lag, the whole exchange rather than the top 120, and
+**no extra API calls** — it's the request the server was making anyway. Volume comes from
+differencing the rolling 24h total between snapshots.
+
+Each row carries a **stage** and an explicit **lateness**:
+
+| stage | meaning |
+|---|---|
+| 🔥 **igniting** | the move is happening now — this is the only stage that alerts |
+| ▶ **running** | sustained, still going |
+| ⚠ **extended** | most of the run already happened — reported with how much |
+| ⏸ **stalling** | the push has faded |
+
+> **It never becomes a chase button.** Catching a move at +2% and at +45% are opposite trades, and
+> a detector that just shouts when something is green reliably delivers the second. Alerts fire
+> **only on ignition**, once per coin per 45 minutes, three coins per sweep maximum. An extended
+> move is labelled extended with the plain statement that this is where leveraged entries get
+> liquidated. Rows carry **no entry, stop or target** — they are move notifications, not setups.
+
+The size threshold scales to each coin, measured from **its own recent ticks** rather than its 24h
+range. That distinction matters: the 24h high/low *includes the move being detected*, so a coin
+that has already run 45% gets a huge denominator and needs an absurd further move to register —
+the detector would go blind exactly as a move develops.
+
 ### 🎯 What is actually moving crypto
 
 Not "macro is risk-off" — that's a mood. This names the factor, sizes it, and signs it toward
@@ -666,6 +710,7 @@ growth-intelligence-pro/
 │   ├── macro.js         ← 🌍 macro regime + TECHNICAL RELIABILITY (the gate)
 │   ├── attribution.js   ← 🎯 which macro factor is moving crypto, and by how much
 │   ├── fragility.js     ← 📈 is this move supported by its own internals?
+│   ├── momentum.js      ← ⚡ exchange-wide vertical-move detector (ticker, not candles)
 │   ├── calendar.js      ← scheduled-event risk; needs no network
 │   ├── macroData.js     ← DXY/yields/VIX/equities adapter (Yahoo, Stooq fallback)
 │   ├── derivs.js        ← futures adapter (OI/funding/depth) — honest about being unreachable

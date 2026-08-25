@@ -176,6 +176,11 @@
   .mhlegs{margin-top:6px;font-size:12px;line-height:1.75}
   .mhleg .x{color:var(--sell);font-weight:700}.mhleg .ok{color:var(--buy);font-weight:700}.mhleg .unk{color:var(--faint);font-weight:700}
   .mhleg{padding:1px 0}
+  .mhmom{background:linear-gradient(160deg,var(--panel2),var(--panel));border:1px solid rgba(251,191,36,.35);border-radius:12px;padding:12px 13px;margin:10px 0}
+  .mhmomrow{padding:7px 9px;border-radius:8px;background:#0d1420;border:1px solid var(--line);border-left-width:3px;margin-bottom:5px;font-size:12.5px;display:flex;flex-wrap:wrap;gap:6px 14px;align-items:baseline}
+  .mhmomrow.ig{border-left-color:var(--buy)}.mhmomrow.run{border-left-color:var(--accent2)}
+  .mhmomrow.ext{border-left-color:#fbbf24}.mhmomrow.stall{border-left-color:var(--faint)}
+  .mhmomwarn{flex-basis:100%;color:#fcd34d;font-size:11.5px;line-height:1.55;margin-top:3px}
 </style>
 </head>
 <body>
@@ -1320,8 +1325,9 @@ function quickStartTimer(){ if(quickTimer)clearInterval(quickTimer); quickTimer=
 let intelTimer=null,intelLast=null;
 function toggleIntel(){const el=document.getElementById('intelPanel');const show=el.style.display==='none';
   el.style.display=show?'block':'none';
-  if(show){renderIntelShell();loadIntel();intelTimer=setInterval(loadIntel,45000);}
-  else if(intelTimer){clearInterval(intelTimer);intelTimer=null;}}
+  if(show){renderIntelShell();loadIntel();intelTimer=setInterval(loadIntel,45000);
+    loadMomentum();momTimer=setInterval(loadMomentum,15000);}
+  else{ if(intelTimer){clearInterval(intelTimer);intelTimer=null;} if(momTimer){clearInterval(momTimer);momTimer=null;} }}
 function renderIntelShell(){
   const el=document.getElementById('intelPanel');
   if(!el.innerHTML)el.innerHTML='<div class="mh"><h3>🩺 Market Health</h3><div class="empty">Reading the market…</div></div>';}
@@ -1473,6 +1479,7 @@ function renderIntel(d){
       <div class="r">${r.tone==='red'?'🔴':r.tone==='amber'?'🟠':r.tone==='green'?'🟢':'⚪'} ${r.label}</div>
       <div class="small" style="margin-top:5px;color:#cbd5e1">${(r.why||[]).join(' · ')}</div>
     </div>
+    <div id="mhMom"></div>
     ${macroHtml}
     <div class="mhgrid">${tiles.join('')}</div>
     ${warn.map(w=>`<div class="mhwarn">${w}</div>`).join('')}
@@ -1491,6 +1498,43 @@ function renderIntel(d){
       ${q.unavailable.length?`<br><b>DATA UNAVAILABLE:</b> ${q.unavailable.map(x=>`${x.k} <span style="color:var(--faint)">(${x.why||''})</span>`).join(' · ')}`:''}
       <br><span style="color:var(--faint)">Every conclusion above is drawn only from the feeds listed as available. Market-structure intelligence, not financial advice.</span>
     </div>
+  </div>`;}
+
+/* ---- ⚡ LIVE MOMENTUM ----
+   Its own 15s poll, independent of the 45s market pass, because a five-minute vertical is over
+   before the market pass refreshes twice. Rows are NOT setups: no entry, stop or target, and the
+   stage/lateness is shown as loudly as the move itself. */
+let momTimer=null;
+async function loadMomentum(){
+  const el=document.getElementById('mhMom'); if(!el)return;
+  try{const d=await(await fetch('/api/intel/momentum?limit=12')).json();renderMomentum(el,d);}
+  catch(e){el.innerHTML='';}}
+function renderMomentum(el,d){
+  if(!d||!d.ok){
+    el.innerHTML=`<div class="mhmom"><b>⚡ Live momentum</b><div class="sub" style="margin-top:4px">${(d&&d.reason)||'unavailable'}</div></div>`;
+    return;}
+  if(!d.movers.length){
+    el.innerHTML=`<div class="mhmom"><div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px"><b>⚡ Live momentum</b><span class="sub">nothing moving sharply · ${d.snapshots} ticks over ${d.spanMin}m</span></div></div>`;
+    return;}
+  const pc=v=>v==null?'—':`${v>=0?'+':''}${(v*100).toFixed(1)}%`;
+  const STAGE={igniting:['ig','🔥'],running:['run','▶'],extended:['ext','⚠'],stalling:['stall','⏸']};
+  const rows=d.movers.map(m=>{
+    const [cls,ic]=STAGE[m.stage]||STAGE.running;
+    const col=m.dir>0?'var(--buy)':'var(--sell)';
+    return `<div class="mhmomrow ${cls}">
+      <div style="min-width:150px"><b>${ic} ${m.base}</b> <span class="sub">${m.stageLabel}</span></div>
+      <div style="font-family:var(--mono);color:${col}">1m ${pc(m.chg1m)} · <b>5m ${pc(m.chg5m)}</b> · 15m ${pc(m.chg15m)}</div>
+      <div class="sub" style="font-family:var(--mono)">${m.z!=null?`${m.z}× normal`:''}${m.surge!=null?` · vol ${m.surge}×`:''}${m.lateness>0.5?` · <span style="color:#fbbf24">${Math.round(m.lateness*100)}% already done</span>`:''}</div>
+      ${m.warning?`<div class="mhmomwarn">⚠ ${m.warning}</div>`:''}
+    </div>`;}).join('');
+  el.innerHTML=`<div class="mhmom">
+    <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;align-items:baseline">
+      <b>⚡ Live momentum — whole exchange</b>
+      <span class="sub">${d.count} moving${d.igniting?` · <b style="color:var(--buy)">${d.igniting} igniting</b>`:''} · ${d.snapshots} ticks / ${d.spanMin}m</span>
+    </div>
+    <div class="sub" style="margin:4px 0 7px">${d.note}</div>
+    ${rows}
+    <div class="small" style="margin-top:6px">${d.caveat}</div>
   </div>`;}
 
 async function loadWhy(){

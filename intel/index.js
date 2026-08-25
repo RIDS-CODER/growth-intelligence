@@ -26,6 +26,7 @@ const createCalendar = require('./calendar');
 const { macroEngine } = require('./macro');
 const { attribution } = require('./attribution');
 const { fragility } = require('./fragility');
+const createMomentum = require('./momentum');
 const { breadth } = require('./breadth');
 const { correlation } = require('./correlation');
 const { betaEngine, coinVsMarket } = require('./beta');
@@ -53,6 +54,7 @@ module.exports = function createIntel(deps) {
   const macroData = createMacroData({ enabled: d.macroEnabled });
   const calendar = createCalendar({ dir: d.dir || require('path').join(__dirname, '..') });
   const zigzag = d.zigzag || (() => []);
+  const momentum = createMomentum({});
 
   let cache = null, cacheAt = 0, inflight = null;
   let alertState = {};
@@ -285,6 +287,10 @@ module.exports = function createIntel(deps) {
 
   return {
     get, position, coinContext, tick, gate,
+    /* The momentum detector is deliberately OUTSIDE the 45s market pass. It reads the ticker
+       buffer directly, so a caller gets a sub-minute answer without waiting on a candle sweep —
+       which is the entire point of it existing. */
+    momentum,
     calendar, macroData,
     history,
     derivsHealth: () => derivs.health(),

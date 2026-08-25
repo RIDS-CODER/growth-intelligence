@@ -432,7 +432,14 @@ let cgOk=false, cryptoMode="binance";   // set to 'coindcx' when CoinDCX is reac
 const CDX_INT={"5m":"5m","15m":"15m","30m":"30m","1h":"1h","4h":"4h","6h":"6h","12h":"12h","daily":"1d","intraday":"30m"};
 let cdxTicker={},cdxTickerAt=0;
 async function cdxGetTicker(){const t=await getJSON("https://api.coindcx.com/exchange/ticker",{});if(!Array.isArray(t))throw new Error("cdx ticker");
-  const snap={};t.forEach(x=>{if(x.market)snap[x.market]=+x.last_price;});cdxTicker=snap;cdxTickerAt=Date.now();return t;}
+  const snap={};t.forEach(x=>{if(x.market)snap[x.market]=+x.last_price;});cdxTicker=snap;cdxTickerAt=Date.now();
+  /* Feed the momentum detector from the request we were making anyway. This ONE call carries every
+     market on the exchange, and it already runs every few seconds to price live quotes — so
+     recording it gives sub-minute momentum across the whole book at zero additional API cost, and
+     without the forming-bar lag or the top-120 universe limit the candle path has. Wrapped because
+     a fault in a secondary feature must never break quote pricing. */
+  try{ intel.momentum.record(t); }catch(e){}
+  return t;}
 // Ensure the live CoinDCX ticker is recent before we pin prices (prevents stale prices on fast-moving coins)
 async function ensureCdxFresh(maxMs=12000){if(Date.now()-cdxTickerAt>maxMs){try{await cdxGetTicker();}catch(e){}}}
 // CoinDCX's own USDT→INR rate (what its app uses to price coins)
@@ -2355,6 +2362,47 @@ async function intelSweep(){
   }
   return r;
 }
+/* ⚡ MOMENTUM SWEEP — the alert path the platform never had.
+   Runs on its OWN fast cadence, deliberately separate from every other loop: the market-health
+   tick is 2 minutes and the scalp alert loop is 3, which is useless for a move that does most of
+   its work inside five. This one reads the ticker buffer (no fetch of its own) so it can run at
+   30s for almost nothing.
+
+   It is NOT gated on the range/correction regime — that filter is precisely why a vertical move
+   could never raise an alert before.
+
+   FIRES ON IGNITION ONLY, and once per coin per cooldown. A coin running for twenty minutes is
+   one event; alerting every sweep would train you to ignore the channel by the time it mattered.
+   Deliberately silent on `extended` and `stalling`: paging someone about a move that already
+   happened is how a detector becomes a chase button. */
+const MOM_SWEEP_MS=parseInt(process.env.MOMENTUM_SWEEP_MS)||30000;
+const MOM_COOLDOWN_MS=45*60*1000;
+let momAlertLast={};
+function fmtMomentumAlert(m,rate){
+  const px = rate>0 ? '₹'+(m.price).toLocaleString('en-IN',{maximumFractionDigits:m.price<5?6:2}) : String(m.price);
+  const pc=v=>v==null?'—':`${v>=0?'+':''}${(v*100).toFixed(1)}%`;
+  return `⚡ <b>MOMENTUM — ${m.base} ${m.direction==='up'?'🟢 up':'🔴 down'}</b>\n`+
+    `<b>${m.stageLabel}</b>${m.z!=null?` · ${m.zCapped?'over '+m.z:m.z}× its normal 5m move`:''}\n`+
+    `1m ${pc(m.chg1m)} · 5m ${pc(m.chg5m)} · 15m ${pc(m.chg15m)} · 24h ${m.chg24h!=null?m.chg24h.toFixed(1)+'%':'—'}\n`+
+    `Now ${px}${m.surge!=null?` · volume ${m.surge}× its 24h average rate`:''}\n`+
+    `<i>Detected from the live ticker, not a completed candle. This is a MOVE notification, not a setup — there is no entry, stop or target attached, and a vertical move is where leveraged entries are most often liquidated. Verify on your platform.</i>`;
+}
+async function momentumSweep(){
+  if(!TG_TOKEN||!alertState.on)return 0;
+  let r; try{ if(cryptoMode==="coindcx")await ensureCdxFresh(6000); r=intel.momentum.scan({isStable:isStableBase,limit:40}); }catch(e){ return 0; }
+  if(!r.ok)return 0;
+  const now=Date.now(), rate=priceRate();
+  for(const k in momAlertLast) if(now-momAlertLast[k]>MOM_COOLDOWN_MS) delete momAlertLast[k];
+  let sent=0;
+  for(const m of r.movers){
+    if(m.stage!=='igniting')continue;                     // only the start of a move is actionable
+    if(momAlertLast[m.base])continue;                     // one ping per coin per cooldown
+    if(sent>=3)break;                                     // never flood: three coins a sweep, maximum
+    momAlertLast[m.base]=now;
+    try{ const res=await sendTelegram(fmtMomentumAlert(m,rate)); if(res.ok)sent++; }catch(e){}
+  }
+  return sent;
+}
 function sendJSON(res,o,c=200){const b=JSON.stringify(o);res.writeHead(c,{"Content-Type":"application/json","Access-Control-Allow-Origin":"*"});res.end(b);}
 const MIME={".html":"text/html",".js":"text/javascript",".css":"text/css",".json":"application/json",".svg":"image/svg+xml"};
 async function handler(req,res){
@@ -2422,6 +2470,10 @@ async function handler(req,res){
       return sendJSON(res,await intel.gate());}
     if(p==="/api/intel/calendar"){   // scheduled event risk, straight from macro-calendar.json
       return sendJSON(res,intel.calendar.eventRisk());}
+    if(p==="/api/intel/momentum"){   // ⚡ vertical moves across the WHOLE exchange, from the live ticker
+      if(cryptoMode==="coindcx")try{await ensureCdxFresh(4000);}catch(e){}
+      return sendJSON(res,withLiveRate({...intel.momentum.scan({isStable:isStableBase,limit:Math.min(50,parseInt(u.searchParams.get("limit"))||25)}),
+        buffer:intel.momentum.stats()}));}
 
     if(p==="/api/paper/state") return sendJSON(res,paper.getState());
     if(p==="/api/paper/control"){ const a=u.searchParams.get("action");
@@ -2497,6 +2549,14 @@ if(require.main===module){
      if the loop runs. Telegram delivery is the part that stays gated on a token. */
   setInterval(()=>{ intelSweep().catch(()=>{}); }, INTEL_SWEEP_MS);
   setTimeout(()=>intelSweep().catch(()=>{}), 20000);
+  /* ⚡ Momentum sweep on its own fast clock. Reads the ticker buffer rather than fetching, so 30s
+     costs nothing — and 30s is the only cadence that is any use for a move that completes in five
+     minutes. The 2-minute health tick and 3-minute scalp loop are both far too slow for it. */
+  setInterval(()=>{ momentumSweep().catch(()=>{}); }, MOM_SWEEP_MS);
+  /* Keep the ticker buffer filling even when nobody has the page open. liveQuotesFull only calls
+     the ticker when a browser asks for quotes, so an idle server would have an empty buffer and
+     miss exactly the overnight move this feature exists to catch. */
+  if(!DEMO) setInterval(()=>{ ensureCdxFresh(9000).catch(()=>{}); }, 10000);
   // Telegram alert loop — scan for High-confidence quick scalps every 3 min (inert until a bot token is configured).
   if(TG_TOKEN){ console.log('  Telegram alerts: ON (chat auto-detected from whoever messages the bot)'); setInterval(()=>{ alertScan().catch(()=>{}); }, 180000); setTimeout(()=>alertScan().catch(()=>{}),15000); }
   else console.log('  Telegram alerts: off (set TELEGRAM_BOT_TOKEN to enable — chat ID optional)');
@@ -2512,5 +2572,5 @@ module.exports={IND,computeSignal,buildSetup,buildReasons,confidenceOf,alertElig
   __setFx:(r)=>{fxRate=r;fxAt=Date.now();},__setMode:(m)=>{cryptoMode=m;},
   __getSetups:()=>SETUPS,__resetSetups:()=>{SETUPS={active:[],resolved:[]};},
   btcStateFromSeries,__setBtc:(s)=>{BTC_STATE=s;},
-  intel,intelSweep,
+  intel,intelSweep,momentumSweep,fmtMomentumAlert,
   __setCdxTicker:(t)=>{cdxTicker=t;}};

@@ -1412,3 +1412,150 @@ test('an UNMEASURED fragility leg is marked unknown, never as a passing support'
   assert.ok(f.measuredCount + f.uncheckedCount === f.totalSignals);
   assert.match(f.headline, /that could be checked/, 'the headline must count measured legs, not all legs');
 });
+
+/* ============================================================
+   ⚡ MOMENTUM — the vertical moves the regime filter used to hide
+   ============================================================ */
+const createMomentum = require('../intel/momentum');
+
+/* Replay a price path through the detector as ticker snapshots, one every 10s. */
+function replay(mom, path, opts) {
+  const o = opts || {};
+  const t0 = o.t0 || Date.now() - path.length * 10000;
+  let vol = o.vol0 == null ? 100000 : o.vol0;
+  path.forEach((px, i) => {
+    vol += (o.volPerTick == null ? 50 : (typeof o.volPerTick === 'function' ? o.volPerTick(i) : o.volPerTick));
+    mom.record([{ market: 'FOOINR', last_price: px, volume: vol, high: o.high == null ? 110 : o.high, low: o.low == null ? 90 : o.low, change_24_hour: 5 }], t0 + i * 10000);
+  });
+  return t0 + (path.length - 1) * 10000;
+}
+
+/* A flat 12-minute base, then a vertical push in the final minute. */
+function verticalPath(baseLen, from, to, pushTicks) {
+  const p = new Array(baseLen).fill(from);
+  for (let i = 1; i <= pushTicks; i++) p.push(from + (to - from) * i / pushTicks);
+  return p;
+}
+
+test('momentum needs a buffer before it will say anything', () => {
+  const m = createMomentum({ minGapMs: 0 });
+  const empty = m.scan({});
+  assert.strictEqual(empty.ok, false);
+  assert.match(empty.reason, /snapshot/);
+  m.record([{ market: 'FOOINR', last_price: 100, volume: 1, high: 110, low: 90 }], 1000);
+  m.record([{ market: 'FOOINR', last_price: 101, volume: 2, high: 110, low: 90 }], 2000);
+  m.record([{ market: 'FOOINR', last_price: 102, volume: 3, high: 110, low: 90 }], 3000);
+  const short = m.scan({ now: 3000 });
+  assert.strictEqual(short.ok, false, 'three ticks seconds apart is not five minutes of history');
+  assert.match(short.reason, /minutes of ticker history/);
+});
+
+test('a vertical move is DETECTED — the case the regime filter used to hide', () => {
+  const m = createMomentum({ minGapMs: 0 });
+  const now = replay(m, verticalPath(80, 100, 106, 6), { volPerTick: i => i > 78 ? 5000 : 50 });
+  const r = m.scan({ now });
+  assert.ok(r.ok, r.reason);
+  const foo = r.movers.find(x => x.base === 'FOO');
+  assert.ok(foo, 'the vertical must be picked up: ' + JSON.stringify(r.movers.map(x => x.base)));
+  assert.strictEqual(foo.direction, 'up');
+  assert.ok(foo.chg5m > 0.03, 'got ' + foo.chg5m);
+  assert.ok(foo.z > 2.5, 'must be large relative to the coin\'s own range, got z=' + foo.z);
+});
+
+test('a slow drift of the same size is NOT called momentum', () => {
+  const m = createMomentum({ minGapMs: 0 });
+  // Same +6%, but spread over two hours instead of one minute.
+  const path = []; for (let i = 0; i < 720; i++) path.push(100 * (1 + 0.06 * i / 719));
+  const now = replay(m, path, { volPerTick: 50 });
+  const r = m.scan({ now });
+  assert.ok(r.ok);
+  assert.strictEqual(r.movers.length, 0, 'a gentle drift must not register as a vertical: ' + JSON.stringify(r.movers));
+});
+
+test('the threshold scales to the coin — a wide-range coin needs a bigger move', () => {
+  const tight = createMomentum({ minGapMs: 0 });
+  const wide = createMomentum({ minGapMs: 0 });
+  const path = verticalPath(80, 100, 102, 6);          // +2%
+  const nowT = replay(tight, path, { high: 101, low: 99 });     // 2% daily range → 2% in 5m is enormous
+  const nowW = replay(wide, path, { high: 200, low: 50 });      // 150% daily range → 2% is nothing
+  const rt = tight.scan({ now: nowT }), rw = wide.scan({ now: nowW });
+  assert.ok(rt.movers.length === 1, 'the quiet coin must flag');
+  assert.strictEqual(rw.movers.length, 0, 'the same % on a wildly volatile coin must not');
+});
+
+test('STAGE: a move caught at the start is igniting, one caught late is extended', () => {
+  const early = createMomentum({ minGapMs: 0 });
+  const nowE = replay(early, verticalPath(80, 100, 104, 4), { volPerTick: 50 });
+  const e = early.scan({ now: nowE }).movers[0];
+  assert.ok(e, 'early move must be detected');
+  assert.strictEqual(e.stage, 'igniting', 'got ' + e.stage + ' lastMinShare=' + e.lastMinShare);
+  assert.strictEqual(e.warning, null, 'an igniting move carries no lateness warning');
+
+  // A 45% run that finished several minutes ago, now drifting — the chart the user sent.
+  const late = createMomentum({ minGapMs: 0 });
+  const path = new Array(30).fill(100);
+  for (let i = 1; i <= 30; i++) path.push(100 + 45 * i / 30);   // the vertical
+  for (let i = 0; i < 24; i++) path.push(145 + i * 0.02);       // then flat drift for 4 minutes
+  const nowL = replay(late, path, { high: 150, low: 95 });
+  const l = late.scan({ now: nowL }).movers[0];
+  if (l) {
+    assert.ok(['extended', 'stalling'].includes(l.stage), 'a finished 45% run must not read as igniting, got ' + l.stage);
+    assert.ok(l.warning, 'it must carry a lateness warning');
+    assert.match(l.warning, /already|Entering here|liquidated|has already happened/i);
+  }
+});
+
+test('an EXTENDED move is never presented as a clean entry', () => {
+  const m = createMomentum({ minGapMs: 0 });
+  const path = new Array(30).fill(100);
+  for (let i = 1; i <= 40; i++) path.push(100 + 40 * i / 40);
+  const now = replay(m, path, { high: 145, low: 95 });
+  const r = m.scan({ now });
+  for (const mv of r.movers) {
+    if (mv.stage === 'extended' || mv.stage === 'stalling') {
+      assert.ok(mv.warning && mv.warning.length > 30, 'extended rows must warn: ' + JSON.stringify(mv));
+      assert.ok(mv.lateness > 0, 'lateness must be reported');
+    }
+  }
+  // Nothing in the payload should read as a trade instruction.
+  const blob = JSON.stringify(r);
+  assert.ok(!/"entry"|"stop"|"target"|buy now|BUY NOW/i.test(blob), 'momentum rows must not carry a setup');
+  assert.match(r.caveat, /not an entry signal/);
+});
+
+test('momentum reports downside verticals too', () => {
+  const m = createMomentum({ minGapMs: 0 });
+  const now = replay(m, verticalPath(80, 100, 94, 6), { volPerTick: 50 });
+  const r = m.scan({ now });
+  const foo = r.movers.find(x => x.base === 'FOO');
+  assert.ok(foo, 'a vertical drop must register as well as a rally');
+  assert.strictEqual(foo.direction, 'down');
+  assert.ok(foo.chg5m < 0);
+});
+
+test('stablecoins and a rolling volume window are handled without producing junk', () => {
+  const m = createMomentum({ minGapMs: 0 });
+  const t0 = Date.now() - 800000;
+  for (let i = 0; i < 80; i++) {
+    m.record([
+      { market: 'USDCINR', last_price: 88 + i * 0.05, volume: 100 + i, high: 95, low: 85 },
+      // Volume going DOWN — the 24h window rolling. Must not become a negative surge.
+      { market: 'BARINR', last_price: 100 + i * 0.09, volume: 5000 - i * 10, high: 110, low: 90 }
+    ], t0 + i * 10000);
+  }
+  const r = m.scan({ now: t0 + 79 * 10000, isStable: b => b === 'USDC' });
+  assert.ok(r.ok);
+  assert.ok(!r.movers.some(x => x.base === 'USDC'), 'stablecoins must be excluded');
+  for (const mv of r.movers) {
+    assert.ok(mv.surge == null || mv.surge >= 0, 'a rolling volume window must never yield a negative surge');
+  }
+});
+
+test('the buffer downsamples and expires so it cannot grow without bound', () => {
+  const m = createMomentum({ keepMs: 60000, minGapMs: 8000 });
+  const t0 = Date.now() - 300000;
+  for (let i = 0; i < 300; i++) m.record([{ market: 'FOOINR', last_price: 100, volume: i, high: 110, low: 90 }], t0 + i * 1000);
+  const st = m.stats();
+  assert.ok(st.snapshots <= 10, 'a 60s window at one per 8s should hold ~8 snapshots, got ' + st.snapshots);
+  assert.ok(st.seen < 300, 'most 1s-apart records must have been downsampled away, kept ' + st.seen);
+});
