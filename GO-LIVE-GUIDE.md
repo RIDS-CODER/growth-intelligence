@@ -153,6 +153,39 @@ The clock beside the price shows the age of the last quote that actually landed,
 past 15s, red past 40s. If it says `browser feed failing, using server`, CoinDCX is rate-limiting
 your browser and the app has fallen back on its own.
 
+**🩺 Market Health says DATA UNAVAILABLE for open interest / funding / depth**
+Expected, and not a bug. Those come from a perpetual-futures venue (Binance), and Binance restricts
+Indian access — the same Bangalore placement that makes your CoinDCX prices correct is what blocks
+them. The panel still works: breadth, correlation, transmission, beta, structure, liquidity impact
+and the regime read all come from prices this server already has. The cascade detector drops to
+**INFERRED** mode with its confidence capped, and says so on screen. Set `INTEL_DERIVS=off` to stop
+attempting the calls, or point `INTEL_FAPI_HOSTS` at a venue you can reach.
+
+**🌍 Macro says DATA UNAVAILABLE**
+The macro instruments (DXY, US 10-year, VIX, S&P, Nasdaq, gold, crude, USD/INR, NIFTY, India VIX)
+come from Yahoo Finance with a Stooq fallback — both free and keyless, and both normally reachable
+from an India region. If it stays unavailable, check the droplet's outbound access. Note what the
+app does while it is down: it **fails open** — nothing is blocked and no confidence is degraded —
+but it shows a `MACRO UNCHECKED` warning, because silently reverting to chart-only is the state
+this layer exists to prevent. Set `INTEL_MACRO=off` to stop trying.
+
+**The event calendar is telling me it's STALE**
+`macro-calendar.json` has passed its `validThrough` date, so the app has **dropped** its events
+rather than showing you an out-of-date schedule as though it were current. Add the next few months
+of FOMC / CPI / RBI dates from the official sources listed at the top of that file, extend
+`validThrough`, and set `unverified` to `false` on the ones you've checked. NFP keeps working
+either way — it's the first Friday of the month by rule and the app derives it.
+
+**The paper bot has stopped opening trades**
+Check the "Running, holding nothing" line — if it says macro blocked them, that is the 🌍 gate
+working, not a fault. It blocks new leveraged entries inside a scheduled-event window and when
+macro risk appetite is hostile. Untick **🌍 Respect macro** to trade the chart alone.
+
+**Market Health says the liquidation feed is unavailable — can I fix that?**
+No, not over REST. There is no public REST endpoint for force-orders; the only public source is a
+WebSocket stream, which this server does not hold open. That is why the cascade detector is labelled
+INFERRED and capped at 65% confidence rather than pretending to have read one.
+
 **A change I pushed isn't showing**
 On a Droplet, pull and restart (above). On App Platform, check the deploy actually succeeded.
 

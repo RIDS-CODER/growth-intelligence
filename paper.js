@@ -11,7 +11,7 @@
      • Halts for the day at the daily loss limit.
    Costs are charged: CoinDCX taker fees and slippage, both configurable.
    ============================================================ */
-module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, dumpBounce, dumpRule }) {
+module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, dumpBounce, dumpRule, macroGate }) {
   const fs = require('fs'), path = require('path');
   const FILE = path.join(dir, 'paper-state.json');
   const TF_MIN = {'5m':5,'15m':15,'30m':30,'1h':60,'4h':240,'6h':360,'12h':720,'daily':1440,'intraday':30};
@@ -28,6 +28,12 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, 
     maxBarsHeld:24,           // a trade that has gone nowhere for this many bars is capital doing nothing
     maxSameDir:4,             // and no more than this many open on ONE side — an all-crypto book moves together
     allowShort:true, allowPending:true, allowAggressive:false,   // aggressive = market-enter the strongest near-zone setups (still R:R-guarded)
+    /* MACRO GATING, ON BY DEFAULT. Technical setups get their confidence degraded when crypto is
+       trading on macro rather than its own structure, and new entries are blocked outright inside
+       a scheduled-event window or a hostile macro tape. Turn it off only if you intend to trade
+       the chart alone — which is the posture this setting exists to make an explicit choice
+       rather than an unexamined default. */
+    respectMacro:true,
     /* WHICH DESK THE BOT TRADES. Each maps to a panel you already read, so what the bot takes is
        what you would have seen. `scalpOnly` used to be the only lever here — it is now just the
        difference between `quick` and `normal`, and is migrated on load for older saved state. */
@@ -263,8 +269,13 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, 
      undefined turns `b[0]-a[0]` into NaN — V8 then leaves the order arbitrary and the whole
      explanation collapses to null. A counter that only exists once it has fired is a counter that
      silently breaks the report on every pass where it did not. */
-  const blankFunnel=()=>({seen:0,noDirection:0,shortsOff:0,pendingOff:0,notScalp:0,lowConf:0,noEdge:0,dumpUnconfirmed:0,sameDir:0,costlier:0,eligible:0,bySource:{}});
+  const blankFunnel=()=>({seen:0,noDirection:0,shortsOff:0,pendingOff:0,notScalp:0,lowConf:0,noEdge:0,dumpUnconfirmed:0,sameDir:0,costlier:0,macroBlocked:0,eligible:0,bySource:{}});
   let funnel=blankFunnel();
+  /* Refreshed once per tick, not once per candidate — asking the intel layer forty times inside
+     one ranking pass would be forty cache hits and forty chances to disagree with itself mid-loop.
+     Defaults are fully permissive so that a bot running without the macro layer wired in behaves
+     exactly as it did before this existed. */
+  let macroState={blockLongs:false,blockShorts:false,blockNewLeverage:false,confidenceMultiplier:1,degraded:false,reasons:[],available:false};
   function eligible(r){
     funnel.seen++;
     const sk=r&&r._src||'quick';
@@ -287,8 +298,22 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, 
     // (regime is decided by which desks are enabled — see collect())
     // HIGH-CONFIDENCE ONLY: take only setups at/above the confidence floor (default 68 = High). Fall back to a
     // score proxy if the richer confidence metric isn't on the result (older scan payloads) so the bot isn't bricked.
-    const conf = (r.confidence && r.confidence.pct!=null) ? r.confidence.pct : Math.min(97, Math.abs(r.sig.score)*2.2);
+    /* MACRO DEGRADES CONFIDENCE BEFORE THE FLOOR IS APPLIED.
+       A 70% technical setup in a tape where crypto is trading as a Nasdaq proxy is not a 70%
+       setup — the chart is carrying less of the outcome than the number implies. Multiplying here
+       rather than lowering minConfPct keeps the floor meaning one thing ("High confidence") while
+       letting the macro layer decide what actually clears it. Multiplier is 1.0 whenever the
+       macro feed is unavailable, so a broken API loosens nothing and tightens nothing silently. */
+    const rawConf = (r.confidence && r.confidence.pct!=null) ? r.confidence.pct : Math.min(97, Math.abs(r.sig.score)*2.2);
+    const conf = rawConf * (macroState.confidenceMultiplier || 1);
     if(conf < (S.minConfPct||0)){ funnel.lowConf++; return false; }
+    /* DIRECTIONAL MACRO BLOCK. Hostile macro blocks new longs and leaves shorts alone (and the
+       reverse in a melt-up); an event window blocks both. This is the gate that would have
+       stopped the trade that chart-only analysis kept saying was clean. */
+    if(S.respectMacro!==false){
+      if(d>0 && macroState.blockLongs){ funnel.macroBlocked++; return false; }
+      if(d<0 && macroState.blockShorts){ funnel.macroBlocked++; return false; }
+    }
     // PROVEN EDGE ONLY: this coin's backtest, on THIS direction, must have actually made money — enough trades,
     // a win rate above the floor, and positive average return. No demonstrated edge on that side → don't take it.
     if(S.requireEdge){
@@ -309,7 +334,8 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, 
       return `Scanned ${f.dumpUnconfirmed} Dump & Bounce plans, took none: no confirmation on the 4h chart — it only longs a rally that is running or basing, and only shorts a bump that is late or rolling over, never a floor that is still falling.`;
     if(!f||!f.seen) return 'The enabled desks produced no candidates on this pass.';
     if(f.eligible) return null;
-    const buckets=[[f.costlier,`their first target was too small to cover the round trip — ${(2*(S.feeBps/10000+S.slipBps/10000)*100).toFixed(2)}% in fees and slippage. Lower Fees/Slippage if you trade a cheaper venue, or trade a slower timeframe where targets are wider`],
+    const buckets=[[f.macroBlocked,`macro blocked them — ${(macroState.reasons&&macroState.reasons[0])||'the macro tape is hostile to new entries in that direction'}. This is the gate doing its job, not the bot being broken; turn off 🌍 Respect macro to trade the chart alone`],
+      [f.costlier,`their first target was too small to cover the round trip — ${(2*(S.feeBps/10000+S.slipBps/10000)*100).toFixed(2)}% in fees and slippage. Lower Fees/Slippage if you trade a cheaper venue, or trade a slower timeframe where targets are wider`],
       [f.sameDir,`they all faced the same way and ${S.maxSameDir} are already open on that side — an all-crypto book moves together, so this is one bet, not many`],
       [f.dumpUnconfirmed,'the Dump & Bounce plans had no confirmation on the 4h chart — it only longs a rally that is running or basing, and only shorts a bump that is late or rolling over, never a floor that is still falling'],
       [f.notScalp,'none were scalp setups (range/correction) — turn off ⚡ Scalp only to widen'],
@@ -376,6 +402,19 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, 
       if(!S.goalHit && eq >= S.dayStartEquity*(1 + S.dailyTargetPct/100)){ flattenAll(prices,'target'); S.goalHit=true; }   // 🎯 hit the day's goal → lock it in
       if(eq <= S.dayStartEquity*(1 - S.dayLossLimitPct/100)) S.halted=true;                                                 // 🛑 daily loss limit
       const paused = Date.now() < (S.pauseUntil||0);                                                                        // ⏸ standing down after a loss streak
+      /* Pull the macro gate BEFORE deciding whether to open anything. Failure is permissive and
+         recorded: a broken macro feed must not silently freeze the bot, but it must also not
+         silently stop protecting it — `macroState.available` drives what the panel says. */
+      if(S.respectMacro!==false && typeof macroGate==='function'){
+        try{ const g=await macroGate();
+          macroState={blockLongs:!!g.blockLongs,blockShorts:!!g.blockShorts,blockNewLeverage:!!g.blockNewLeverage,
+            confidenceMultiplier:(+g.confidenceMultiplier>0?+g.confidenceMultiplier:1),
+            degraded:!!g.degraded,reasons:g.reasons||[],available:g.ok!==false}; }
+        catch(e){ macroState={blockLongs:false,blockShorts:false,blockNewLeverage:false,confidenceMultiplier:1,degraded:false,reasons:['macro gate unreachable: '+String(e.message||e).slice(0,60)],available:false}; }
+      }else{
+        macroState={blockLongs:false,blockShorts:false,blockNewLeverage:false,confidenceMultiplier:1,degraded:false,reasons:S.respectMacro===false?['macro gating turned off in settings']:[],available:false};
+      }
+      S.macro=macroState;
       if(!S.halted && !S.goalHit && !paused && (S.positions.length+S.pending.length) < S.maxConcurrent){
         // Reset BEFORE collecting: collect() records its own rejections (e.g. Dump & Bounce plans
         // with no 4h confirmation), and blanking afterwards threw those counts away.
@@ -400,7 +439,7 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, 
     const expectancy=tot?pnls.reduce((a,b)=>a+b,0)/tot:0;                                   // avg ₹ per trade — >0 means an edge
     const profitFactor=grossLoss>0?grossWin/grossLoss:(grossWin>0?99:0);                    // >1 means winners outweigh losers
     const benched=Object.keys(S.stopOuts||{}).filter(s=>(S.stopOuts[s]||0)>=(S.maxStopOutsPerCoin||99));
-    return { running:S.running, halted:S.halted, goalHit:S.goalHit, tab:S.tab, timeframes:S.timeframes, usdtInr:(typeof rate==='function'?(rate()||0):0),
+    return { running:S.running, halted:S.halted, goalHit:S.goalHit, macro:S.macro||null, tab:S.tab, timeframes:S.timeframes, usdtInr:(typeof rate==='function'?(rate()||0):0),
       paused:(Date.now()<(S.pauseUntil||0)), pauseUntil:S.pauseUntil||0, lossStreak:S.lossStreak||0, benched,
       funnel:S.funnel||null, whyIdle:whyIdle(), sources:{...S.sources},
       /* WHICH DESK ACTUALLY MAKES MONEY. The point of choosing sources is being able to switch
@@ -411,7 +450,7 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, 
         for(const p of S.positions){ const k=o[p.src||'quick']||o.quick; k.open++; }
         for(const k of SOURCES) if(o[k].trades) o[k].winRate=Math.round(100*o[k].wins/o[k].trades);
         return o; })(),
-      config:{capital:S.capital,riskPct:S.riskPct,dailyTargetPct:S.dailyTargetPct,maxLev:S.maxLev,feeBps:S.feeBps,slipBps:S.slipBps,dayLossLimitPct:S.dayLossLimitPct,maxConcurrent:S.maxConcurrent,maxBarsHeld:S.maxBarsHeld,maxSameDir:S.maxSameDir,allowShort:S.allowShort,allowPending:S.allowPending,allowAggressive:S.allowAggressive,scalpOnly:S.scalpOnly,minConfPct:S.minConfPct,requireEdge:S.requireEdge,minWinRate:S.minWinRate,minEdgeTrades:S.minEdgeTrades,minStopPct:S.minStopPct,stopCooldownMin:S.stopCooldownMin,maxStopOutsPerCoin:S.maxStopOutsPerCoin,lossStreakPause:S.lossStreakPause,streakPauseMin:S.streakPauseMin},
+      config:{capital:S.capital,riskPct:S.riskPct,dailyTargetPct:S.dailyTargetPct,maxLev:S.maxLev,feeBps:S.feeBps,slipBps:S.slipBps,dayLossLimitPct:S.dayLossLimitPct,maxConcurrent:S.maxConcurrent,maxBarsHeld:S.maxBarsHeld,maxSameDir:S.maxSameDir,allowShort:S.allowShort,allowPending:S.allowPending,allowAggressive:S.allowAggressive,respectMacro:S.respectMacro!==false,scalpOnly:S.scalpOnly,minConfPct:S.minConfPct,requireEdge:S.requireEdge,minWinRate:S.minWinRate,minEdgeTrades:S.minEdgeTrades,minStopPct:S.minStopPct,stopCooldownMin:S.stopCooldownMin,maxStopOutsPerCoin:S.maxStopOutsPerCoin,lossStreakPause:S.lossStreakPause,streakPauseMin:S.streakPauseMin},
       cash:S.cash, equity:eq, startEquity:S.capital, retPct:(eq/S.capital-1)*100,
       dayStartEquity:S.dayStartEquity, dayRetPct:S.dayStartEquity?(eq/S.dayStartEquity-1)*100:0, targetEquity:S.dayStartEquity*(1+S.dailyTargetPct/100),
       marginUsed:grossMargin(), openCount:S.positions.length, pendingCount:S.pending.length,
@@ -429,6 +468,7 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, 
     if(c.allowShort!=null)S.allowShort=!!c.allowShort;
     if(c.allowPending!=null)S.allowPending=!!c.allowPending;
     if(c.allowAggressive!=null)S.allowAggressive=!!c.allowAggressive;
+    if(c.respectMacro!=null)S.respectMacro=!!c.respectMacro;
     if(c.scalpOnly!=null)S.scalpOnly=!!c.scalpOnly;
     if(c.requireEdge!=null)S.requireEdge=!!c.requireEdge;
     save(); return snapshot();

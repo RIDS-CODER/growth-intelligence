@@ -432,7 +432,14 @@ let cgOk=false, cryptoMode="binance";   // set to 'coindcx' when CoinDCX is reac
 const CDX_INT={"5m":"5m","15m":"15m","30m":"30m","1h":"1h","4h":"4h","6h":"6h","12h":"12h","daily":"1d","intraday":"30m"};
 let cdxTicker={},cdxTickerAt=0;
 async function cdxGetTicker(){const t=await getJSON("https://api.coindcx.com/exchange/ticker",{});if(!Array.isArray(t))throw new Error("cdx ticker");
-  const snap={};t.forEach(x=>{if(x.market)snap[x.market]=+x.last_price;});cdxTicker=snap;cdxTickerAt=Date.now();return t;}
+  const snap={};t.forEach(x=>{if(x.market)snap[x.market]=+x.last_price;});cdxTicker=snap;cdxTickerAt=Date.now();
+  /* Feed the momentum detector from the request we were making anyway. This ONE call carries every
+     market on the exchange, and it already runs every few seconds to price live quotes — so
+     recording it gives sub-minute momentum across the whole book at zero additional API cost, and
+     without the forming-bar lag or the top-120 universe limit the candle path has. Wrapped because
+     a fault in a secondary feature must never break quote pricing. */
+  try{ intel.momentum.record(t); }catch(e){}
+  return t;}
 // Ensure the live CoinDCX ticker is recent before we pin prices (prevents stale prices on fast-moving coins)
 async function ensureCdxFresh(maxMs=12000){if(Date.now()-cdxTickerAt>maxMs){try{await cdxGetTicker();}catch(e){}}}
 // CoinDCX's own USDT→INR rate (what its app uses to price coins)
@@ -1986,7 +1993,19 @@ async function researchCoin(rawSym,horizon){
   return {sym:base,horizon,dec:per[0].dec,cryptoMode,consensus:blendResearch(per),ts:Date.now()};
 }
 // Paper-trading engine (simulation) — reuses this server's scan + live quotes. Never places real orders.
-const paper = require('./paper.js')({ scan, liveQuotes, dir:__dirname, rate:()=>cdxUsdtInr(), topMovers, dumpBounce, dumpRule:dumpBotTakes });
+/* `macroGate` is a thunk, not the gate itself: `intel` is declared below this line and is only
+   dereferenced later, at tick time. The bot therefore gets the live gate without the two modules
+   having to be constructed in a particular order. */
+const paper = require('./paper.js')({ scan, liveQuotes, dir:__dirname, rate:()=>cdxUsdtInr(), topMovers, dumpBounce, dumpRule:dumpBotTakes,
+  macroGate:()=>intel.gate() });
+
+/* Market-wide stress & correlation engine. Same injection pattern as the paper bot: it gets THIS
+   server's candle loader and pivot detector rather than opening its own connection, so the Market
+   Health panel can never disagree with the card next to it about what a coin just did. */
+const intel = require('./intel')({
+  loadCrypto, ensureCryptoUniverse, getCRYPTO:()=>CRYPTO, ticker24, resampleSeries, zigzag, IND,
+  dir:__dirname, coingeckoKey:COINGECKO_KEY
+});
 
 /* ===== Telegram alerts — ping on a High-confidence quick scalp. Token lives ONLY on the server
    (env var or config.json); it is NEVER sent to the browser or committed to GitHub. Inert until set. ===== */
@@ -2297,9 +2316,18 @@ async function addPosition(b){
   const entry=+b.entry;
   if(!(entry>0))return {error:"Entry price must be a positive number."};
   const tf=TF_MIN[b.tf]?b.tf:"1h";
+  /* LEVERAGE FIELDS ARE OPTIONAL AND BACKWARD-COMPATIBLE.
+     Every position saved before this existed has no lev/margin/liq, and must keep working exactly
+     as it did — the watcher only ever needed side and entry. Supplying them unlocks the position
+     stress score, the distance-to-liquidation read and the risk map; omitting them leaves those
+     fields null and clearly marked unavailable rather than guessed at.
+     `liq` is the venue's OWN liquidation price. When given it always wins over the estimate,
+     because every exchange runs its own maintenance-margin ladder and ours is an approximation. */
+  const lev=+b.lev>0?Math.min(125,+b.lev):null;
   const p={id:"p"+Date.now().toString(36)+Math.random().toString(36).slice(2,6),
     sym:asset.sym,tk:asset.tk||"",name:asset.name||asset.tk||asset.sym,cls:asset.cls||"",src:asset.src||"",
     side,entry,qty:+b.qty>0?+b.qty:null,tf,
+    lev, margin:+b.margin>0?+b.margin:null, liq:+b.liq>0?+b.liq:null,
     chat:String(b.chat||"").trim()||null, chatName:String(b.chatName||"").trim()||null,
     created:Date.now(),status:"open",alerts:0,note:String(b.note||"").slice(0,120)};
   POSITIONS.push(p); posDirty=true;
@@ -2320,6 +2348,60 @@ async function addPosition(b){
   if(TG_TOKEN&&p.chat&&p.price>0){ try{ await tgSend(p.chat,fmtPosAlert(p,"watch",p.price)); }catch(e){} }
   savePositions();
   return {ok:true,position:p};
+}
+/* 🩺 One market-health iteration: refresh, record, deliver whatever just transitioned.
+   Coin-level alerts are evaluated ONLY for coins the trader actually holds — a board-wide
+   "underperforming" list would be forty pings nobody reads. */
+const INTEL_SWEEP_MS=parseInt(process.env.INTEL_SWEEP_MS)||120000;
+async function intelSweep(){
+  const watched=Array.from(new Set(POSITIONS.filter(p=>p.status==="open"&&p.src==="cg").map(p=>p.tk).filter(Boolean)));
+  let r; try{ r=await intel.tick({watchedCoins:watched}); }catch(e){ return {ok:false,err:String(e.message||e)}; }
+  if(!r.ok||!r.alerts.length)return r;
+  if(TG_TOKEN){
+    for(const a of r.alerts){ try{ await sendTelegram(intel.formatTelegram(a)); }catch(e){} }
+  }
+  return r;
+}
+/* ⚡ MOMENTUM SWEEP — the alert path the platform never had.
+   Runs on its OWN fast cadence, deliberately separate from every other loop: the market-health
+   tick is 2 minutes and the scalp alert loop is 3, which is useless for a move that does most of
+   its work inside five. This one reads the ticker buffer (no fetch of its own) so it can run at
+   30s for almost nothing.
+
+   It is NOT gated on the range/correction regime — that filter is precisely why a vertical move
+   could never raise an alert before.
+
+   FIRES ON IGNITION ONLY, and once per coin per cooldown. A coin running for twenty minutes is
+   one event; alerting every sweep would train you to ignore the channel by the time it mattered.
+   Deliberately silent on `extended` and `stalling`: paging someone about a move that already
+   happened is how a detector becomes a chase button. */
+const MOM_SWEEP_MS=parseInt(process.env.MOMENTUM_SWEEP_MS)||30000;
+const MOM_COOLDOWN_MS=45*60*1000;
+let momAlertLast={};
+function fmtMomentumAlert(m,rate){
+  const px = rate>0 ? '₹'+(m.price).toLocaleString('en-IN',{maximumFractionDigits:m.price<5?6:2}) : String(m.price);
+  const pc=v=>v==null?'—':`${v>=0?'+':''}${(v*100).toFixed(1)}%`;
+  return `⚡ <b>MOMENTUM — ${m.base} ${m.direction==='up'?'🟢 up':'🔴 down'}</b>\n`+
+    `<b>${m.stageLabel}</b>${m.z!=null?` · ${m.zCapped?'over '+m.z:m.z}× its normal 5m move`:''}\n`+
+    `1m ${pc(m.chg1m)} · 5m ${pc(m.chg5m)} · 15m ${pc(m.chg15m)} · 24h ${m.chg24h!=null?m.chg24h.toFixed(1)+'%':'—'}\n`+
+    `Now ${px}${m.surge!=null?` · volume ${m.surge}× its 24h average rate`:''}\n`+
+    `<i>Detected from the live ticker, not a completed candle. This is a MOVE notification, not a setup — there is no entry, stop or target attached, and a vertical move is where leveraged entries are most often liquidated. Verify on your platform.</i>`;
+}
+async function momentumSweep(){
+  if(!TG_TOKEN||!alertState.on)return 0;
+  let r; try{ if(cryptoMode==="coindcx")await ensureCdxFresh(6000); r=intel.momentum.scan({isStable:isStableBase,limit:40}); }catch(e){ return 0; }
+  if(!r.ok)return 0;
+  const now=Date.now(), rate=priceRate();
+  for(const k in momAlertLast) if(now-momAlertLast[k]>MOM_COOLDOWN_MS) delete momAlertLast[k];
+  let sent=0;
+  for(const m of r.movers){
+    if(m.stage!=='igniting')continue;                     // only the start of a move is actionable
+    if(momAlertLast[m.base])continue;                     // one ping per coin per cooldown
+    if(sent>=3)break;                                     // never flood: three coins a sweep, maximum
+    momAlertLast[m.base]=now;
+    try{ const res=await sendTelegram(fmtMomentumAlert(m,rate)); if(res.ok)sent++; }catch(e){}
+  }
+  return sent;
 }
 function sendJSON(res,o,c=200){const b=JSON.stringify(o);res.writeHead(c,{"Content-Type":"application/json","Access-Control-Allow-Origin":"*"});res.end(b);}
 const MIME={".html":"text/html",".js":"text/javascript",".css":"text/css",".json":"application/json",".svg":"image/svg+xml"};
@@ -2355,6 +2437,44 @@ async function handler(req,res){
     if(p==="/api/research"){   // one coin, several timeframes, averaged consensus (short or long horizon)
       const sym=u.searchParams.get("sym")||"", horizon=u.searchParams.get("horizon")==="long"?"long":"short";
       return sendJSON(res,await researchCoin(sym,horizon));}
+    /* ===== 🩺 MARKET HEALTH — market-wide stress & correlation engine ===== */
+    if(p==="/api/intel"){   // full market pass: regime, breadth, correlation, transmission, leverage, liquidity
+      return sendJSON(res,withLiveRate(await intel.get(u.searchParams.get("force")==="1")));}
+    if(p==="/api/intel/why"){   // the one-click "why is everything falling?" diagnostic
+      const d=await intel.get();
+      if(!d.ok)return sendJSON(res,{ok:false,reason:d.reason});
+      return sendJSON(res,{ok:true,ts:d.ts,regime:d.regime,why:d.why,dataQuality:d.dataQuality});}
+    if(p==="/api/intel/position"){   // one open trade, fully contextualised against the market
+      const id=u.searchParams.get("id");
+      const pos=id?POSITIONS.find(x=>x.id===id):null;
+      if(id&&!pos)return sendJSON(res,{ok:false,reason:"position not found"},404);
+      // Ad-hoc mode: score a hypothetical position without saving it first.
+      const adhoc=!pos?{tk:(u.searchParams.get("tk")||"").toUpperCase(),sym:u.searchParams.get("sym")||"",
+        side:u.searchParams.get("side")==="short"?-1:1,entry:+u.searchParams.get("entry"),
+        lev:+u.searchParams.get("lev")||null,liq:+u.searchParams.get("liq")||null}:null;
+      const target=pos||adhoc;
+      if(!target||!(target.entry>0))return sendJSON(res,{ok:false,reason:"need a saved position id, or tk+entry (+lev) for an ad-hoc check"},400);
+      let live=0; try{ live=(await liveQuotes("Crypto"))[target.sym]||0; }catch(e){}
+      return sendJSON(res,withLiveRate(await intel.position(target,{price:live||undefined})));}
+    if(p==="/api/intel/coin"){   // one coin vs the market, for any card that wants context
+      return sendJSON(res,await intel.coinContext((u.searchParams.get("tk")||"").toUpperCase()));}
+    if(p==="/api/intel/backtest"){   // "when stress > 80, what happened next?" — from recorded snapshots only
+      const sig=u.searchParams.get("signal");
+      if(sig&&intel.history.SIGNALS[sig])return sendJSON(res,{...intel.history.backtest(sig,intel.history.SIGNALS[sig].test),label:intel.history.SIGNALS[sig].label});
+      return sendJSON(res,{stats:intel.history.stats(),signals:intel.history.runAll()});}
+    if(p==="/api/intel/history"){
+      return sendJSON(res,{stats:intel.history.stats(),rows:intel.history.recent(Math.min(500,parseInt(u.searchParams.get("limit"))||100))});}
+    if(p==="/api/intel/health"){   // which feeds are actually reachable from THIS server
+      return sendJSON(res,{derivs:await intel.derivsHealth(),lastError:intel.lastError(),history:intel.history.stats()});}
+    if(p==="/api/intel/gate"){   // the macro gate on its own — what is being blocked and degraded, and why
+      return sendJSON(res,await intel.gate());}
+    if(p==="/api/intel/calendar"){   // scheduled event risk, straight from macro-calendar.json
+      return sendJSON(res,intel.calendar.eventRisk());}
+    if(p==="/api/intel/momentum"){   // ⚡ vertical moves across the WHOLE exchange, from the live ticker
+      if(cryptoMode==="coindcx")try{await ensureCdxFresh(4000);}catch(e){}
+      return sendJSON(res,withLiveRate({...intel.momentum.scan({isStable:isStableBase,limit:Math.min(50,parseInt(u.searchParams.get("limit"))||25)}),
+        buffer:intel.momentum.stats()}));}
+
     if(p==="/api/paper/state") return sendJSON(res,paper.getState());
     if(p==="/api/paper/control"){ const a=u.searchParams.get("action");
       if(a==="start")return sendJSON(res,paper.start());
@@ -2422,6 +2542,21 @@ if(require.main===module){
   // its owner on Telegram the moment it turns against them. Runs regardless of the alert toggle:
   // you asked to be told about YOUR money, so it is not lumped in with scan broadcasts.
   setInterval(()=>{ positionsSweep().catch(()=>{}); }, POS_SWEEP_MS);
+  /* 🩺 Market-health loop. Refreshes the market pass, appends a snapshot for the backtester, and
+     emits any alert that just TRANSITIONED (never one that is merely still true — see alerts.js).
+     Runs on its own 2-minute cadence regardless of the Telegram toggle: the snapshot history is
+     what turns this module's thresholds from judgement into measurement, and it only accumulates
+     if the loop runs. Telegram delivery is the part that stays gated on a token. */
+  setInterval(()=>{ intelSweep().catch(()=>{}); }, INTEL_SWEEP_MS);
+  setTimeout(()=>intelSweep().catch(()=>{}), 20000);
+  /* ⚡ Momentum sweep on its own fast clock. Reads the ticker buffer rather than fetching, so 30s
+     costs nothing — and 30s is the only cadence that is any use for a move that completes in five
+     minutes. The 2-minute health tick and 3-minute scalp loop are both far too slow for it. */
+  setInterval(()=>{ momentumSweep().catch(()=>{}); }, MOM_SWEEP_MS);
+  /* Keep the ticker buffer filling even when nobody has the page open. liveQuotesFull only calls
+     the ticker when a browser asks for quotes, so an idle server would have an empty buffer and
+     miss exactly the overnight move this feature exists to catch. */
+  if(!DEMO) setInterval(()=>{ ensureCdxFresh(9000).catch(()=>{}); }, 10000);
   // Telegram alert loop — scan for High-confidence quick scalps every 3 min (inert until a bot token is configured).
   if(TG_TOKEN){ console.log('  Telegram alerts: ON (chat auto-detected from whoever messages the bot)'); setInterval(()=>{ alertScan().catch(()=>{}); }, 180000); setTimeout(()=>alertScan().catch(()=>{}),15000); }
   else console.log('  Telegram alerts: off (set TELEGRAM_BOT_TOKEN to enable — chat ID optional)');
@@ -2437,4 +2572,5 @@ module.exports={IND,computeSignal,buildSetup,buildReasons,confidenceOf,alertElig
   __setFx:(r)=>{fxRate=r;fxAt=Date.now();},__setMode:(m)=>{cryptoMode=m;},
   __getSetups:()=>SETUPS,__resetSetups:()=>{SETUPS={active:[],resolved:[]};},
   btcStateFromSeries,__setBtc:(s)=>{BTC_STATE=s;},
+  intel,intelSweep,momentumSweep,fmtMomentumAlert,
   __setCdxTicker:(t)=>{cdxTicker=t;}};

@@ -496,15 +496,231 @@ running `scalpOnly:false` becomes Quick + Normal — the same setups it took bef
 Edit `STOCK_SYMS` / `ETF_SYMS` in `server.js` (plain NSE symbols). Upstox instrument keys are resolved
 automatically from the daily NSE master file — no manual IDs needed.
 
+## 🩺 Market Health — market-wide stress & correlation
+
+Every other panel looks at one coin. This one looks at the **market**, and answers the question a
+single chart cannot: *why is everything moving together right now?*
+
+"The market is bearish" is not an answer. These three markets all look identical on a price chart
+and need opposite trades:
+
+| what it looks like | what it actually is | what it means |
+|---|---|---|
+| BTC ↓, 85% of the board red | **long liquidation cascade** — positions being closed *for* their owners | mechanical, self-terminating; it stops when the leverage is gone |
+| BTC ↓, 85% of the board red | **new shorts pressing** — open interest *rising* into the fall | conviction selling with fresh money; no reason for it to stop |
+| BTC ↓, 85% of the board red | **liquidity vacuum** — barely anyone selling, the bids simply left | small orders move price several percent; reduce size |
+
+Open the panel with **🩺 Market Health**. It shows the regime, breadth, altcoin stress, correlation,
+open interest, funding, liquidity — and a **❓ Why is everything falling?** button that writes the
+whole diagnosis in plain English with the evidence it used attached.
+
+**What it detects.** Breadth (−100…+100) and altcoin stress (0–100) · rolling correlations across
+15m/1h/4h/24h, including correlation *spikes* and coins *decoupling* from BTC · BTC → ETH → altcoin
+transmission with lead–lag timing · liquidation cascades · the price×open-interest matrix · funding
+crowding · liquidity vacuums · per-coin beta and downside amplification · HH/HL/LH/LL market
+structure · recovery-vs-continuation probabilities.
+
+### On your open positions
+
+Add **Leverage ×** (and optionally your venue's own **liquidation price**) when you add a trade in
+🔔 Position Watch, then click **🩺 market risk** on it. You get a **Position Stress Score 0–100**,
+distance to liquidation and to breakeven, a `CURRENT → SUPPORT → LIQUIDATION` risk map, whether the
+coin is out- or under-performing the market, whether your position is fighting market structure, and
+the specific level that would strengthen the recovery case.
+
+> **It will not tell you to average down.** The gate starts at *no* and requires evidence to move.
+> A live cascade, a liquidity vacuum, BTC still printing lower lows, or a liquidation price inside
+> 15% each force an outright refusal. When conditions are merely unproven the answer is "wait", with
+> the level that would change it. There is no path in the code to "yes, add more".
+
+### What this platform genuinely cannot see
+
+This is the important part, and the panel repeats it on screen rather than hiding it.
+
+| data | status | consequence |
+|---|---|---|
+| prices, volume, breadth, correlation, beta, structure | ✅ available | the majority of the panel works off this |
+| **liquidations** | ❌ **never available** | no public REST source exists — only a WebSocket stream this server does not hold open. The cascade detector therefore runs **INFERRED** (reconstructed from price, volume, breadth and correlation) with its confidence **capped at 65%**, and it never claims to have seen a liquidation |
+| **open interest** | ⚠️ needs a futures venue | without it, forced long liquidation and fresh short selling are indistinguishable |
+| **funding** | ⚠️ needs a futures venue | without it, you cannot tell whether price is falling into a crowded long book or one that already reset |
+| **order-book depth** | ⚠️ needs a futures venue | falls back to a price-impact *estimate* from candles, labelled as such |
+| **BTC dominance** | ⚠️ needs CoinGecko | the volume-share figure shown instead is **not** dominance and is labelled separately |
+
+⚠️ **Hosting note.** The three ⚠️ rows come from Binance futures, and Binance restricts Indian
+access — the same Bangalore placement that makes your CoinDCX prices correct is likely to make these
+unreachable. That is a real, unresolved gap. The panel states which feeds are live every time it
+renders, so you always know what a conclusion was built on. Set `INTEL_DERIVS=off` to stop trying.
+
+### 🌍 Macro — the half that isn't on the chart
+
+Every indicator in the rest of this platform is **endogenous**: computed from an asset's own price
+history. That makes the whole system structurally blind to the most common way a technically sound
+leveraged position dies — a dollar rally, a rate shock, or a number released at 8:30am that no
+chart level prices in.
+
+**The headline output is not the risk-appetite score. It's TECHNICAL RELIABILITY (0–100)** — an
+estimate of how much crypto is currently being driven by macro rather than by its own structure.
+When BTC's 30-day correlation to the Nasdaq is 0.8 and VIX is 30, a textbook support bounce is not
+a support bounce; it's whatever the dollar does next. That is exactly the condition in which
+chart-only trading keeps producing clean-looking setups and keeps losing, with nothing on the chart
+saying so.
+
+Tracked: **DXY · US 10-year yield · VIX · S&P 500 · Nasdaq · gold · crude · USD/INR · NIFTY ·
+India VIX** (Yahoo Finance, Stooq fallback — free, no key).
+
+**What "gate and degrade" actually does:**
+
+| condition | effect |
+|---|---|
+| Technical reliability low | Every setup's confidence is multiplied by `0.5 + 0.5 × (reliability/100)`, with the reason shown. Never reaches zero — a degraded signal is still information. |
+| Macro risk appetite ≤ −50 | New leveraged **longs** blocked (and shorts in a melt-up ≥ +60). |
+| Inside a scheduled-event window | **Both** directions blocked, confidence capped at 40%, position stress floored at HIGH RISK. |
+| Macro feed unreachable | **Fails open** — multiplier stays 1.0, nothing is blocked — but raises a visible `MACRO UNCHECKED` warning and its own alert. A broken API must not silently freeze the platform, and must not silently stop protecting you either. |
+
+The paper bot honours all of this (🌍 **Respect macro**, on by default). When it sits idle because
+of macro, it says so rather than looking broken.
+
+### ⚡ Live momentum — the vertical moves the platform used to miss
+
+**This closes a real blind spot.** `buildSetup` marks a setup as a scalp when `ADX < 26`; a coin
+going vertical has a high ADX by definition, so it lands in `breakout`/`trend` — and every fast
+surface filtered exactly those out:
+
+```
+index.html  ⚡ Quick Trades   filter(regime === 'range' || 'correction')
+server.js   trackSetups / alertEligible      — same test
+paper.js    isScalp                          — same test
+```
+
+A coin doing +45% in an hour could not appear in Quick Trades, could not be tracked, and **could
+never fire an alert**. Only 🔥 Volume Movers showed it, and Movers has no alerting. Three more
+things made the candle path structurally too slow: `processAsset` drops the forming bar (a 5m
+signal is up to 5 minutes stale), the scan is cached 40s behind a 45s poll, and the universe is
+the top 120 by *yesterday's* volume — so a coin often only joins it after the move.
+
+**The fix reads the ticker, not the candles.** `cdxGetTicker()` already returns every market on
+the exchange in one request, every few seconds, to price live quotes. Recording those snapshots
+gives sub-minute resolution, no forming-bar lag, the whole exchange rather than the top 120, and
+**no extra API calls** — it's the request the server was making anyway. Volume comes from
+differencing the rolling 24h total between snapshots.
+
+Each row carries a **stage** and an explicit **lateness**:
+
+| stage | meaning |
+|---|---|
+| 🔥 **igniting** | the move is happening now — this is the only stage that alerts |
+| ▶ **running** | sustained, still going |
+| ⚠ **extended** | most of the run already happened — reported with how much |
+| ⏸ **stalling** | the push has faded |
+
+> **It never becomes a chase button.** Catching a move at +2% and at +45% are opposite trades, and
+> a detector that just shouts when something is green reliably delivers the second. Alerts fire
+> **only on ignition**, once per coin per 45 minutes, three coins per sweep maximum. An extended
+> move is labelled extended with the plain statement that this is where leveraged entries get
+> liquidated. Rows carry **no entry, stop or target** — they are move notifications, not setups.
+
+The size threshold scales to each coin, measured from **its own recent ticks** rather than its 24h
+range. That distinction matters: the 24h high/low *includes the move being detected*, so a coin
+that has already run 45% gets a huge denominator and needs an absurd further move to register —
+the detector would go blind exactly as a move develops.
+
+### 🎯 What is actually moving crypto
+
+Not "macro is risk-off" — that's a mood. This names the factor, sizes it, and signs it toward
+*your coins*:
+
+> *"US Dollar Index is +1.4% over the window. With BTC's −0.8 beta to it, that alone accounts for
+> about −1.1% of BTC's −1.9% move — the dollar is the main thing dragging crypto right now. That's
+> roughly 82% of the whole move, so this is being imported from outside crypto rather than driven
+> by crypto demand — it will turn when the dollar turns, whatever the chart is doing."*
+
+Each factor gets `contribution = its move × BTC's beta to it`, ranked by size. **A factor with no
+measurable correlation to crypto is excluded**, however large its own move — a beta fitted through
+noise will happily "explain" a move it has nothing to do with.
+
+Betas are univariate on purpose. A joint regression across DXY, Nasdaq and yields is statistically
+tidier and practically useless: they're collinear, so the coefficients flip sign between refreshes.
+A panel that says "the dollar is dragging you" and then "the dollar is supporting you" twenty
+minutes later, from the same data, is worse than none. The rank order is what's actionable, and the
+rank order is stable — the trade-off is that shares overlap and don't sum to 100%, which is stated
+wherever the numbers appear.
+
+### 📈 Is this rally standing on anything?
+
+**Technical analysis isn't bulletproof, and this is the panel that admits it.** A rally can be
+carried by broad participation, expanding volume and improving macro — or it can be four coins, a
+thinning book, a crowded long and an equity market already rolling over. Both print the same green
+candle. Every tell of the second one is measurable *before* the reversal.
+
+Eight legs are checked: participation · trend quality · volume trend · momentum divergence (price
+higher high, RSI lower high) · **macro pointing against the move** · equity decoupling · crowded
+positioning · leveraged chase. Plus extension from the mean.
+
+Each leg reads **✓ confirmed**, **✗ missing**, or **? not measured** — three states, not two. A
+green tick beside "macro UNCHECKED" would be the exact failure this platform exists to prevent, and
+the headline counts only the legs it could actually check.
+
+> **It never predicts a crash.** Nothing here forecasts a fall, and nothing built on this data
+> honestly could. It says *"this rally is largely unsupported: 4 of the 6 internal supports that
+> could be checked are missing — it is resting on fewer legs than the price implies."* That is a
+> claim the data carries. "It will crash" is not. It also always states what would repair the move,
+> so you have something to watch rather than only something to fear.
+
+Works in both directions — the mirror case is a decline making new lows while breadth, volume and
+macro all improve underneath it, which is usually the better entry of the two.
+
+### Scheduled events — `macro-calendar.json`
+
+There is no free API for central-bank calendars, so this is an **editable file** you maintain.
+Three rules keep it honest:
+
+1. **NFP is derived**, not configured — first Friday of the month, by rule. It can't go stale.
+2. **Shipped dates are marked `unverified: true`** and flagged on screen until you check them
+   against federalreserve.gov / bls.gov / rbi.org.in and set them to `false`.
+3. **An expired calendar drops its events** rather than showing last year's schedule as upcoming.
+   Past `validThrough` it reports `STALE` and falls back to derived NFP only.
+
+> The event gate is **deliberately independent of every network call**. It reads a local file, so
+> "don't open leverage into CPI" keeps working even when CoinDCX, Binance and Yahoo are all
+> unreachable. The single most valuable guard here is the one that can't be knocked out.
+
+### "Has this signal worked before?"
+
+Every threshold here started as a judgement, not a measurement. The engine appends a snapshot of the
+market state to `intel-history.jsonl` on each pass, and the backtest button reports what actually
+happened over the next 15m/1h/4h after each signal fired. **It refuses to state a rate below 20
+recorded occurrences** — under that it says how few it has instead of printing a percentage. Nothing
+is backfilled: the record starts when the engine does, and resets if the host redeploys with
+ephemeral storage.
+
 ## Files
 ```
 growth-intelligence-pro/
 ├── START-HERE.command   ← double-click to run
 ├── server.js            ← backend (Upstox + engine)
+├── paper.js             ← paper-trading simulator
+├── intel/               ← 🩺 market-wide stress & correlation engine
+│   ├── index.js         ← orchestrator (injected deps, no own price feed)
+│   ├── data.js          ← one shared market snapshot, reuses server.js's loaders
+│   ├── stats.js         ← correlation / beta / weighted scoring over partial evidence
+│   ├── breadth.js       ├── correlation.js  ├── beta.js       ├── structure.js
+│   ├── transmission.js  ├── liquidation.js  ├── openInterest.js
+│   ├── funding.js       ├── liquidity.js    ├── recovery.js
+│   ├── regime.js        ├── positionRisk.js ├── alerts.js     ├── history.js
+│   ├── macro.js         ← 🌍 macro regime + TECHNICAL RELIABILITY (the gate)
+│   ├── attribution.js   ← 🎯 which macro factor is moving crypto, and by how much
+│   ├── fragility.js     ← 📈 is this move supported by its own internals?
+│   ├── momentum.js      ← ⚡ exchange-wide vertical-move detector (ticker, not candles)
+│   ├── calendar.js      ← scheduled-event risk; needs no network
+│   ├── macroData.js     ← DXY/yields/VIX/equities adapter (Yahoo, Stooq fallback)
+│   ├── derivs.js        ← futures adapter (OI/funding/depth) — honest about being unreachable
+│   └── global.js        ← BTC dominance adapter
+├── macro-calendar.json  ← 📅 YOU MAINTAIN THIS — FOMC/CPI/RBI dates (NFP is derived)
 ├── config.json          ← your keys + settings
 ├── public/index.html    ← dashboard
 ├── token.json           ← auto: daily login token (private)
 ├── instruments.json     ← auto: cached symbol→key map
+├── intel-history.jsonl  ← auto: market snapshots for the intel backtester
 └── README.md
 ```
 
