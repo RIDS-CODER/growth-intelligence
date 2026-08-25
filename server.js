@@ -157,6 +157,14 @@ function signalSince(close,high,low,times){
   return {cur,sinceTime:times?times[Math.min(since,times.length-1)]:null,barsAgo:n-since};
 }
 const TYPE={Intraday:{stopMult:1.0,t:[1.0,1.8,2.6],hold:"Same session"},Scalp:{stopMult:0.7,t:[0.7,1.2,1.7],hold:"Minutes–a few hours (range)"},Swing:{stopMult:1.5,t:[1.5,2.8,4.5],hold:"3–15 trading days"},Breakout:{stopMult:1.3,t:[2.0,3.5,6.0],hold:"1–6 weeks"}};
+/* ROUND-TRIP TRADING FRICTION — ONE OWNER.
+   CoinDCX charges 0.5% taker each way and 10bps of slippage is generous on the liquid pairs, so a
+   round trip costs 1.2% of notional before direction is even considered. The paper bot has always
+   enforced this; the Breakout list needs the identical number, and a second copy in the browser
+   would be a third place for it to drift. It ships in the scan payload instead, and a test asserts
+   it matches paper.js's DEFAULTS. */
+const TRADE_COST={feeBps:50,slipBps:10};
+const roundTripPct=()=>2*(TRADE_COST.feeBps/10000+TRADE_COST.slipBps/10000)*100;
 const ADX_SCALP=26;   // pullback with ADX below this = choppy/range → scalp small & tight, don't set trend-width targets
 function buildSetup(sig,tf){
   const dir=sig.verdict==='SELL'?-1:1;
@@ -994,6 +1002,7 @@ async function scan(tab,tf){
   const cryptoAssets=uni.filter(a=>a.src==='cg');
   const cryptoFailed = cryptoAssets.length>0 && !DEMO && !ok.some(r=>r.asset.src==='cg');
   const out={tab,tf,analyzed:ok.length,total:uni.length,results:ok,ts:Date.now(),demo:DEMO,loggedIn:li,keyOf,cryptoMode,usdtInr:priceRate(),rateSrc:priceRateSrc(),
+    costs:{...TRADE_COST,roundTripPct:roundTripPct()},
     btc:((tab==='Crypto'||tab==='All')&&BTC_STATE)?{bull:BTC_STATE.bull,verdict:BTC_STATE.verdict}:null,
     note: cryptoFailed?"Crypto unreachable — this server's region can't reach CoinDCX. For exact CoinDCX ₹, host in an India region (e.g. DigitalOcean Bangalore/BLR); otherwise the global ₹ feed is used.":undefined};
   if(ok.length>0 && !cryptoFailed) cSet(ck,out);   // never cache an empty/failed scan
@@ -2572,5 +2581,5 @@ module.exports={IND,computeSignal,buildSetup,buildReasons,confidenceOf,alertElig
   __setFx:(r)=>{fxRate=r;fxAt=Date.now();},__setMode:(m)=>{cryptoMode=m;},
   __getSetups:()=>SETUPS,__resetSetups:()=>{SETUPS={active:[],resolved:[]};},
   btcStateFromSeries,__setBtc:(s)=>{BTC_STATE=s;},
-  intel,intelSweep,momentumSweep,fmtMomentumAlert,
+  intel,intelSweep,momentumSweep,fmtMomentumAlert,TRADE_COST,roundTripPct,
   __setCdxTicker:(t)=>{cdxTicker=t;}};

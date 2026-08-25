@@ -624,6 +624,36 @@ range. That distinction matters: the 24h high/low *includes the move being detec
 that has already run 45% gets a huge denominator and needs an absurd further move to register —
 the detector would go blind exactly as a move develops.
 
+### 🚀 Breakouts inside ⚡ Quick Trades
+
+Quick Trades now has a **mode toggle: ⚡ Scalps / 🚀 Breakouts**. Scalps are unchanged — pullback
+entries into support with tight stops. Breakouts are the setups the panel had always discarded.
+
+The engine was already building them correctly (entry at the break, a structural stop bounded to
+3 ATR so it can never be absurd, targets snapped to real chart levels). Only the filter was
+hiding them. What was genuinely missing is that **breakouts fail differently from scalps**, so
+they get their own guards:
+
+| guard | why |
+|---|---|
+| **Volume behind the break** | A level breaking on no participation is the textbook fakeout. A range trade doesn't depend on follow-through; a breakout is nothing but follow-through. |
+| **Price still inside its entry band** | Once price has left the band, the trade on offer isn't the one the plan describes. Chasing it is how a vertical liquidates people. |
+| **Stop under 6%** | Wider than that can't be sized on leverage without the position being the whole account. |
+| **First target clears the 1.2% round trip** | Same cost gate the paper bot applies. |
+| **R:R ≥ 1.2** | |
+
+Pullback entries (`waitdip` / `waitbounce`) deliberately stay in Scalps — mixing them in would put
+two different risk profiles under one heading again.
+
+Each breakout card carries a badge with **its stop distance**, because that's the one number that
+should change how you size it. And when the list is empty it says *why* — "4 breaks seen, all
+rejected: no volume behind them" is a completely different market state from "nothing is breaking
+out", and only one of those means you should look at another timeframe.
+
+The 1.2% friction figure now has **one owner** (`TRADE_COST` in `server.js`, shipped in the scan
+payload), with a test asserting the paper bot's defaults still match it — so the panel and the bot
+can't gate on different numbers.
+
 ### 🎯 What is actually moving crypto
 
 Not "macro is risk-off" — that's a mood. This names the factor, sizes it, and signs it toward
