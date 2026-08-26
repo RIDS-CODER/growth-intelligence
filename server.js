@@ -1049,6 +1049,20 @@ function hashStr(s){let h=0;for(const c of s)h=(h*31+c.charCodeAt(0))>>>0;return
    number. The UI shows $ from `usd` directly instead of computing ₹ ÷ rate, so a wrong or
    mismatched rate can no longer move a dollar price. */
 let cgPriceCache=null,cgUsdCache=null,cgPriceAt=0;
+/* HOW OLD ARE THE PRICES WE ARE ABOUT TO SERVE?
+   `cgPriceAt` only advances on a SUCCESSFUL fetch, so this grows without bound while the exchange
+   is failing — which is exactly what we want to know. The catch-blocks below re-serve the last
+   good cache when a fetch fails, and until now they did so with NO age limit: an hour of failures
+   produced hour-old prices delivered as if they were current, and /api/quotes looked perfectly
+   healthy the whole time.
+   Serving the stale cache is still right — a last known price beats no price — but it has to be
+   LABELLED, and anything that ACTS on prices (filling paper orders, firing position alerts) must
+   be able to refuse. */
+const quotesAgeMs=()=>cgPriceAt?Date.now()-cgPriceAt:null;
+/* Beyond this, prices are fine to LOOK at but not to act on: well past any normal blip, well
+   short of the multi-minute freezes this guard exists for. */
+const QUOTE_ACT_MAX_AGE=parseInt(process.env.QUOTE_ACT_MAX_AGE_MS)||90000;
+const quotesActionable=()=>{const a=quotesAgeMs();return a==null||a<=QUOTE_ACT_MAX_AGE;};
 async function liveQuotesFull(tab){
   const uni=universeFor(tab),out={},usd={};
   const cryptoIds=uni.filter(a=>a.src==='cg');
@@ -1072,7 +1086,10 @@ async function liveQuotesFull(tab){
   if(!DEMO){await ensureInstruments();const stocks=uni.filter(a=>a.src==='upstox');const keyOf={};stocks.forEach(a=>keyOf[a.sym]=keyForAsset(a));
     const keys=stocks.map(a=>keyOf[a.sym]).filter(Boolean);
     try{const ltp=await upstoxLTP(keys);stocks.forEach(a=>{const k=keyOf[a.sym];if(k&&ltp[k])out[a.sym]=ltp[k];});}catch(e){}}
-  return {inr:out,usd};
+  /* The age rides WITH the prices. Every consumer that acts on them can now decide for itself
+     whether they are fresh enough, instead of assuming a populated map means a live one. */
+  const ageMs=quotesAgeMs();
+  return {inr:out,usd,ageMs,stale:!quotesActionable(),actionable:quotesActionable()};
 }
 // ₹ only — every internal caller (position sweeps, setup tracker) keys a price map by symbol and wants nothing else
 async function liveQuotes(tab){return (await liveQuotesFull(tab)).inr;}
@@ -2040,7 +2057,7 @@ async function researchCoin(rawSym,horizon){
    dereferenced later, at tick time. The bot therefore gets the live gate without the two modules
    having to be constructed in a particular order. */
 const paper = require('./paper.js')({ scan, liveQuotes, dir:__dirname, rate:()=>cdxUsdtInr(), topMovers, dumpBounce, dumpRule:dumpBotTakes,
-  macroGate:()=>intel.gate() });
+  macroGate:()=>intel.gate(), quotesActionable });
 
 /* Market-wide stress & correlation engine. Same injection pattern as the paper bot: it gets THIS
    server's candle loader and pivot detector rather than opening its own connection, so the Market
@@ -2306,6 +2323,12 @@ function fmtPosAlert(p,kind,px,verdict){
   return "";
 }
 async function positionsSweep(){
+  /* DO NOT ALERT ON A FROZEN PRICE.
+     This sweep sends Telegram messages saying a trade has turned against you, and it compares the
+     live price to your entry to decide. Against an hour-old price it would either stay silent
+     through a real reversal or fire on one that already unwound — both worse than saying nothing.
+     The prices are still shown on screen (labelled stale); only the ACTING stops. */
+  if(!quotesActionable()){ return 0; }
   const open=POSITIONS.filter(p=>p.status==="open");
   if(!open.length)return 0;
   let sent=0;
@@ -2460,7 +2483,8 @@ async function handler(req,res){
     if(p==="/api/scan"){ // no login gate — crypto/commodity-ETF work without Upstox; stocks just skip until logged in
       const data=await scan(u.searchParams.get("tab")||"Stocks",u.searchParams.get("tf")||"intraday");return sendJSON(res,data);}
     if(p==="/api/quotes"){
-      {const q=await liveQuotesFull(u.searchParams.get("tab")||"Stocks");return sendJSON(res,withLiveRate({quotes:q.inr,usd:q.usd,loggedIn:loggedIn(),ts:Date.now()}));}}
+      {const q=await liveQuotesFull(u.searchParams.get("tab")||"Stocks");
+       return sendJSON(res,withLiveRate({quotes:q.inr,usd:q.usd,quoteAgeMs:q.ageMs,quotesStale:q.stale,loggedIn:loggedIn(),ts:Date.now()}));}}
     if(p==="/api/backtest"){
       const data=await backtest(u.searchParams.get("tab")||"Stocks",u.searchParams.get("tf")||"daily");return sendJSON(res,data);}
     if(p==="/api/crypto-signals" && req.method==="POST"){
@@ -2628,4 +2652,5 @@ module.exports={IND,computeSignal,buildSetup,buildReasons,confidenceOf,alertElig
   __getSetups:()=>SETUPS,__resetSetups:()=>{SETUPS={active:[],resolved:[]};},
   btcStateFromSeries,__setBtc:(s)=>{BTC_STATE=s;},
   intel,intelSweep,momentumSweep,fmtMomentumAlert,TRADE_COST,roundTripPct,cdxHealth,__cdxErr:()=>cdxErr,
+  quotesAgeMs,quotesActionable,QUOTE_ACT_MAX_AGE,__setQuoteAt:(t)=>{cgPriceAt=t;},
   __setCdxTicker:(t)=>{cdxTicker=t;}};

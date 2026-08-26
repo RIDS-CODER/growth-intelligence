@@ -1790,3 +1790,55 @@ test('/api/feed exists so the feed can be checked directly', () => {
   assert.match(src, /p==="\/api\/feed"/, 'a direct feed-health endpoint must exist');
   assert.match(src, /coindcx:cdxHealth\(\)/);
 });
+
+test('SERVING A STALE CACHE IS FINE — ACTING ON IT IS NOT', () => {
+  /* The second half of the frozen-price bug. When the ticker fails, liveQuotesFull re-serves its
+     last good cache — correct, a last known price beats no price — but it did so with NO age
+     limit. An hour of failures produced hour-old prices delivered as if current, and the endpoint
+     looked perfectly healthy the whole time. */
+  const now = Date.now();
+  server.__setQuoteAt(now);
+  assert.strictEqual(server.quotesActionable(), true, 'fresh prices are actionable');
+  assert.ok(server.quotesAgeMs() < 1000);
+
+  server.__setQuoteAt(now - (server.QUOTE_ACT_MAX_AGE + 5000));
+  assert.strictEqual(server.quotesActionable(), false, 'prices past the ceiling must not be acted on');
+  assert.ok(server.quotesAgeMs() > server.QUOTE_ACT_MAX_AGE);
+
+  server.__setQuoteAt(0);
+  assert.strictEqual(server.quotesActionable(), true, 'never-fetched is not the same as stale — do not block a cold start');
+  server.__setQuoteAt(now);
+});
+
+test('the paper bot stands down rather than fill orders against frozen prices', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'paper.js'), 'utf8');
+  assert.match(src, /quotesActionable/, 'paper must receive a freshness check');
+  assert.match(src, /feedStalled\s*=\s*true/, 'a stall must be recorded on the state');
+  assert.match(src, /stood down rather than fill orders/, 'and explained in plain words');
+  // The check must sit BEFORE anything that manages or opens positions.
+  /* Match the CALL SITE, not `function manage(prices){` — the definition sits far earlier in the
+     file and comparing against it would pass no matter where the guard actually ran. */
+  const guard = src.indexOf('!quotesActionable()');
+  const manageCall = src.search(/\n\s+manage\(prices\);/);
+  const openCall = src.search(/\n\s+if\(all\.length\) openFromScan/);
+  assert.ok(guard > 0, 'guard not found');
+  assert.ok(manageCall > guard, 'the freshness guard must run before manage() is called');
+  assert.ok(openCall > guard, 'the freshness guard must run before openFromScan()');
+});
+
+test('position alerts refuse to fire on a frozen price', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const i = src.indexOf('async function positionsSweep()');
+  const body = src.slice(i, i + 900);
+  assert.match(body, /quotesActionable\(\)/, 'the sweep must check freshness');
+  assert.match(body, /DO NOT ALERT ON A FROZEN PRICE/, 'and say why it is there');
+});
+
+test('the quotes endpoint reports its own age so nothing has to assume', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /quoteAgeMs:q\.ageMs/, '/api/quotes must ship the age of the prices it is serving');
+  assert.match(src, /quotesStale:q\.stale/);
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  assert.match(html, /d\.quoteAgeMs/, 'the page must read the quote age, not only the rate age');
+  assert.match(html, /feedQuotesStale/, 'and surface it');
+});
