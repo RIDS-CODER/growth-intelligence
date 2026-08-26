@@ -272,6 +272,11 @@ let usdtInrAt=0, usdtInrSrc="";
 const RATE_RANK={coindcx:2,fx:1};                     // CoinDCX is the venue being traded — its rate is the truth
 const RATE_STALE=5*60*1000;                           // ...unless it has stopped arriving, then FX may take over
 function setRate(d){
+  /* Feed health lives with the quote-freshness state further down this file, which is a separate
+     block — the test suite loads each block on its own, and a bare call would make this one
+     depend on that one being present. Guarded so both stay independently loadable, and so a
+     future refactor that moves either block cannot silently break rate handling. */
+  if(typeof noteFeed==='function')noteFeed(d);
   if(!d||!(d.usdtInr>0))return;
   const src=d.rateSrc||"fx";
   const at=Date.now()-Math.max(0,+d.rateAge||0);      // normalise the reading into THIS clock
@@ -1045,13 +1050,34 @@ function applyQuotes(map,usdMap){
    landed, and goes amber then red as it grows, so a stall announces itself instead of being
    mistaken for calm. */
 let lastQuoteAt=0, quoteFails=0, directBackoffUntil=0, quoteWhy='';
+/* THE SERVER'S FEED HEALTH, kept beside the browser's own poll health because the two together
+   are the answer to "why is the price lagging" and neither is sufficient alone.
+   `lastQuoteAt` only records that a RESPONSE ARRIVED. A rate-limited exchange still returns a
+   perfectly healthy 200 full of stale prices, so the browser's clock reads fine while the price
+   behind it is minutes old — which is exactly how this failure hid the last several times. The
+   server now reports the age of its own exchange reading and whether that exchange has been
+   failing, and the age line shows whichever of the two is worse. */
+let feedStaleMs=0, feedErr=null;
+function noteFeed(d){
+  if(!d)return;
+  if(typeof d.rateAge==='number')feedStaleMs=d.rateAge;
+  feedErr=d.feedErr||null;
+}
 function paintQuoteAge(){
   const el=document.getElementById('lastUpd'); if(!el)return;
   if(!lastQuoteAt){el.textContent='';el.style.color='';return;}
   const age=Math.round((Date.now()-lastQuoteAt)/1000);
   const t=new Date(lastQuoteAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true});
-  el.textContent=`LTP ${t} · ${age}s ago`+(quoteWhy?` · ${quoteWhy}`:'');
-  el.style.color = age>40 ? 'var(--sell)' : age>15 ? '#fbbf24' : '';
+  /* Show the WORSE of the two ages. The browser can be polling happily every five seconds while
+     the server's exchange reading is four minutes old — and in that case the number that matters
+     to a trader is the four minutes, not the five seconds. */
+  const srvAge=Math.round((feedStaleMs||0)/1000);
+  const worst=Math.max(age,srvAge);
+  let why=quoteWhy;
+  if(feedErr)why=`⚠ CoinDCX feed failing (${feedErr.consecutive} in a row) — prices are FROZEN at the last good reading`;
+  else if(srvAge>age+20)why=`⚠ exchange reading is ${srvAge}s old — the page is polling fine but the price behind it is stale`;
+  el.textContent=`LTP ${t} · ${worst}s ago`+(why?` · ${why}`:'');
+  el.style.color = (feedErr||worst>40) ? 'var(--sell)' : worst>15 ? '#fbbf24' : '';
 }
 setInterval(paintQuoteAge,1000);
 async function pollQuotes(){

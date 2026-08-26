@@ -1706,3 +1706,87 @@ test('the scan payload ships the cost so the browser never hard-codes it', () =>
   assert.ok(/d\.costs\s*&&\s*d\.costs\.roundTripPct/.test(html),
     'the breakout list must read the round trip from the scan payload');
 });
+
+/* ============================================================
+   TICKER FEED HEALTH — the "prices are lagging" bug class
+
+   The USDT rate freezing and every crypto price drifting with it has now been reported several
+   times across this project's life, and each time the mechanism was the same: a ticker request
+   failed, every caller swallowed the error, `cdxTicker` silently stopped advancing, and nothing
+   on screen said so. These tests make the failure impossible to hide.
+   ============================================================ */
+
+test('the ticker is SINGLE-FLIGHT — concurrent callers share one request', async () => {
+  /* Roughly eight callers can want the ticker at the same instant. Without this, concurrency
+     multiplied the request rate against a public endpoint that rate-limits, and getting
+     rate-limited is exactly how the rate freezes. */
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /let cdxInflight\s*=\s*null/, 'ticker must hold an in-flight promise');
+  assert.match(src, /if\(cdxInflight\)return cdxInflight/, 'concurrent callers must share it');
+  assert.match(src, /finally\s*\{\s*cdxInflight\s*=\s*null/, 'the in-flight slot must always clear');
+});
+
+test('ticker failures are COUNTED, never swallowed into silence', () => {
+  const h = server.cdxHealth();
+  assert.ok(h && typeof h.consecutive === 'number', 'health must expose a consecutive failure count');
+  assert.ok('total' in h && 'last' in h && 'ageMs' in h, 'health must carry total, last error and reading age');
+
+  const err = server.__cdxErr();
+  assert.strictEqual(err.consecutive, 0, 'clean start');
+  // Simulate a run of failures the way a rate limit would produce them.
+  err.consecutive = 3; err.total = 3; err.last = 'HTTP 429'; err.lastAt = Date.now();
+  const bad = server.cdxHealth();
+  assert.strictEqual(bad.ok, false);
+  assert.strictEqual(bad.consecutive, 3);
+  assert.match(bad.last, /429/);
+  err.consecutive = 0; err.total = 0; err.last = null; err.lastAt = 0;   // restore
+});
+
+test('a failing feed rides along with every rate-bearing payload', () => {
+  const err = server.__cdxErr();
+  const clean = server.withLiveRate({ x: 1 });
+  assert.strictEqual(clean.feedErr, null, 'a healthy feed adds nothing to the payload');
+
+  err.consecutive = 2; err.total = 2; err.last = 'HTTP 429'; err.lastAt = Date.now();
+  const bad = server.withLiveRate({ x: 1 });
+  assert.ok(bad.feedErr, 'a failing feed must be reported on every payload that carries a rate');
+  assert.strictEqual(bad.feedErr.consecutive, 2);
+  assert.match(bad.feedErr.last, /429/);
+  err.consecutive = 0; err.total = 0; err.last = null; err.lastAt = 0;
+});
+
+test('THE REQUEST RATE STAYS BOUNDED — this regression froze the rate once already', () => {
+  /* A 10s keepalive plus a 4s freshness window on a 15s-polled endpoint roughly doubled ticker
+     traffic, and the momentum buffer discarded most of it on arrival because it ignores samples
+     closer together than its 8s minimum gap. Pin the cadences so the same well-meaning change
+     cannot be made again without this failing. */
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+
+  const keep = src.match(/setInterval\([^;]*?ensureCdxFresh\(\d+\)[\s\S]*?,\s*(\d+)\s*\)\s*;/);
+  assert.ok(keep, 'keepalive interval not found');
+  assert.ok(+keep[1] >= 20000, `keepalive fires every ${keep[1]}ms — too often against a rate-limited endpoint`);
+
+  // No caller may demand a freshness window tighter than the momentum buffer's own minimum gap:
+  // anything tighter buys no resolution and only costs requests.
+  const minGap = require('../intel/momentum').MIN_GAP_MS || 8000;
+  for (const m of src.matchAll(/ensureCdxFresh\((\d+)\)/g)) {
+    assert.ok(+m[1] >= minGap, `ensureCdxFresh(${m[1]}) is tighter than the ${minGap}ms buffer gap — the extra requests are discarded on arrival`);
+  }
+});
+
+test('the page reports the WORSE of browser and server staleness', () => {
+  /* A rate-limited exchange still returns a healthy 200 full of stale prices, so the browser's own
+     poll clock reads fine while the price behind it is minutes old. Showing only the browser's age
+     is what let this hide. */
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  assert.match(html, /const worst\s*=\s*Math\.max\(age,\s*srvAge\)/, 'the age line must show the worse of the two');
+  assert.match(html, /feedErr/, 'the age line must be able to name an exchange failure');
+  assert.match(html, /FROZEN at the last good reading/, 'a frozen price must say so in plain words');
+  assert.match(html, /function noteFeed/, 'every payload must feed the server-staleness reading');
+});
+
+test('/api/feed exists so the feed can be checked directly', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(src, /p==="\/api\/feed"/, 'a direct feed-health endpoint must exist');
+  assert.match(src, /coindcx:cdxHealth\(\)/);
+});
