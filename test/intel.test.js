@@ -1559,3 +1559,150 @@ test('the buffer downsamples and expires so it cannot grow without bound', () =>
   assert.ok(st.snapshots <= 10, 'a 60s window at one per 8s should hold ~8 snapshots, got ' + st.snapshots);
   assert.ok(st.seen < 300, 'most 1s-apart records must have been downsampled away, kept ' + st.seen);
 });
+
+/* ============================================================
+   🚀 BREAKOUT MODE — the setups Quick Trades always filtered out
+
+   These execute the REAL browser function out of index.html in a vm sandbox, the same technique
+   the rate/stale guards use. Re-implementing the rule here would test a copy and let the shipped
+   one drift, which is the bug class this codebase keeps paying for.
+   ============================================================ */
+const vm = require('node:vm');
+
+function breakoutSandbox() {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const from = html.indexOf('const BREAKOUT_REGIMES');
+  /* Bound on the next top-level declaration AFTER the guard, not on the panel's section header —
+     that header sits above `quickState` and therefore above this block, so searching for it found
+     an offset earlier in the file and sliced nothing. */
+  const to = html.indexOf('let quickTimer', from);
+  assert.ok(from > 0, 'breakout guard block not found in index.html');
+  assert.ok(to > from, 'could not bound the breakout guard block');
+  const ctx = { console };
+  vm.createContext(ctx);
+  vm.runInContext(html.slice(from, to), ctx);
+  return ctx;
+}
+
+/* A breakout that should pass every guard. */
+function goodBreak(over) {
+  return Object.assign({
+    sig: { price: 100 },
+    vol: { hot: true, score: 70 },
+    action: { kind: 'buybreak' },
+    setup: { regime: 'breakout', dir: 1, entryLo: 99.5, entryHi: 101.5, stop: 97,
+      riskPct: 3, targets: [104, 107, 110], ret: [4, 7, 10], rrr: 1.6 }
+  }, over || {});
+}
+
+test('breakout guard: a clean, volume-backed break passes', () => {
+  const ctx = breakoutSandbox();
+  const r = ctx.breakoutEligible(goodBreak(), { roundTripPct: 1.2 });
+  assert.strictEqual(r.ok, true, r.why);
+});
+
+test('breakout guard: a break with NO VOLUME is rejected — that is the fakeout', () => {
+  const ctx = breakoutSandbox();
+  const r = ctx.breakoutEligible(goodBreak({ vol: { hot: false, score: 10 } }), { roundTripPct: 1.2 });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.why, /volume/i);
+  const none = ctx.breakoutEligible(goodBreak({ vol: null }), { roundTripPct: 1.2 });
+  assert.strictEqual(none.ok, false, 'a missing volume reading must not pass either');
+});
+
+test('breakout guard: price already past the entry band is rejected, not chased', () => {
+  const ctx = breakoutSandbox();
+  const gone = ctx.breakoutEligible(goodBreak({ sig: { price: 106 } }), { roundTripPct: 1.2 });
+  assert.strictEqual(gone.ok, false);
+  assert.match(gone.why, /already left the entry band/);
+  // The short mirror.
+  const shortGone = ctx.breakoutEligible(goodBreak({
+    sig: { price: 94 }, action: { kind: 'sellbreak' },
+    setup: { regime: 'breakout', dir: -1, entryLo: 98.5, entryHi: 100.5, stop: 103, riskPct: 3, targets: [96, 93, 90], ret: [-4, -7, -10], rrr: 1.6 }
+  }), { roundTripPct: 1.2 });
+  assert.strictEqual(shortGone.ok, false);
+  assert.match(shortGone.why, /already left the entry band/);
+});
+
+test('breakout guard: a stop too wide to size on leverage is rejected', () => {
+  const ctx = breakoutSandbox();
+  const wide = ctx.breakoutEligible(goodBreak({
+    setup: { regime: 'breakout', dir: 1, entryLo: 99.5, entryHi: 101.5, stop: 88, riskPct: 12, targets: [104, 107, 110], ret: [4, 7, 10], rrr: 1.6 }
+  }), { roundTripPct: 1.2 });
+  assert.strictEqual(wide.ok, false);
+  assert.match(wide.why, /too wide to size on leverage/);
+});
+
+test('breakout guard: the round-trip cost gate applies here too', () => {
+  const ctx = breakoutSandbox();
+  // 1.5% target against 1.2% friction — nowhere near the 1.5x margin the paper bot demands.
+  const thin = ctx.breakoutEligible(goodBreak({
+    setup: { regime: 'breakout', dir: 1, entryLo: 99.5, entryHi: 101.5, stop: 99, riskPct: 1, targets: [101.5, 103, 105], ret: [1.5, 3, 5], rrr: 1.5 }
+  }), { roundTripPct: 1.2 });
+  assert.strictEqual(thin.ok, false);
+  assert.match(thin.why, /round trip/);
+});
+
+test('breakout guard: pullback entries stay in the scalp list', () => {
+  const ctx = breakoutSandbox();
+  for (const kind of ['waitdip', 'waitbounce']) {
+    const r = ctx.breakoutEligible(goodBreak({ action: { kind } }), { roundTripPct: 1.2 });
+    assert.strictEqual(r.ok, false, kind + ' must not appear in the breakout list');
+    assert.match(r.why, /pullback entries stay/);
+  }
+});
+
+test('breakout guard: only breakout/trend regimes qualify', () => {
+  const ctx = breakoutSandbox();
+  for (const regime of ['range', 'correction', 'dumpbounce']) {
+    const r = ctx.breakoutEligible(goodBreak({ setup: Object.assign(goodBreak().setup, { regime }) }), { roundTripPct: 1.2 });
+    assert.strictEqual(r.ok, false, regime + ' is not a breakout');
+  }
+  const trend = ctx.breakoutEligible(goodBreak({ setup: Object.assign(goodBreak().setup, { regime: 'trend' }) }), { roundTripPct: 1.2 });
+  assert.strictEqual(trend.ok, true, 'trend setups belong in the breakout list');
+});
+
+test('breakout guard: a poor reward:risk is rejected', () => {
+  const ctx = breakoutSandbox();
+  const r = ctx.breakoutEligible(goodBreak({
+    setup: { regime: 'breakout', dir: 1, entryLo: 99.5, entryHi: 101.5, stop: 96, riskPct: 4, targets: [104, 106, 108], ret: [4, 6, 8], rrr: 0.9 }
+  }), { roundTripPct: 1.2 });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.why, /reward:risk/);
+});
+
+test('breakout guard: every rejection carries a reason the panel can show', () => {
+  const ctx = breakoutSandbox();
+  const cases = [
+    goodBreak({ vol: { hot: false } }),
+    goodBreak({ sig: { price: 200 } }),
+    goodBreak({ action: { kind: 'waitdip' } }),
+    goodBreak({ setup: Object.assign(goodBreak().setup, { regime: 'range' }) }),
+    { sig: { price: 1 } }
+  ];
+  for (const c of cases) {
+    const r = ctx.breakoutEligible(c, { roundTripPct: 1.2 });
+    assert.strictEqual(r.ok, false);
+    assert.ok(typeof r.why === 'string' && r.why.length > 5, 'rejection must be explainable: ' + JSON.stringify(r));
+  }
+});
+
+test('THE FRICTION NUMBER HAS ONE OWNER — server and paper bot cannot drift', () => {
+  // The breakout gate reads this from the scan payload rather than hard-coding a second copy.
+  assert.strictEqual(server.TRADE_COST.feeBps, 50);
+  assert.strictEqual(server.TRADE_COST.slipBps, 10);
+  assert.ok(Math.abs(server.roundTripPct() - 1.2) < 1e-9);
+
+  // paper.js must agree, or the bot and the panel would gate on different numbers.
+  const paperSrc = fs.readFileSync(path.join(__dirname, '..', 'paper.js'), 'utf8');
+  const fee = paperSrc.match(/feeBps\s*:\s*(\d+)/), slip = paperSrc.match(/slipBps\s*:\s*(\d+)/);
+  assert.ok(fee && slip, 'paper.js must declare feeBps/slipBps defaults');
+  assert.strictEqual(+fee[1], server.TRADE_COST.feeBps, 'paper.js feeBps has drifted from server TRADE_COST');
+  assert.strictEqual(+slip[1], server.TRADE_COST.slipBps, 'paper.js slipBps has drifted from server TRADE_COST');
+});
+
+test('the scan payload ships the cost so the browser never hard-codes it', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  assert.ok(/d\.costs\s*&&\s*d\.costs\.roundTripPct/.test(html),
+    'the breakout list must read the round trip from the scan payload');
+});
