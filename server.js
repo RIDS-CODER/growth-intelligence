@@ -439,7 +439,33 @@ let cgOk=false, cryptoMode="binance";   // set to 'coindcx' when CoinDCX is reac
 // CoinDCX public endpoints (no auth)
 const CDX_INT={"5m":"5m","15m":"15m","30m":"30m","1h":"1h","4h":"4h","6h":"6h","12h":"12h","daily":"1d","intraday":"30m"};
 let cdxTicker={},cdxTickerAt=0;
-async function cdxGetTicker(){const t=await getJSON("https://api.coindcx.com/exchange/ticker",{});if(!Array.isArray(t))throw new Error("cdx ticker");
+/* TICKER HEALTH — failures are counted, never swallowed silently.
+   Every caller wraps this in try/catch and moves on, which is correct behaviour for one request
+   but meant a rate-limited exchange produced NO signal anywhere: `cdxTicker` simply stopped
+   advancing, the USDT/INR rate froze, every ₹ and $ on the page drifted, and nothing said why.
+   That is the "prices are lagging" report, and it has now happened enough times to deserve a
+   counter rather than another round of guessing. */
+let cdxErr={consecutive:0,total:0,last:null,lastAt:0};
+const cdxHealth=()=>({ok:cdxErr.consecutive===0,consecutive:cdxErr.consecutive,total:cdxErr.total,
+  last:cdxErr.last,lastAt:cdxErr.lastAt,ageMs:cdxTickerAt?Date.now()-cdxTickerAt:null});
+
+/* SINGLE-FLIGHT. Roughly eight independent callers can want the ticker at the same moment — the
+   quote poll, the momentum endpoint, the momentum sweep, the keepalive, a scan, the position
+   sweep. Without this they each fired their own request, so concurrency MULTIPLIED the rate
+   rather than sharing it, and the fastest way to make prices lag is to get rate-limited for
+   asking too often. One request in flight, everyone waits on the same promise. */
+let cdxInflight=null;
+async function cdxGetTicker(){
+  if(cdxInflight)return cdxInflight;
+  cdxInflight=cdxFetchTicker();
+  try{ return await cdxInflight; } finally { cdxInflight=null; }
+}
+async function cdxFetchTicker(){
+  let t;
+  try{ t=await getJSON("https://api.coindcx.com/exchange/ticker",{}); }
+  catch(e){ cdxErr.consecutive++; cdxErr.total++; cdxErr.last=String(e.message||e).slice(0,90); cdxErr.lastAt=Date.now(); throw e; }
+  if(!Array.isArray(t)){ cdxErr.consecutive++; cdxErr.total++; cdxErr.last="ticker returned a non-array body"; cdxErr.lastAt=Date.now(); throw new Error("cdx ticker"); }
+  cdxErr.consecutive=0;
   const snap={};t.forEach(x=>{if(x.market)snap[x.market]=+x.last_price;});cdxTicker=snap;cdxTickerAt=Date.now();
   /* Feed the momentum detector from the request we were making anyway. This ONE call carries every
      market on the exchange, and it already runs every few seconds to price live quotes — so
@@ -533,7 +559,15 @@ function priceRateAge(){
    correct while $ drifted. Reading the rate costs nothing, so it is re-stamped on the way out —
    cache hit or not — and carries `rateAge` so the browser can reject an out-of-order update
    without having to trust that our clock and its clock agree. */
-function withLiveRate(o){ return {...o, usdtInr:priceRate(), rateSrc:priceRateSrc(), rateAge:priceRateAge(), rateAt:Date.now()}; }
+/* Every payload that carries a rate now carries the FEED'S HEALTH alongside it, so a frozen rate
+   can be explained on screen instead of merely observed. `feedErr` is non-null only when the
+   exchange has actually been failing — a healthy feed adds nothing to the payload. */
+function withLiveRate(o){
+  const h=(typeof cdxHealth==='function')?cdxHealth():null;
+  const bad=h&&h.consecutive>0;
+  return {...o, usdtInr:priceRate(), rateSrc:priceRateSrc(), rateAge:priceRateAge(), rateAt:Date.now(),
+    feedErr: bad?{consecutive:h.consecutive,last:h.last,ageMs:h.ageMs}:null};
+}
 const isStableBase=b=>STABLE_TK.has(b)||/(UP|DOWN|BULL|BEAR)$/.test(b)||/^\d/.test(b);
 // CoinGecko fallback — works from ANY server region (incl. US), INR native. Uses your demo key if set.
 const cgHeaders=()=>COINGECKO_KEY?{"x-cg-demo-api-key":COINGECKO_KEY}:{};
@@ -1015,6 +1049,20 @@ function hashStr(s){let h=0;for(const c of s)h=(h*31+c.charCodeAt(0))>>>0;return
    number. The UI shows $ from `usd` directly instead of computing ₹ ÷ rate, so a wrong or
    mismatched rate can no longer move a dollar price. */
 let cgPriceCache=null,cgUsdCache=null,cgPriceAt=0;
+/* HOW OLD ARE THE PRICES WE ARE ABOUT TO SERVE?
+   `cgPriceAt` only advances on a SUCCESSFUL fetch, so this grows without bound while the exchange
+   is failing — which is exactly what we want to know. The catch-blocks below re-serve the last
+   good cache when a fetch fails, and until now they did so with NO age limit: an hour of failures
+   produced hour-old prices delivered as if they were current, and /api/quotes looked perfectly
+   healthy the whole time.
+   Serving the stale cache is still right — a last known price beats no price — but it has to be
+   LABELLED, and anything that ACTS on prices (filling paper orders, firing position alerts) must
+   be able to refuse. */
+const quotesAgeMs=()=>cgPriceAt?Date.now()-cgPriceAt:null;
+/* Beyond this, prices are fine to LOOK at but not to act on: well past any normal blip, well
+   short of the multi-minute freezes this guard exists for. */
+const QUOTE_ACT_MAX_AGE=parseInt(process.env.QUOTE_ACT_MAX_AGE_MS)||90000;
+const quotesActionable=()=>{const a=quotesAgeMs();return a==null||a<=QUOTE_ACT_MAX_AGE;};
 async function liveQuotesFull(tab){
   const uni=universeFor(tab),out={},usd={};
   const cryptoIds=uni.filter(a=>a.src==='cg');
@@ -1038,7 +1086,10 @@ async function liveQuotesFull(tab){
   if(!DEMO){await ensureInstruments();const stocks=uni.filter(a=>a.src==='upstox');const keyOf={};stocks.forEach(a=>keyOf[a.sym]=keyForAsset(a));
     const keys=stocks.map(a=>keyOf[a.sym]).filter(Boolean);
     try{const ltp=await upstoxLTP(keys);stocks.forEach(a=>{const k=keyOf[a.sym];if(k&&ltp[k])out[a.sym]=ltp[k];});}catch(e){}}
-  return {inr:out,usd};
+  /* The age rides WITH the prices. Every consumer that acts on them can now decide for itself
+     whether they are fresh enough, instead of assuming a populated map means a live one. */
+  const ageMs=quotesAgeMs();
+  return {inr:out,usd,ageMs,stale:!quotesActionable(),actionable:quotesActionable()};
 }
 // ₹ only — every internal caller (position sweeps, setup tracker) keys a price map by symbol and wants nothing else
 async function liveQuotes(tab){return (await liveQuotesFull(tab)).inr;}
@@ -2006,7 +2057,7 @@ async function researchCoin(rawSym,horizon){
    dereferenced later, at tick time. The bot therefore gets the live gate without the two modules
    having to be constructed in a particular order. */
 const paper = require('./paper.js')({ scan, liveQuotes, dir:__dirname, rate:()=>cdxUsdtInr(), topMovers, dumpBounce, dumpRule:dumpBotTakes,
-  macroGate:()=>intel.gate() });
+  macroGate:()=>intel.gate(), quotesActionable });
 
 /* Market-wide stress & correlation engine. Same injection pattern as the paper bot: it gets THIS
    server's candle loader and pivot detector rather than opening its own connection, so the Market
@@ -2272,6 +2323,12 @@ function fmtPosAlert(p,kind,px,verdict){
   return "";
 }
 async function positionsSweep(){
+  /* DO NOT ALERT ON A FROZEN PRICE.
+     This sweep sends Telegram messages saying a trade has turned against you, and it compares the
+     live price to your entry to decide. Against an hour-old price it would either stay silent
+     through a real reversal or fire on one that already unwound — both worse than saying nothing.
+     The prices are still shown on screen (labelled stale); only the ACTING stops. */
+  if(!quotesActionable()){ return 0; }
   const open=POSITIONS.filter(p=>p.status==="open");
   if(!open.length)return 0;
   let sent=0;
@@ -2398,7 +2455,7 @@ function fmtMomentumAlert(m,rate){
 }
 async function momentumSweep(){
   if(!TG_TOKEN||!alertState.on)return 0;
-  let r; try{ if(cryptoMode==="coindcx")await ensureCdxFresh(6000); r=intel.momentum.scan({isStable:isStableBase,limit:40}); }catch(e){ return 0; }
+  let r; try{ if(cryptoMode==="coindcx")await ensureCdxFresh(20000); r=intel.momentum.scan({isStable:isStableBase,limit:40}); }catch(e){ return 0; }
   if(!r.ok)return 0;
   const now=Date.now(), rate=priceRate();
   for(const k in momAlertLast) if(now-momAlertLast[k]>MOM_COOLDOWN_MS) delete momAlertLast[k];
@@ -2426,7 +2483,8 @@ async function handler(req,res){
     if(p==="/api/scan"){ // no login gate — crypto/commodity-ETF work without Upstox; stocks just skip until logged in
       const data=await scan(u.searchParams.get("tab")||"Stocks",u.searchParams.get("tf")||"intraday");return sendJSON(res,data);}
     if(p==="/api/quotes"){
-      {const q=await liveQuotesFull(u.searchParams.get("tab")||"Stocks");return sendJSON(res,withLiveRate({quotes:q.inr,usd:q.usd,loggedIn:loggedIn(),ts:Date.now()}));}}
+      {const q=await liveQuotesFull(u.searchParams.get("tab")||"Stocks");
+       return sendJSON(res,withLiveRate({quotes:q.inr,usd:q.usd,quoteAgeMs:q.ageMs,quotesStale:q.stale,loggedIn:loggedIn(),ts:Date.now()}));}}
     if(p==="/api/backtest"){
       const data=await backtest(u.searchParams.get("tab")||"Stocks",u.searchParams.get("tf")||"daily");return sendJSON(res,data);}
     if(p==="/api/crypto-signals" && req.method==="POST"){
@@ -2475,12 +2533,19 @@ async function handler(req,res){
       return sendJSON(res,{stats:intel.history.stats(),rows:intel.history.recent(Math.min(500,parseInt(u.searchParams.get("limit"))||100))});}
     if(p==="/api/intel/health"){   // which feeds are actually reachable from THIS server
       return sendJSON(res,{derivs:await intel.derivsHealth(),lastError:intel.lastError(),history:intel.history.stats()});}
+    if(p==="/api/feed"){   // is the exchange feed actually healthy? the answer to "why is the price lagging"
+      return sendJSON(res,{coindcx:cdxHealth(),cryptoMode,rate:priceRate(),rateSrc:priceRateSrc(),rateAgeMs:priceRateAge(),
+        momentum:intel.momentum.stats(),ts:Date.now()});}
     if(p==="/api/intel/gate"){   // the macro gate on its own — what is being blocked and degraded, and why
       return sendJSON(res,await intel.gate());}
     if(p==="/api/intel/calendar"){   // scheduled event risk, straight from macro-calendar.json
       return sendJSON(res,intel.calendar.eventRisk());}
     if(p==="/api/intel/momentum"){   // ⚡ vertical moves across the WHOLE exchange, from the live ticker
-      if(cryptoMode==="coindcx")try{await ensureCdxFresh(4000);}catch(e){}
+      /* Do NOT force a fetch here. The quote poll and the keepalive already hold the ticker
+         inside ~20s, and this endpoint is polled every 15s by the panel — forcing a 4s freshness
+         window made it the single largest source of ticker traffic in the app for no benefit,
+         since the buffer ignores samples closer than 8s apart anyway. */
+      if(cryptoMode==="coindcx")try{await ensureCdxFresh(20000);}catch(e){}
       return sendJSON(res,withLiveRate({...intel.momentum.scan({isStable:isStableBase,limit:Math.min(50,parseInt(u.searchParams.get("limit"))||25)}),
         buffer:intel.momentum.stats()}));}
 
@@ -2562,10 +2627,15 @@ if(require.main===module){
      costs nothing — and 30s is the only cadence that is any use for a move that completes in five
      minutes. The 2-minute health tick and 3-minute scalp loop are both far too slow for it. */
   setInterval(()=>{ momentumSweep().catch(()=>{}); }, MOM_SWEEP_MS);
-  /* Keep the ticker buffer filling even when nobody has the page open. liveQuotesFull only calls
-     the ticker when a browser asks for quotes, so an idle server would have an empty buffer and
-     miss exactly the overnight move this feature exists to catch. */
-  if(!DEMO) setInterval(()=>{ ensureCdxFresh(9000).catch(()=>{}); }, 10000);
+  /* Keep the ticker buffer filling when nobody has the page open — liveQuotesFull only calls the
+     ticker when a browser asks for quotes, so an idle server would miss the overnight move this
+     feature exists to catch.
+     TWENTY SECONDS, NOT TEN. The momentum buffer discards anything closer together than its 8s
+     minimum gap, so a 10s keepalive bought no extra resolution and simply doubled the request
+     rate against a public endpoint that rate-limits — which shows up as the USDT rate freezing
+     and every price on the page drifting. With single-flight above, 20s keeps a 20-minute buffer
+     comfortably dense (~60 snapshots) at a third of the traffic. */
+  if(!DEMO) setInterval(()=>{ ensureCdxFresh(20000).catch(()=>{}); }, 20000);
   // Telegram alert loop — scan for High-confidence quick scalps every 3 min (inert until a bot token is configured).
   if(TG_TOKEN){ console.log('  Telegram alerts: ON (chat auto-detected from whoever messages the bot)'); setInterval(()=>{ alertScan().catch(()=>{}); }, 180000); setTimeout(()=>alertScan().catch(()=>{}),15000); }
   else console.log('  Telegram alerts: off (set TELEGRAM_BOT_TOKEN to enable — chat ID optional)');
@@ -2581,5 +2651,6 @@ module.exports={IND,computeSignal,buildSetup,buildReasons,confidenceOf,alertElig
   __setFx:(r)=>{fxRate=r;fxAt=Date.now();},__setMode:(m)=>{cryptoMode=m;},
   __getSetups:()=>SETUPS,__resetSetups:()=>{SETUPS={active:[],resolved:[]};},
   btcStateFromSeries,__setBtc:(s)=>{BTC_STATE=s;},
-  intel,intelSweep,momentumSweep,fmtMomentumAlert,TRADE_COST,roundTripPct,
+  intel,intelSweep,momentumSweep,fmtMomentumAlert,TRADE_COST,roundTripPct,cdxHealth,__cdxErr:()=>cdxErr,
+  quotesAgeMs,quotesActionable,QUOTE_ACT_MAX_AGE,__setQuoteAt:(t)=>{cgPriceAt=t;},
   __setCdxTicker:(t)=>{cdxTicker=t;}};

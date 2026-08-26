@@ -11,7 +11,7 @@
      • Halts for the day at the daily loss limit.
    Costs are charged: CoinDCX taker fees and slippage, both configurable.
    ============================================================ */
-module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, dumpBounce, dumpRule, macroGate }) {
+module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, dumpBounce, dumpRule, macroGate, quotesActionable }) {
   const fs = require('fs'), path = require('path');
   const FILE = path.join(dir, 'paper-state.json');
   const TF_MIN = {'5m':5,'15m':15,'30m':30,'1h':60,'4h':240,'6h':360,'12h':720,'daily':1440,'intraday':30};
@@ -395,6 +395,17 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, 
       const today=istDay();   // IST calendar day — the target window is IST midnight → IST midnight
       if(S.dayAnchor!==today){ S.dayAnchor=today; S.dayStartEquity=markEquity(lastPrices); S.halted=false; S.goalHit=false; S.stopOuts={}; S.lossStreak=0; S.pauseUntil=0; }  // new day resets (incl. discipline counters)
       let prices={}; try{ prices=await liveQuotes(S.tab)||{}; }catch(e){}
+      /* A FROZEN FEED MUST NOT FILL ORDERS.
+         Every number this bot produces — fills, stops, targets, the equity curve — is computed
+         against `prices`. When the exchange feed stalls, the server keeps serving the last good
+         cache, so `prices` stays populated and looks perfectly normal. Trading against it would
+         manufacture fills at prices that no longer exist and quietly corrupt the only forward
+         record of whether any of this works. Stand down and say why. */
+      if(typeof quotesActionable==='function' && !quotesActionable()){
+        S.lastError='Price feed stale — the bot stood down rather than fill orders against frozen prices.';
+        S.feedStalled=true; save(); return snapshot(lastPrices);
+      }
+      S.feedStalled=false;
       lastPrices=prices;
       manage(prices);
       checkPending(prices);
@@ -439,7 +450,7 @@ module.exports = function createPaper({ scan, liveQuotes, dir, rate, topMovers, 
     const expectancy=tot?pnls.reduce((a,b)=>a+b,0)/tot:0;                                   // avg ₹ per trade — >0 means an edge
     const profitFactor=grossLoss>0?grossWin/grossLoss:(grossWin>0?99:0);                    // >1 means winners outweigh losers
     const benched=Object.keys(S.stopOuts||{}).filter(s=>(S.stopOuts[s]||0)>=(S.maxStopOutsPerCoin||99));
-    return { running:S.running, halted:S.halted, goalHit:S.goalHit, macro:S.macro||null, tab:S.tab, timeframes:S.timeframes, usdtInr:(typeof rate==='function'?(rate()||0):0),
+    return { running:S.running, halted:S.halted, goalHit:S.goalHit, macro:S.macro||null, feedStalled:!!S.feedStalled, tab:S.tab, timeframes:S.timeframes, usdtInr:(typeof rate==='function'?(rate()||0):0),
       paused:(Date.now()<(S.pauseUntil||0)), pauseUntil:S.pauseUntil||0, lossStreak:S.lossStreak||0, benched,
       funnel:S.funnel||null, whyIdle:whyIdle(), sources:{...S.sources},
       /* WHICH DESK ACTUALLY MAKES MONEY. The point of choosing sources is being able to switch
