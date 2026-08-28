@@ -346,9 +346,25 @@ def seed(db: Session, *, email: str = DEFAULT_EMAIL, password: str = DEFAULT_PAS
 
 
 def main() -> None:
+    """CLI entrypoint.
+
+    Credentials come from the environment when present, so a real deployment never
+    has to ship with the development password baked into source.
+    """
+    import os
+
+    email = os.environ.get("SEED_OWNER_EMAIL", DEFAULT_EMAIL)
+    password = os.environ.get("SEED_OWNER_PASSWORD", DEFAULT_PASSWORD)
+
+    if password == DEFAULT_PASSWORD and os.environ.get("APP_ENV") == "production":
+        raise SystemExit(
+            "Refusing to seed a production environment with the development password. "
+            "Set SEED_OWNER_PASSWORD (and optionally SEED_OWNER_EMAIL) first."
+        )
+
     create_all()
     with SessionLocal() as db:
-        result = seed(db)
+        result = seed(db, email=email, password=password)
 
     print("Enrose Brand Brain seeded.\n")
     for key, value in result.items():
@@ -359,8 +375,11 @@ def main() -> None:
     print(f"  Fields the client still needs to supply ({len(result['missing_fields'])}):")
     for field in result["missing_fields"]:
         print(f"    - {field}")
-    print(f"\n  Login: {result['user_email']} / {DEFAULT_PASSWORD}")
-    print("  Change this password before any real deployment.")
+    print(f"\n  Login: {result['user_email']}")
+    if password == DEFAULT_PASSWORD:
+        print(f"  Password: {DEFAULT_PASSWORD}  (development default — change it before deploying)")
+    else:
+        print("  Password: taken from SEED_OWNER_PASSWORD")
 
 
 if __name__ == "__main__":
