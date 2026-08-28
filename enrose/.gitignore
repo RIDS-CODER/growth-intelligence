@@ -1,0 +1,23 @@
+# Enrose autopilot — local artefacts. Kept separate from the repo-root
+# .gitignore so this subtree stays self-contained.
+.env
+*.db
+*.sqlite3
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+var/
+uploads/
+
+node_modules/
+.next/
+out/
+.turbo/
+next-env.d.ts
+tsconfig.tsbuildinfo
+*.tsbuildinfo
