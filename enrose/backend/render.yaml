@@ -1,0 +1,30 @@
+# Render blueprint — an alternative to Railway. Deploys the API plus a Postgres
+# instance. Set ANTHROPIC_API_KEY and SEED_OWNER_PASSWORD in the dashboard.
+services:
+  - type: web
+    name: enrose-autopilot-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase: { name: enrose-db, property: connectionString }
+      - key: SECRET_KEY
+        generateValue: true
+      - key: APP_ENV
+        value: production
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: FRONTEND_ORIGINS
+        sync: false
+      - key: SEED_ON_STARTUP
+        value: "true"
+      - key: SEED_OWNER_EMAIL
+        sync: false
+      - key: SEED_OWNER_PASSWORD
+        sync: false
+
+databases:
+  - name: enrose-db
+    plan: basic-256mb

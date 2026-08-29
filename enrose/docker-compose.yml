@@ -1,0 +1,47 @@
+# One command to run the whole system locally with a real Postgres:
+#   docker compose up --build
+#
+# Then open http://localhost:3000. No API key needed — the AI and Instagram
+# subsystems run on labelled mocks until you supply credentials.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: enrose
+      POSTGRES_PASSWORD: enrose
+      POSTGRES_DB: enrose
+    ports: ["5432:5432"]
+    volumes: ["enrose_pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U enrose"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: ./backend
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      DATABASE_URL: postgresql+psycopg://enrose:enrose@db:5432/enrose
+      SECRET_KEY: local-development-only
+      FRONTEND_ORIGINS: http://localhost:3000
+      SEED_ON_STARTUP: "true"
+      # Leave empty to run on the mock provider; paste a key to use real Claude.
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+    ports: ["8000:8000"]
+    volumes: ["enrose_uploads:/srv/var/uploads"]
+
+  web:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+    depends_on: [api]
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+    ports: ["3000:3000"]
+
+volumes:
+  enrose_pgdata:
+  enrose_uploads:
