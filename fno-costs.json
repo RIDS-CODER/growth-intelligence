@@ -1,0 +1,99 @@
+{
+  "_README": [
+    "F&O TRANSACTION COSTS. Edit this file — the app re-reads it whenever it changes, no restart.",
+    "",
+    "WHY YOU HAVE TO MAINTAIN THIS: statutory rates and exchange charges are set by circular, not",
+    "by any API. They have changed materially three times in recent years (STT on option sales",
+    "went from 0.0625% to 0.1%; NSE moved transaction charges off the old volume slabs). Rather",
+    "than quietly price your trades off stale numbers, the app reads them from here and tells you",
+    "on screen that they are unverified until you confirm them.",
+    "",
+    "HOW TO VERIFY IN FIVE MINUTES — open ONE real contract note from your broker and check the",
+    "app's estimate against it. That single document contains every line below. If the totals",
+    "match, set \"verified\": true and the warning goes away. If they do not, edit the rate that is",
+    "wrong. A contract note is the authority here, not a website and not this file.",
+    "",
+    "SOURCES if you would rather read the circulars:",
+    "  STT          https://incometaxindia.gov.in  (Finance Act, Chapter VII)",
+    "  NSE charges  https://www.nseindia.com/regulations/exchange-communication-circulars",
+    "  BSE charges  https://www.bseindia.com/markets/MarketInfo/NoticesCirculars.aspx",
+    "  Stamp duty   uniform across states since July 2020",
+    "",
+    "EVERY RATE IS A FRACTION, NOT A PERCENTAGE. 0.001 means 0.1%.",
+    "",
+    "brokerage: what YOUR broker charges per executed order, set separately for options and for",
+    "  futures because the plans genuinely differ. OPTIONS at a discount broker are a FLAT ₹20 per",
+    "  executed order with no percentage alternative — set pctOfTurnover to null. FUTURES are",
+    "  usually '₹20 or 0.03%, whichever is lower', so both fields are set and the app takes the",
+    "  lower. Full-service brokers charge a percentage on everything: set perOrder to null and",
+    "  pctOfTurnover to their rate. Set perOrder to 0 if your broker is genuinely free.",
+    "",
+    "  Getting this backwards matters more than it looks. Applying a 0.03% alternative to options",
+    "  makes a cheap weekly appear almost free to trade, when a flat ₹20 is in fact the single",
+    "  largest charge on it.",
+    "",
+    "THE FLAT FEE IS THE ONE THAT HURTS. ₹20 per order on a 75-lot NIFTY option costs 0.27 premium",
+    "points. On a 20-point out-of-the-money weekly that is 1.3% of the position PER LEG before any",
+    "tax has been charged — and the round trip starts you nearly 4% down. The app shows cost as a",
+    "percentage of premium for exactly this reason.",
+    "",
+    "sttExercise is the rate charged on INTRINSIC VALUE when an in-the-money option is allowed to",
+    "expire instead of being squared off. It is charged to the buyer, and it is higher than the",
+    "rate on a sale (sttSell). Since the September 2019 amendment it applies to intrinsic value",
+    "rather than to the full settlement value, so it is no longer the account-ending trap it was",
+    "before then.",
+    "",
+    "AND THAT HIGHER RATE DOES NOT MEAN YOU SHOULD ALWAYS SQUARE OFF — the app computes both routes",
+    "rather than following the folk rule. Selling saves 0.025% of intrinsic in STT but pays a whole",
+    "extra leg of exchange charges (0.035% of premium), GST on them, another ₹20 of brokerage and",
+    "the bid-ask spread. On a deep in-the-money option with no time value left those outweigh the",
+    "STT saving and expiring is cheaper. Squaring off wins once enough EXTRINSIC value remains to",
+    "cover the gap; the app reports exactly how much that is for your position."
+  ],
+  "asOf": "2024-10-01",
+  "verified": false,
+  "currency": "INR",
+
+  "gst": 0.18,
+
+  "brokerage": {
+    "options": { "perOrder": 20, "pctOfTurnover": null },
+    "futures": { "perOrder": 20, "pctOfTurnover": 0.0003 },
+    "note": "per executed order. When both fields are set the app charges the lower; null disables that field."
+  },
+
+  "options": {
+    "sttSell": 0.001,
+    "sttExercise": 0.00125,
+    "stampDutyBuy": 0.00003,
+    "sebiTurnover": 0.000001,
+    "NSE": { "transaction": 0.0003503, "ipft": 0.000005, "clearing": 0 },
+    "BSE": { "transaction": 0.000325, "ipft": 0.000005, "clearing": 0 }
+  },
+
+  "futures": {
+    "sttSell": 0.0000125,
+    "stampDutyBuy": 0.00002,
+    "sebiTurnover": 0.000001,
+    "NSE": { "transaction": 0.0000173, "ipft": 0.0000005, "clearing": 0 },
+    "BSE": { "transaction": 0.0000173, "ipft": 0.0000005, "clearing": 0 }
+  },
+
+  "slippage": {
+    "assumedHalfSpreadTicks": 1,
+    "tickSize": 0.05,
+    "note": [
+      "USED ONLY WHEN LIVE BID/ASK IS UNAVAILABLE, and the app says so when it falls back to it.",
+      "The bid-ask spread is usually the LARGEST cost in an option trade and the only one not",
+      "printed on the contract note. One tick is optimistic for anything but a near-the-money",
+      "weekly index option; far strikes routinely show five to twenty ticks."
+    ]
+  },
+
+  "_incomeTaxNote": [
+    "Not modelled per trade, because it is not a per-trade cost. In India F&O profit is BUSINESS",
+    "income, taxed at your slab rate — there is no concessional capital-gains rate on it. Losses",
+    "can be carried forward eight years if the return is filed on time, and a tax audit may be",
+    "required above the turnover threshold. Everything this app reports is PRE-TAX."
+  ]
+}
