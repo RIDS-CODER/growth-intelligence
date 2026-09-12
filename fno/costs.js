@@ -62,6 +62,9 @@ const DEFAULTS = {
     NSE: { transaction: 0.0000173, ipft: 0.0000005, clearing: 0 },
     BSE: { transaction: 0.0000173, ipft: 0.0000005, clearing: 0 }
   },
+  /* Margin is an ESTIMATE and is labelled as one wherever it surfaces — SPAN is a portfolio risk
+     model run by the exchange over its own scenario file, not a formula anyone can reproduce. */
+  margin: { shortOptionPctOfNotional: 0.12, bufferMultiple: 1.5 },
   slippage: { assumedHalfSpreadTicks: 1, tickSize: 0.05 }
 };
 
@@ -102,6 +105,7 @@ function createCosts(opts) {
         },
         options: { ...DEFAULTS.options, ...(j.options || {}) },
         futures: { ...DEFAULTS.futures, ...(j.futures || {}) },
+        margin: { ...DEFAULTS.margin, ...(j.margin || {}) },
         slippage: { ...DEFAULTS.slippage, ...(j.slippage || {}) },
         source: path.basename(file)
       };

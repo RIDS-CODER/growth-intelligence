@@ -79,6 +79,39 @@
     "BSE": { "transaction": 0.0000173, "ipft": 0.0000005, "clearing": 0 }
   },
 
+  "margin": {
+    "shortOptionPctOfNotional": 0.12,
+    "bufferMultiple": 1.5,
+    "note": [
+      "MARGIN CANNOT BE COMPUTED HERE AND THE APP DOES NOT PRETEND OTHERWISE.",
+      "",
+      "Exchange margin on a short option comes from SPAN, a portfolio risk model the exchange runs",
+      "over its own scenario file and republishes several times a day. It depends on current",
+      "volatility, on the whole portfolio's offsets, and on exposure margin added on top. There is",
+      "no formula that reproduces it, so this is a PERCENTAGE-OF-NOTIONAL ESTIMATE with wide error",
+      "bars, labelled as an estimate everywhere it is shown, and never used as the basis for a",
+      "trade the account could not comfortably fund.",
+      "",
+      "shortOptionPctOfNotional: rough SPAN + exposure for one naked short index option, as a",
+      "  fraction of contract value (strike x lot size). 0.12 is a reasonable mid-volatility",
+      "  figure for NIFTY. It RISES when volatility rises — exactly when a short position is",
+      "  already losing — which is how margin calls arrive at the worst possible moment.",
+      "",
+      "bufferMultiple: how much more than the estimate the account must hold before the app will",
+      "  propose an undefined-risk short. 1.5 means a position estimated to need Rs1,00,000 is",
+      "  only proposed with Rs1,50,000 free. This is not conservatism for its own sake: an",
+      "  intraday margin revision on a position with no free capital forces a square-off at the",
+      "  worst available price.",
+      "",
+      "DEFINED-RISK SPREADS ARE DIFFERENT and the app treats them differently. The exchange",
+      "recognises the hedge, so margin on a credit vertical is close to (spread width x lot) less",
+      "the credit received — which IS computable, and is marked as near-exact rather than",
+      "estimated.",
+      "",
+      "VERIFY BEFORE TRADING. Your broker's margin calculator is the authority. Nothing here is."
+    ]
+  },
+
   "slippage": {
     "assumedHalfSpreadTicks": 1,
     "tickSize": 0.05,
