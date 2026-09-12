@@ -5,6 +5,8 @@
 token.json
 # cached NSE symbol -> instrument-key map
 instruments.json
+# cached F&O contract master (strikes, expiries, lot sizes) — re-downloaded daily
+fno-instruments.json
 # tracked-setup snapshots + resolved outcomes
 setups.json
 # paper-trading bot state
