@@ -181,6 +181,38 @@
   .mhmomrow.ig{border-left-color:var(--buy)}.mhmomrow.run{border-left-color:var(--accent2)}
   .mhmomrow.ext{border-left-color:#fbbf24}.mhmomrow.stall{border-left-color:var(--faint)}
   .mhmomwarn{flex-basis:100%;color:#fcd34d;font-size:11.5px;line-height:1.55;margin-top:3px}
+
+  /* 📐 OPTIONS (F&O) */
+  .fno{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px;margin:10px 0}
+  .fno h3{margin:0 0 10px;font-size:15px;display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+  .fnobar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}
+  .fnobar select,.fnobar input{background:#0d1420;border:1px solid var(--line);color:var(--txt);border-radius:8px;
+    padding:5px 8px;font-size:12.5px;font-family:inherit}
+  .fnobar label{font-size:11.5px;color:var(--faint);display:flex;gap:5px;align-items:center}
+  .fnogrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-bottom:12px}
+  .fnosec{margin-top:14px;border-top:1px solid var(--line);padding-top:12px}
+  .fnosec>h4{margin:0 0 8px;font-size:13px;color:var(--accent2);letter-spacing:.3px}
+  .fnoverdict{padding:10px 12px;border-radius:10px;border:1px solid var(--line);border-left-width:4px;margin-bottom:10px;font-size:12.5px;line-height:1.6}
+  .fnoverdict.cheap{border-left-color:var(--buy);background:rgba(52,211,153,.07)}
+  .fnoverdict.expensive{border-left-color:var(--sell);background:rgba(248,113,113,.07)}
+  .fnoverdict.fair{border-left-color:var(--hold);background:rgba(251,191,36,.06)}
+  .fnoverdict.unknown{border-left-color:var(--faint);background:#0d1420}
+  .fnoverdict b{font-size:14px;text-transform:uppercase;letter-spacing:.5px}
+  .fnolegs{width:100%;border-collapse:collapse;font-size:12.5px;font-family:var(--mono);margin:6px 0}
+  .fnolegs th{text-align:left;color:var(--faint);font-weight:600;font-size:11px;padding:4px 8px 4px 0;border-bottom:1px solid var(--line)}
+  .fnolegs td{padding:5px 8px 5px 0;border-bottom:1px solid #131d2c}
+  .fnolegs .buy{color:var(--buy)}.fnolegs .sell{color:var(--sell)}
+  .fnoplan{font-size:12.5px;line-height:1.65}
+  .fnoplan .row{padding:7px 10px;border-radius:8px;background:#0d1420;border:1px solid var(--line);margin-bottom:6px}
+  .fnoplan .row b{color:var(--accent2)}
+  .fnowarn{padding:8px 11px;border-radius:8px;background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.3);
+    color:#fcd34d;font-size:11.5px;line-height:1.6;margin-bottom:6px}
+  .fnostop{padding:8px 11px;border-radius:8px;background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.3);
+    color:#fca5a5;font-size:11.5px;line-height:1.6;margin-bottom:6px}
+  .fnoexit{display:flex;gap:9px;font-size:12.5px;padding:5px 0;border-bottom:1px solid #131d2c;line-height:1.55}
+  .fnoexit .p{color:var(--faint);font-family:var(--mono);flex:0 0 auto}
+  .fnosum{padding:10px 12px;border-radius:10px;background:rgba(56,189,248,.08);border:1px solid rgba(56,189,248,.3);
+    font-size:13px;line-height:1.7;color:#bae6fd;margin-bottom:10px}
 </style>
 </head>
 <body>
@@ -223,12 +255,14 @@
     <button class="btn" id="posBtn" onclick="togglePositions()" style="border-color:#f472b6;background:rgba(244,114,182,.14);color:#fbcfe8">🔔 Position Watch</button>
     <button class="btn" id="paperBtn" onclick="togglePaper()" style="border-color:#34d399;background:rgba(52,211,153,.14);color:#a7f3d0">🤖 Paper Bot</button>
     <button class="btn" id="intelBtn" onclick="toggleIntel()" style="border-color:#38bdf8;background:rgba(56,189,248,.15);color:#bae6fd">🩺 Market Health</button>
+    <button class="btn" id="fnoBtn" onclick="toggleFno()" style="border-color:#818cf8;background:rgba(129,140,248,.15);color:#c7d2fe">📐 Options (F&amp;O)</button>
     <span class="pstat" id="filterNote"></span>
   </div>
   <div id="scoreInfo" style="display:none"></div>
   <div id="cryptoNote" style="display:none"></div>
   <div id="btcNote" style="display:none"></div>
   <div id="intelPanel" style="display:none"></div>
+  <div id="fnoPanel" style="display:none"></div>
   <div id="quickPanel" style="display:none"></div>
   <div id="moversPanel" style="display:none"></div>
   <div id="listPanel" style="display:none"></div>
@@ -1820,6 +1854,249 @@ function quickCard(q){
       ${q.note?`<div style="margin:4px 0;padding:6px 9px;border-radius:7px;background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.35);color:#fbbf24;font-size:11.5px;line-height:1.4">${q.note}</div>`:''}
       <div class="sub" style="margin-top:4px">⏱ works in ${fillWindowText(quickState.tf)} (≈${FILL_BARS} bars) · take profit at Target 1, let runners ride to T2/T3 with the stop moved to entry</div></div></div>`;
 }
+/* ================= 📐 OPTIONS (F&O) — index options on NIFTY, BANKNIFTY, SENSEX =================
+   THE SAME RULE AS MARKET HEALTH: anything that could not be measured renders as an explicit
+   unavailable state carrying its reason, never as a dash or a zero.
+
+   Two things this panel puts in front of the user that an options screen normally buries:
+
+   1. THE SIZING VERDICT, INCLUDING "NO". One lot of NIFTY is 75 contracts, so on a small account
+      an ordinary option can be a fifth of everything. When nothing fits the budget the panel says
+      so in rupees and says what would fit — it does not quietly show a trade the account cannot
+      hold.
+
+   2. WHAT IS NOT KNOWN. Cost rates carry their vintage and an unverified badge until the user has
+      checked one contract note; a volatility verdict carries its coverage; a margin figure says
+      it is an estimate. The panel is only worth trusting if it is equally clear about its gaps. */
+let fnoTimer=null,fnoLast=null;
+const fnoState={u:'NIFTY',expiry:null,view:'unsure',target:'',naked:false,loading:false,list:null};
+
+function toggleFno(){
+  const el=document.getElementById('fnoPanel');const show=el.style.display==='none';
+  el.style.display=show?'block':'none';
+  if(show){ if(!el.innerHTML)el.innerHTML='<div class="fno"><h3>📐 Options (F&amp;O)</h3><div class="empty">Loading the contract master…</div></div>';
+    loadFnoList().then(()=>loadFno()); fnoTimer=setInterval(()=>loadFno(),45000); }
+  else if(fnoTimer){clearInterval(fnoTimer);fnoTimer=null;}
+}
+
+async function loadFnoList(){
+  try{ const d=await(await fetch('/api/fno/list')).json(); fnoState.list=d; }
+  catch(e){ fnoState.list={ok:false,reason:'could not reach the server: '+e.message}; }
+}
+
+function fnoQuery(){
+  const cap=parseFloat(document.getElementById('capital').value)||0;
+  const risk=(parseFloat(document.getElementById('riskpct').value)||1)/100;
+  const q=['u='+encodeURIComponent(fnoState.u),'risk='+risk,'view='+fnoState.view];
+  if(cap>0)q.push('capital='+cap);
+  if(fnoState.expiry)q.push('expiry='+fnoState.expiry);
+  if(fnoState.target)q.push('target='+parseFloat(fnoState.target));
+  if(fnoState.naked)q.push('naked=1');
+  return q.join('&');
+}
+
+async function loadFno(force){
+  if(fnoState.loading)return; fnoState.loading=true;
+  try{ const d=await(await fetch('/api/fno?'+fnoQuery()+(force?'&force=1':''))).json(); fnoLast=d; renderFno(d); }
+  catch(e){ document.getElementById('fnoPanel').innerHTML=
+    `<div class="fno"><h3>📐 Options (F&amp;O)</h3><div class="empty">Could not reach the options engine: ${e.message}</div></div>`; }
+  finally{ fnoState.loading=false; }
+}
+
+function onFnoChange(k,v){
+  fnoState[k]=v;
+  if(k==='u')fnoState.expiry=null;          // expiries differ per underlying
+  loadFno(true);
+}
+
+/* Capital and risk live in the page's existing risk bar — one source of truth, so the options
+   panel can never disagree with the rest of the dashboard about how much money is in play. */
+function fnoBar(d){
+  const L=fnoState.list;
+  const unders=(L&&L.ok?L.underlyings:[{key:'NIFTY',name:'NIFTY 50'}]);
+  const uOpts=unders.map(x=>`<option value="${x.key}"${x.key===fnoState.u?' selected':''}>${x.name}${x.lotSize?' · lot '+x.lotSize:''}</option>`).join('');
+  const exps=(d&&d.expiries)||[];
+  const eOpts=exps.map(e=>`<option value="${e.expiry}"${String(e.expiry)===String(fnoState.expiry)?' selected':''}>${e.date} · ${e.daysLeft.toFixed(1)}d</option>`).join('');
+  const views=[['unsure','No view (neutral / range)'],['up','Bullish'],['down','Bearish'],['move','Expecting a big move'],['range','Expecting it to stay put']];
+  return `<div class="fnobar">
+    <label>Index <select onchange="onFnoChange('u',this.value)">${uOpts}</select></label>
+    <label>Expiry <select onchange="onFnoChange('expiry',this.value)">${eOpts||'<option>—</option>'}</select></label>
+    <label>My view <select onchange="onFnoChange('view',this.value)">${views.map(([v,t])=>`<option value="${v}"${v===fnoState.view?' selected':''}>${t}</option>`).join('')}</select></label>
+    <label>Target level <input type="number" step="10" value="${fnoState.target}" placeholder="optional" style="width:96px"
+      onchange="onFnoChange('target',this.value)"></label>
+    <label title="Undefined-risk shorts can lose more than the account holds. Off by default."><input type="checkbox"
+      ${fnoState.naked?'checked':''} onchange="onFnoChange('naked',this.checked)" style="width:auto"> allow naked shorts</label>
+    <button class="btn" onclick="loadFno(true)">↻ Refresh</button>
+    <span class="pstat">capital &amp; risk come from the bar at the top</span>
+  </div>`;
+}
+
+function renderFno(d){
+  const el=document.getElementById('fnoPanel');
+  const head=`<h3>📐 Options (F&amp;O)</h3>`;
+  if(!d||!d.ok){
+    el.innerHTML=`<div class="fno">${head}${fnoBar(d)}
+      <div class="empty"><b>No options read available.</b><br>${(d&&d.reason)||'unknown'}
+      ${d&&d.hint?'<br><span style="color:var(--faint)">'+d.hint+'</span>':''}</div></div>`;
+    return;
+  }
+  const c=d.chain,v=d.vol;
+  const pts=n=>(n==null||!isFinite(n))?'—':Math.round(n).toLocaleString('en-IN');
+  const rs=n=>(n==null||!isFinite(n))?'—':'₹'+Math.round(n).toLocaleString('en-IN');
+
+  /* ---- the numbers everything else hangs off ---- */
+  const tiles=[
+    mhTile('Forward', pts(c.forward), 'from put-call parity, not the spot'),
+    mhTile('ATM implied vol', c.atmIv!=null?pctS(c.atmIv,1):null, 'interpolated at the forward', 'no solvable vol at the money'),
+    mhTile('Implied move', c.expectedMove?pts(c.expectedMove.points)+' pts':null,
+      c.expectedMove?pctS(c.expectedMove.pct,2)+' by expiry · '+c.expectedMove.basis:'', 'no at-the-money straddle quoted'),
+    mhTile('Time left', c.daysLeft.toFixed(1)+'d', c.expiryDate),
+    mhTile('Lot size', String(c.lotSize), 'from the exchange master'),
+    mhTile('Skew (25Δ)', c.skew?numS(c.skew.rr25*100,2)+' pts':null,
+      c.skew?'slope '+numS(c.skew.slope,2):'', 'the chain does not reach 25 delta')
+  ];
+
+  /* ---- volatility verdict ---- */
+  const A=v&&v.assessment;
+  let volHtml='';
+  if(A&&A.ok){
+    const cls=/cheap/.test(A.verdict)?'cheap':/expensive/.test(A.verdict)?'expensive':'fair';
+    volHtml=`<div class="fnoverdict ${cls}"><b>Volatility: ${A.verdict}</b>
+      &nbsp;<span style="color:var(--faint)">confidence ${A.confidence} · ${Math.round(A.coverage*100)}% of the evidence</span>
+      <div style="margin-top:6px">${A.evidence.map(e=>'· '+e).join('<br>')}</div>
+      ${A.confidenceNote?'<div class="fnowarn" style="margin-top:8px">'+A.confidenceNote+'</div>':''}
+      ${A.eventWarning?'<div class="fnostop" style="margin-top:8px">⚠ '+A.eventWarning+'</div>':''}
+      ${A.notes.filter(n=>n!==A.eventWarning).map(n=>'<div style="color:var(--faint);font-size:11.5px;margin-top:6px">'+n+'</div>').join('')}
+    </div>`;
+  } else {
+    volHtml=`<div class="fnoverdict unknown"><b>Volatility: not assessable</b>
+      <div style="margin-top:5px;color:var(--faint)">${(A&&A.reason)||'no volatility evidence available'}</div></div>`;
+  }
+  const ts=v&&v.termStructure;
+  const rv=v&&v.realized;
+  const volTiles=[
+    mhTile('Term structure', ts&&ts.ok?ts.shape:null, ts&&ts.ok?ts.points.map(p=>p.days.toFixed(0)+'d '+pctS(p.iv,1)).join(' · '):'',
+      ts?ts.reason:'only one expiry readable'),
+    mhTile('Realized vol (20d)', rv&&rv.ok&&rv.closeToClose!=null?pctS(rv.closeToClose,1):null,
+      rv&&rv.ok&&rv.yangZhang!=null?'Yang-Zhang '+pctS(rv.yangZhang,1)+' (includes overnight gaps)':'', rv?rv.reason:'no candles'),
+    mhTile('IV percentile', v&&v.ivPercentile&&v.ivPercentile.ok?Math.round(v.ivPercentile.percentile*100)+'th':null,
+      v&&v.ivPercentile&&v.ivPercentile.ok?`of ${v.ivPercentile.n} obs · ${v.ivPercentile.source}`:'',
+      v&&v.ivPercentile?v.ivPercentile.reason:'no history'),
+    mhTile('Implied vs actual moves', v&&v.moveComparison&&v.moveComparison.ok?Math.round(v.moveComparison.percentileOfHistory*100)+'th':null,
+      v&&v.moveComparison&&v.moveComparison.ok?'of this index’s own moves over the same horizon':'',
+      'not enough price history')
+  ];
+
+  el.innerHTML=`<div class="fno">${head}${fnoBar(d)}
+    <div class="mhgrid">${tiles.join('')}</div>
+    ${ts&&ts.ok&&ts.inverted?'<div class="fnostop">⚠ '+ts.reading+'</div>':''}
+    <div class="fnosec"><h4>Is this volatility cheap or expensive?</h4>
+      ${volHtml}<div class="mhgrid">${volTiles.join('')}</div>
+      ${v&&v.vrp&&v.vrp.ok?'<div style="color:var(--faint);font-size:11.5px;margin-top:6px;line-height:1.6">'+v.vrp.reading+'</div>':''}
+    </div>
+    ${fnoStrategyHtml(d)}
+    ${fnoQualityHtml(d)}
+  </div>`;
+}
+
+function fnoStrategyHtml(d){
+  const s=d.strategy;
+  if(!s||!s.ok)return `<div class="fnosec"><h4>What to trade</h4><div class="empty">${(s&&s.reason)||'no structures proposed'}</div></div>`;
+
+  if(!s.best){
+    /* THE "NO" CASE, WHICH IS THE HONEST ANSWER FOR MOST RETAIL ACCOUNTS ON NIFTY — and is
+       therefore given as much room as a recommendation would get, with the arithmetic shown. */
+    const rq=s.requirement;
+    return `<div class="fnosec"><h4>What to trade</h4>
+      <div class="fnostop"><b>Nothing here fits your capital and risk budget.</b><br>${s.note||''}
+      ${rq&&rq.caution?'<br><br>'+rq.caution:''}</div>
+      ${rq?`<div class="mhgrid">
+        ${mhTile('Cheapest structure',rq.cheapest,'one lot risks ₹'+Math.round(rq.maxLossPerLot).toLocaleString('en-IN'))}
+        ${mhTile('Capital needed','₹'+rq.capitalNeededAtThisRisk.toLocaleString('en-IN'),'at your current risk setting')}
+        ${mhTile('Shortfall','₹'+rq.shortfall.toLocaleString('en-IN'),'more than you have')}
+        ${mhTile('Or risk per trade',(rq.riskPctNeededAtThisCapital*100).toFixed(1)+'%','to take it at your current capital')}
+      </div>`:''}
+      ${s.blocked.length?'<div style="margin-top:8px;font-size:11.5px;color:var(--faint);line-height:1.6">'+
+        s.blocked.map(b=>'· <b>'+b.name+'</b> — '+b.reason).join('<br>')+'</div>':''}
+    </div>`;
+  }
+
+  const b=s.best,z=b.sizing;
+  const legRows=b.legs.map(l=>`<tr>
+    <td class="${l.side==='BUY'?'buy':'sell'}">${l.side}</td><td>${l.strike} ${l.type}</td>
+    <td>${l.price.toFixed(2)}</td><td>${l.iv!=null?(l.iv*100).toFixed(1)+'%':'—'}</td>
+    <td>${l.delta!=null?l.delta.toFixed(3):'—'}</td></tr>`).join('');
+
+  const alt=s.candidates.filter(c=>c!==b&&!c.sizing.blocked).slice(0,3).map(c=>
+    `· <b>${c.name}</b> — ${c.sizing.lots} lot${c.sizing.lots===1?'':'s'}, worst case ₹${Math.round(c.sizing.maxLossTotal||0).toLocaleString('en-IN')}`
+    +(c.notes.length?' <span style="color:var(--faint)">('+c.notes[0]+')</span>':'')).join('<br>');
+
+  return `<div class="fnosec"><h4>What to trade</h4>
+    ${d.plan&&d.plan.ok?'<div class="fnosum">'+d.plan.summary+'</div>':''}
+    <div style="font-size:13px;margin-bottom:4px"><b style="color:var(--accent2)">${b.name}</b>
+      <span style="color:var(--faint);font-size:11.5px"> — ${b.why}</span></div>
+    <table class="fnolegs"><tr><th>Side</th><th>Strike</th><th>Price</th><th>IV</th><th>Delta</th></tr>${legRows}</table>
+    <div class="mhgrid">
+      ${mhTile('Size',z.lots+' lot'+(z.lots===1?'':'s'),z.contracts+' contracts · limited by '+(z.limitedBy||'nothing'))}
+      ${mhTile('Capital needed','₹'+Math.round(z.capitalTotal).toLocaleString('en-IN'),z.capitalBasis+' · '+z.capitalCertainty)}
+      ${mhTile('Worst case',z.maxLossTotal!=null?'₹'+Math.round(z.maxLossTotal).toLocaleString('en-IN'):null,
+        z.maxLossTotal!=null?((z.maxLossTotal/z.capital)*100).toFixed(1)+'% of capital':'','UNBOUNDED — this can lose more than the account holds')}
+      ${mhTile('Round-trip cost','₹'+Math.round(b.costs.total).toLocaleString('en-IN'),b.costs.ordersPerRoundTrip+' orders'+(b.costs.spreadKnown?'':' · spread assumed, not measured'))}
+      ${mhTile('Breakevens',b.breakevens.length?b.breakevens.map(x=>Math.round(x)).join(' / '):null,'index level at expiry','no breakeven inside the modelled range')}
+      ${mhTile('Net delta',b.greeks?b.greeks.delta.toFixed(3):null,b.greeks?'theta/day '+b.greeks.thetaDay.toFixed(2)+' pts':'',b.greeksNote)}
+    </div>
+    ${z.capitalCertainty==='estimate'?'<div class="fnowarn">'+z.capitalNote+'</div>':''}
+    ${b.notes.map(n=>'<div class="fnowarn">'+n+'</div>').join('')}
+    ${d.plan&&d.plan.ok?fnoPlanHtml(d.plan):''}
+    ${alt?'<div style="margin-top:10px;font-size:11.5px;color:var(--faint);line-height:1.7"><b>Also considered</b><br>'+alt+'</div>':''}
+    ${s.rejected.length?'<div style="margin-top:6px;font-size:11px;color:var(--faint);line-height:1.6"><b>Not proposed</b><br>'+
+      s.rejected.map(r=>'· '+r.name+' — '+r.reason).join('<br>')+'</div>':''}
+  </div>`;
+}
+
+function fnoPlanHtml(p){
+  const rs=n=>(n==null||!isFinite(n))?'—':'₹'+Math.round(n).toLocaleString('en-IN');
+  const entry=p.entry.legs.map(l=>`${l.side} <b>${l.strike}${l.type}</b> at limit <b>${l.limitPrice}</b>`
+    +(l.doNotPayBeyond?` (never above ${l.doNotPayBeyond})`:'')
+    +(l.note?` <span style="color:#fcd34d">— ${l.note}</span>`:'')).join('<br>');
+  const tg=p.targets.map(t=>`<div class="fnoexit"><span class="p">${Math.round(t.level)}</span>
+    <span>${t.label} · premium ${t.premium} · net <b style="color:var(--buy)">${rs(t.netPnl)}</b></span></div>`).join('');
+  const ex=p.exits.slice().sort((a,b)=>a.priority-b.priority).map(e=>
+    `<div class="fnoexit"><span class="p">${e.priority}</span><span><b>${e.trigger}</b> — ${e.action}</span></div>`).join('');
+
+  return `<div class="fnoplan" style="margin-top:12px">
+    ${p.entry.blocked?'<div class="fnostop">'+p.entry.conditions.filter(c=>/^(DO NOT ENTER|BLOCKED)/.test(c)).join('<br>')+'</div>':''}
+    <div class="row"><b>Entry</b><br>${entry}<div style="color:var(--faint);font-size:11.5px;margin-top:5px">${p.entry.orderNote}</div>
+      ${p.costNote?'<div style="color:var(--faint);font-size:11.5px;margin-top:3px">'+p.costNote+'</div>':''}</div>
+    <div class="fnostop"><b>Stop</b> — ${p.stop.howToPlace}
+      ${p.stop.lossAtStop!=null?'<br>Loss if it hits: <b>'+rs(p.stop.lossAtStop)+'</b>':''}
+      ${p.stop.uncertaintyNote?'<br><span style="color:var(--faint)">'+p.stop.uncertaintyNote+'</span>':''}</div>
+    ${tg?'<div class="row"><b>Targets</b>'+tg+'</div>':''}
+    ${p.targetVerdict?'<div class="'+(p.targetVerdict.inside?'row':'fnowarn')+'"><b>Your target '+Math.round(p.targetVerdict.level)+'</b> — '+p.targetVerdict.reading+'</div>':''}
+    ${p.timeStop.ok?'<div class="fnowarn"><b>Time stop — '+p.timeStop.date+'</b> ('+p.timeStop.inDays.toFixed(1)+' days). '+p.timeStop.action+'</div>':''}
+    <div class="row"><b>Exit rules</b>${ex}</div>
+    <div class="row"><b>What kills this trade</b><br>${p.invalidation.map(i=>'· '+i).join('<br>')}</div>
+  </div>`;
+}
+
+function fnoQualityHtml(d){
+  const q=d.chain.quality;
+  const warn=[].concat(q.warnings||[],(d.warnings||[]));
+  const rates=d.costRates;
+  return `<div class="fnosec"><h4>Data quality</h4>
+    <div class="mhgrid">
+      ${mhTile('Chain forward',q.forward,q.forwardDispersionPct!=null?'strikes disagree by '+pctS(q.forwardDispersionPct,3):'')}
+      ${mhTile('Live two-sided quotes',Math.round(q.midShare*100)+'%',q.quotedLegs+' legs quoted')}
+      ${mhTile('Call/put IV gap',q.parityIvGap!=null?numS(q.parityIvGap*100,2)+' pts':null,'parity says this should be zero','not measurable')}
+      ${mhTile('Median spread',q.medianSpreadPct!=null?pctS(q.medianSpreadPct,1):null,'of the premium','no live bid/ask to measure')}
+    </div>
+    ${!rates.verified?`<div class="fnowarn"><b>Cost rates are unverified.</b> They are dated ${rates.asOf} and read from ${rates.source}.
+      STT, exchange charges and stamp duty are set by circular and change. Check one real contract note against the
+      cost figures above, then set <code>"verified": true</code> in <code>fno-costs.json</code> to clear this.</div>`:''}
+    ${warn.length?'<div class="fnowarn">'+warn.map(w=>'· '+w).join('<br>')+'</div>':''}
+  </div>`;
+}
+
 /* ================= 🔥 VOLUME MOVERS — coins moving the most on real volume right now, ranked for quick scalps ================= */
 const MOVER_TFS=['5m','15m','30m','1h'];
 const MOVER_ACTIONABLE=['buynow','sellnow','buybreak','sellbreak','waitdip','waitbounce'];
