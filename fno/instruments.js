@@ -54,6 +54,34 @@ const UNDERLYINGS = {
   BANKEX: { name: 'BANKEX', exchange: 'BSE', file: 'BSE_FO', spotKey: null, match: ['BANKEX'], tier: 2 }
 };
 
+/* ---- WHERE THE MASTER ACTUALLY COMES FROM ----
+
+   Upstox publishes instrument files at assets.upstox.com, and the naming is NOT something this
+   codebase can verify from a build sandbox — every request to that host is blocked here, so a
+   wrong URL and a blocked one look identical.
+
+   What IS known, from the loader in server.js that has worked in production since day one:
+   `NSE.json.gz` is a PER-EXCHANGE file containing several segments. It has to be, because that
+   loader filters `segment === "NSE_EQ"` out of it — there would be nothing to filter if the file
+   held only equities. So the derivatives are very likely inside `NSE.json.gz` rather than in a
+   separate `NSE_FO.json.gz`, and a segment-level file may not exist at all.
+
+   THAT AMBIGUITY MUST NOT SIT ON THE CRITICAL PATH. assets.upstox.com is object storage, and
+   object storage answers a request for a key that does not exist with 403 Forbidden rather than
+   404 whenever listing is denied — which is the default. So "the file is not there" and "you are
+   blocked" produce the same status code, and guessing wrong would present as an unfixable
+   network fault on a perfectly healthy server.
+
+   So each logical master is a CHAIN of candidates, tried in order, and a candidate only counts as
+   a success if it actually yields contracts. The second entry in every chain is the file this
+   codebase already downloads successfully every day, which makes the fallback proven rather than
+   hopeful. Whichever one worked is reported, so the answer stops being a guess after the first
+   live run. */
+const SOURCES = {
+  NSE_FO: ['NSE_FO', 'NSE', 'complete'],
+  BSE_FO: ['BSE_FO', 'BSE', 'complete']
+};
+
 const isNum = v => typeof v === 'number' && isFinite(v);
 const off = reason => ({ available: false, reason, asOf: null, data: null });
 
@@ -260,21 +288,57 @@ function createInstruments(opts) {
         const wanted = [...new Set(Object.values(UNDERLYINGS).map(u => u.file))];
         const rowsByFile = {};
         const failed = [];
+        const usedSource = {};
+        const downloaded = new Map();        // one `complete.json.gz` serves both exchanges
+
         for (const f of wanted) {
-          if (files && files[f]) { rowsByFile[f] = files[f]; continue; }
-          try { rowsByFile[f] = await fetchMaster(f); }
-          catch (e) { failed.push(`${f}: ${String(e.message).slice(0, 80)}`); }
+          if (files && files[f]) { rowsByFile[f] = files[f]; usedSource[f] = 'injected'; continue; }
+
+          /* Walk the candidate chain. A DOWNLOAD IS NOT A SUCCESS — the exchange-wide file will
+             fetch happily and might contain no derivatives at all, which is precisely the case
+             that would otherwise present as "0 contracts" with no explanation. A candidate only
+             counts when it actually yields contracts for an underlying on this exchange. */
+          const wantMatch = new Set();
+          for (const u of Object.values(UNDERLYINGS)) if (u.file === f) for (const m of u.match) wantMatch.add(m);
+
+          for (const cand of (SOURCES[f] || [f])) {
+            // Failures are remembered as well as successes: `complete.json.gz` is the last resort
+            // for both exchanges, and downloading it twice to fail twice helps nobody.
+            if (downloaded.get(cand) === null) continue;
+            let arr = downloaded.get(cand);
+            if (!arr) {
+              try { arr = await fetchMaster(cand); downloaded.set(cand, arr); }
+              catch (e) { downloaded.set(cand, null); failed.push(`${cand}: ${String(e.message).slice(0, 70)}`); continue; }
+            }
+            let hits = 0;
+            for (const row of arr) { if (classify(row, wantMatch)) { hits++; if (hits >= 20) break; } }
+            if (!hits) { failed.push(`${cand}: downloaded ${arr.length} rows but none are ${f} contracts`); continue; }
+            rowsByFile[f] = arr; usedSource[f] = cand;
+            break;
+          }
         }
+
         if (!Object.keys(rowsByFile).length) {
-          return off('could not download any F&O instrument master — ' + failed.join('; '));
+          /* THE DIAGNOSTIC THAT SEPARATES THE TWO CAUSES. `NSE.json.gz` is the file the Stocks tab
+             downloads every day, so if that tab is populated the host is plainly reachable and
+             this is not a network fault. Saying so stops the user chasing firewalls. */
+          return off('could not reach any F&O instrument master — ' + failed.join('; ')
+            + '. Every candidate above lives on assets.upstox.com, and NSE.json.gz among them is the '
+            + 'same file the Stocks tab downloads daily — so if Stocks is loading, this is not a network problem.');
         }
 
         const built = build(rowsByFile);
         if (!built.ok) return off(built.reason);
-        if (failed.length) built.warnings.push('some masters could not be downloaded: ' + failed.join('; '));
+        if (failed.length) built.warnings.push('some instrument sources were skipped: ' + failed.join('; '));
+        for (const [f, src] of Object.entries(usedSource)) {
+          if (src !== f && src !== 'injected') {
+            built.warnings.push(`${f} contracts were read from ${src}.json.gz — the segment-level file was not available, which is expected if Upstox publishes one master per exchange rather than per segment`);
+          }
+        }
+        built.sources = usedSource;
 
         writeCache(built);
-        cache = { available: true, reason: null, asOf: now(), data: built, source: 'upstox' };
+        cache = { available: true, reason: null, asOf: now(), data: built, source: Object.values(usedSource).join(', ') || 'upstox' };
         cacheAt = now();
         return cache;
       } catch (e) {
@@ -352,9 +416,10 @@ function createInstruments(opts) {
     return keys;
   }
 
-  return { load, UNDERLYINGS, underlying, expiries, chain, nearestStrike, quoteKeys, __build: build, __classify: classify, __parseExpiry: parseExpiry };
+  return { load, UNDERLYINGS, SOURCES, underlying, expiries, chain, nearestStrike, quoteKeys, __build: build, __classify: classify, __parseExpiry: parseExpiry };
 }
 
 module.exports = createInstruments;
 module.exports.UNDERLYINGS = UNDERLYINGS;
+module.exports.SOURCES = SOURCES;
 module.exports.__parseExpiry = parseExpiry;

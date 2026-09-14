@@ -149,13 +149,24 @@ module.exports = function createFno(deps) {
     if (!master.available) {
       out.reason = master.reason;
       out.stage = 'instruments';
-      /* The most likely cause in production is not an outage: the instrument master is a public
-         asset, but the QUOTES behind it are not. Say both so the user checks the right thing. */
-      out.hint = 'the F&O contract master could not be downloaded. It is a public file, so this is usually a network or proxy problem rather than a login one.';
+      /* DO NOT SEND THE USER AFTER A FIREWALL BY DEFAULT. assets.upstox.com is object storage,
+         which answers a request for a key that does not exist with 403 rather than 404 whenever
+         listing is denied — so "blocked" and "no such file" are indistinguishable from the status
+         code alone. The Stocks tab pulls NSE.json.gz off the same host every day, and that is the
+         one observation that tells the two apart, so the hint leads with it. */
+      out.hint = 'The contract master could not be read. Check the Stocks tab first: it downloads NSE.json.gz '
+        + 'from the same host (assets.upstox.com) every day. If Stocks is populated, the host is reachable and '
+        + 'this is not a network problem — it means none of the candidate files contained index derivatives, '
+        + 'which is a schema change worth reporting. If Stocks is ALSO empty, the host is genuinely blocked '
+        + 'from this server.';
       lastError = master.reason;
       return out;
     }
     out.warnings = (master.data.warnings || []).slice(0, 6);
+    /* Which of the candidate master files actually worked. Worth surfacing rather than burying:
+       the filename could not be verified from the build sandbox, so the first live run is what
+       settles it — and the answer should be visible without reading a log. */
+    out.instrumentSource = master.data.sources || null;
 
     const exps = instruments.expiries(master.data, underlying, { now: now(), minHoursLeft: isNum(o.minHoursLeft) ? o.minHoursLeft : 0 });
     if (!exps.length) {

@@ -431,6 +431,8 @@ node --test test/fno-*.test.js        # F&O only
   every outbound market endpoint, including `assets.upstox.com`. The instrument and quote parsers are
   written tolerantly and — more importantly — **report what they failed to find**, so a renamed field
   surfaces as a warning rather than an empty options tab. Verify on first live run.
+- **The instrument-master filename could not be verified**, so the loader does not bet on one. See
+  *Troubleshooting* below.
 - **Cost rates are dated and unverified.** See part 1.
 - **Margin is a percentage-of-notional estimate.** SPAN is a portfolio risk model, not a formula.
 - **No historical option backtesting.** Historical chain data is not available at retail, so
@@ -444,3 +446,61 @@ node --test test/fno-*.test.js        # F&O only
 - **Calendar spreads are not proposed.** The term structure is measured and reported; trading it
   needs two expiries priced as one structure, which the payoff engine supports but the catalogue
   does not yet offer.
+
+---
+
+# Troubleshooting
+
+## "No options read available — could not reach any F&O instrument master … HTTP 403"
+
+**First, look at the Stocks tab.** It downloads `NSE.json.gz` from the same host
+(`assets.upstox.com`) every single day. That one observation separates the two possible causes,
+and the status code cannot:
+
+| Stocks tab | What it means | What to do |
+|---|---|---|
+| **populated** | the host is reachable; none of the candidate files contained index derivatives | a schema change — see below |
+| **also empty** | `assets.upstox.com` is genuinely blocked from this server | firewall / proxy / DNS on the droplet |
+
+**Why 403 and not 404.** `assets.upstox.com` is object storage. When bucket listing is denied —
+which is the default — a request for a key that *does not exist* is answered **403 Forbidden**, not
+404. So "you are blocked" and "there is no such file" are indistinguishable from the response alone.
+That is why the loader does not depend on any single filename.
+
+**What the loader does instead.** Each exchange has a chain of candidates, tried in order, and a
+candidate only counts when it actually yields contracts — a file that downloads successfully but
+contains no derivatives is rejected and the chain keeps walking:
+
+```
+NSE:  NSE_FO.json.gz  →  NSE.json.gz  →  complete.json.gz
+BSE:  BSE_FO.json.gz  →  BSE.json.gz  →  complete.json.gz
+```
+
+The second entry in each chain is the file this codebase already downloads successfully every day,
+which makes the fallback proven rather than hopeful. `NSE.json.gz` is very likely where the
+derivatives actually live: `server.js` filters `segment === "NSE_EQ"` out of it, and there would be
+nothing to filter if that file held only equities.
+
+Whichever source worked is reported in the panel's **Data quality** section, and a fallback raises a
+visible notice. After your first successful live run this stops being a guess — check there to see
+which filename Upstox actually serves.
+
+**If Stocks loads but options still fail**, the panel's warnings will say which candidates were tried
+and why each was rejected (`downloaded 94,312 rows but none are NSE_FO contracts` means the file
+exists but the schema moved). Send that line along and it is a one-line fix.
+
+## "The quote feed returned nothing for this expiry"
+
+The contract master is a *public* file; the **quotes are not**. This message means the master loaded
+but `/v2/market-quote/quotes` came back empty. Check, in order:
+
+1. **Are you logged in?** The Upstox token expires daily. The login bar at the top of the dashboard
+   says.
+2. **Is the market open?** Outside 09:15–15:30 IST the option chain has no live two-sided quotes.
+3. If both are fine, `/api/fno/health` reports the last error verbatim.
+
+## Everything loads but the panel says the chain is "suspect"
+
+Near-the-money strikes disagree about the forward by more than 0.2%, which means the legs are not
+trading together — normal in the first minute after the open, and a reason to wait. Entry is blocked
+outright when the chain is unusable. This is working as intended, not a fault.

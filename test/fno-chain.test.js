@@ -246,6 +246,100 @@ test('quote keys are windowed around the money rather than requesting the whole 
   });
 });
 
+/* ---- WHERE THE MASTER COMES FROM ----
+   The naming of Upstox's instrument files could not be verified from the build sandbox — every
+   request to assets.upstox.com is blocked there, so a wrong URL and a blocked one return the
+   identical 403. Object storage does that: a key that does not exist answers 403 rather than 404
+   whenever listing is denied. So the loader walks a chain of candidates instead of betting on one,
+   and these tests pin that behaviour. */
+
+function fetchStub(available) {
+  const zlib = require('zlib');
+  return async (url) => {
+    const name = /exchange\/([A-Za-z_]+)\.json\.gz/.exec(url)[1];
+    if (!(name in available)) return { ok: false, status: 403, arrayBuffer: async () => new ArrayBuffer(0) };
+    const buf = zlib.gzipSync(Buffer.from(JSON.stringify(available[name])));
+    return { ok: true, status: 200, arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) };
+  };
+}
+
+test('the segment file is preferred when it exists', async () => {
+  const I = createInstruments({ cacheFile: null, now: () => NOW, fetchImpl: fetchStub({ NSE_FO: masterFor([24000]) }) });
+  const r = await I.load();
+  assert.ok(r.available, r.reason);
+  assert.equal(r.data.sources.NSE_FO, 'NSE_FO', 'the direct file was used');
+  assert.ok(!r.data.warnings.some(w => /read from/.test(w)), 'and no fallback notice was raised');
+});
+
+test('it falls back to the per-exchange master — the file this codebase already downloads daily', async () => {
+  /* The likely real shape: Upstox publishes one master per EXCHANGE, not per segment. server.js's
+     own loader proves it, because it filters segment === "NSE_EQ" out of NSE.json.gz — there would
+     be nothing to filter if that file held only equities. So the derivatives are probably inside
+     NSE.json.gz and NSE_FO.json.gz may not exist at all. */
+  const exchangeWide = [
+    { instrument_key: 'NSE_EQ|INE002A01018', trading_symbol: 'RELIANCE', instrument_type: 'EQ', segment: 'NSE_EQ' },
+    { instrument_key: 'NSE_INDEX|Nifty 50', trading_symbol: 'Nifty 50', instrument_type: 'INDEX', segment: 'NSE_INDEX' },
+    ...masterFor([23950, 24000, 24050])
+  ];
+  const I = createInstruments({ cacheFile: null, now: () => NOW, fetchImpl: fetchStub({ NSE: exchangeWide }) });
+  const r = await I.load();
+  assert.ok(r.available, r.reason);
+  assert.equal(r.data.sources.NSE_FO, 'NSE', 'it fell through to the exchange-wide file');
+
+  // The equity and index rows alongside the derivatives are ignored, not mistaken for contracts.
+  const c = I.chain(r.data, 'NIFTY', EXPIRY);
+  assert.deepEqual(c.strikes, [23950, 24000, 24050]);
+  assert.equal(c.lotSize, 75);
+
+  // And the substitution is reported rather than being silent.
+  assert.ok(r.data.warnings.some(w => /read from NSE\.json\.gz/.test(w)), JSON.stringify(r.data.warnings));
+});
+
+test('a file that downloads but holds no derivatives is rejected, not accepted as empty', async () => {
+  /* THE CASE THAT WOULD OTHERWISE BE INVISIBLE. An exchange-wide file fetches happily and may
+     contain no index options at all. Treating a successful download as a successful source would
+     produce "0 contracts listed" with no explanation — so a candidate only counts when it actually
+     yields contracts, and the chain keeps walking when it does not. */
+  const equitiesOnly = [
+    { instrument_key: 'NSE_EQ|1', trading_symbol: 'RELIANCE', instrument_type: 'EQ', segment: 'NSE_EQ' },
+    { instrument_key: 'NSE_EQ|2', trading_symbol: 'TCS', instrument_type: 'EQ', segment: 'NSE_EQ' }
+  ];
+  const I = createInstruments({
+    cacheFile: null, now: () => NOW,
+    fetchImpl: fetchStub({ NSE: equitiesOnly, complete: masterFor([24000, 24050]) })
+  });
+  const r = await I.load();
+  assert.ok(r.available, r.reason);
+  assert.equal(r.data.sources.NSE_FO, 'complete', 'it skipped the empty file and kept going');
+  assert.ok(r.data.warnings.some(w => /none are NSE_FO contracts/.test(w)), JSON.stringify(r.data.warnings));
+});
+
+test('one complete.json.gz download serves both exchanges', async () => {
+  let downloads = 0;
+  const base = fetchStub({ complete: masterFor([24000]).concat(masterFor([81000]).map(x => ({ ...x, asset_symbol: 'SENSEX', instrument_key: x.instrument_key + 'S' }))) });
+  const I = createInstruments({
+    cacheFile: null, now: () => NOW,
+    fetchImpl: async (u) => { if (/complete/.test(u)) downloads++; return base(u); }
+  });
+  const r = await I.load();
+  assert.ok(r.available, r.reason);
+  assert.equal(downloads, 1, 'the shared master is fetched once, not once per exchange');
+  assert.equal(r.data.sources.NSE_FO, 'complete');
+  assert.equal(r.data.sources.BSE_FO, 'complete');
+});
+
+test('when every candidate fails, the message names the one diagnostic that separates the causes', async () => {
+  /* Object storage returns 403 for a missing key as readily as for a blocked request, so the
+     status code cannot tell the user which they are looking at. The Stocks tab can: it pulls
+     NSE.json.gz off the same host every day. */
+  const I = createInstruments({ cacheFile: null, now: () => NOW, fetchImpl: fetchStub({}) });
+  const r = await I.load();
+  assert.equal(r.available, false);
+  assert.ok(/NSE_FO/.test(r.reason) && /complete/.test(r.reason), 'it lists what it tried: ' + r.reason);
+  assert.ok(/Stocks tab downloads daily/.test(r.reason), 'and names the discriminating check');
+  assert.ok(/not a network problem/.test(r.reason));
+});
+
 test('an unreachable master reports unavailable with a reason, never an empty chain', () => {
   const I = createInstruments({
     cacheFile: null, now: () => NOW,
@@ -253,7 +347,7 @@ test('an unreachable master reports unavailable with a reason, never an empty ch
   });
   return I.load().then(r => {
     assert.equal(r.available, false);
-    assert.ok(/could not download/.test(r.reason), r.reason);
+    assert.ok(/could not reach any F&O instrument master/.test(r.reason), r.reason);
     assert.equal(r.data, null, 'no data is better than invented data');
     assert.deepEqual(I.expiries(null, 'NIFTY'), [], 'accessors tolerate the absence');
     assert.equal(I.chain(null, 'NIFTY', EXPIRY), null);
