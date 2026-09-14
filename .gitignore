@@ -5,6 +5,8 @@
 token.json
 # cached NSE symbol -> instrument-key map
 instruments.json
+# cached F&O contract master (strikes, expiries, lot sizes) — re-downloaded daily
+fno-instruments.json
 # tracked-setup snapshots + resolved outcomes
 setups.json
 # paper-trading bot state
@@ -13,6 +15,9 @@ paper-state.json
 positions.json
 # market-health snapshot log — grows continuously, and is what the intel backtester reads
 intel-history.jsonl
+# F&O implied-volatility history — one ATM reading per underlying per session, so an IV
+# percentile can eventually come from this platform's own data instead of the India VIX stand-in
+fno-iv-history.jsonl
 
 node_modules/
 .DS_Store
