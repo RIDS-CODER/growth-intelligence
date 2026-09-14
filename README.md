@@ -723,6 +723,34 @@ recorded occurrences** — under that it says how few it has instead of printing
 is backfilled: the record starts when the engine does, and resets if the host redeploys with
 ephemeral storage.
 
+## 📐 Options (F&O) — index options on NIFTY, BANKNIFTY, SENSEX
+
+Click **📐 Options (F&O)**. It reads your **Capital** and **Risk / trade %** from the bar at the top of
+the page, so it can never disagree with the rest of the dashboard about how much money is in play.
+
+Pick an index, an expiry and your view, and it gives you: what the market expects the index to move
+by expiry, whether that volatility is cheap or expensive, which structure fits your capital, how
+many lots, what it costs round trip, and a full plan — entry limits, a stop set on the **index level**
+(not on the premium), targets checked against the implied move, and a **time stop with a date on it**.
+
+Two things it does that most options tools don't:
+
+- **It will tell you "no".** One lot of NIFTY is 75 contracts, so a ₹50,000 account cannot trade NIFTY
+  options at a 2% risk discipline — and it says so in rupees, along with the capital that *would*
+  work and the risk setting that would work at your current capital. It does not hand you a trade you
+  cannot hold.
+- **It costs the trade properly.** Brokerage on options is a flat ₹20, so a 5-point weekly needs a
+  **14.8% move just to break even** (85% of that cost is the flat fee). The cheap far-OTM option is
+  the expensive one.
+
+> **Do this once before trading:** open a real contract note and compare it against
+> `/api/fno/costs?price=100&qty=75`. If they match, set `"verified": true` in `fno-costs.json`. STT and
+> exchange charges are set by circular and change; every net P&L figure depends on them.
+
+**→ Full explanation in [`FNO-GUIDE.md`](FNO-GUIDE.md)** — how to use it, why the numbers are what they
+are (the forward from put-call parity, the expiry decision, what the volatility read refuses to say),
+and how it is built.
+
 ## Files
 ```
 growth-intelligence-pro/
@@ -745,12 +773,25 @@ growth-intelligence-pro/
 │   ├── macroData.js     ← DXY/yields/VIX/equities adapter (Yahoo, Stooq fallback)
 │   ├── derivs.js        ← futures adapter (OI/funding/depth) — honest about being unreachable
 │   └── global.js        ← BTC dominance adapter
+├── fno/                 ← 📐 index options on NIFTY / BANKNIFTY / SENSEX
+│   ├── index.js         ← orchestrator (injected deps, reuses intel's macro feeds)
+│   ├── bs.js            ← Black-76 on a parity-derived forward; Greeks; implied vol
+│   ├── costs.js         ← brokerage/STT/GST/stamp/exchange, spread, the expiry decision
+│   ├── instruments.js   ← contract master; lot sizes read live, never hardcoded
+│   ├── chain.js         ← forward, vol surface, skew, OI, liquidity, data quality
+│   ├── vol.js           ← realized vol, IV percentile, term structure, cheap/expensive
+│   ├── strategy.js      ← payoff engine, capital gating, position sizing
+│   └── signal.js        ← entry limits, stops, targets, time stop, exit rules
 ├── macro-calendar.json  ← 📅 YOU MAINTAIN THIS — FOMC/CPI/RBI dates (NFP is derived)
+├── fno-costs.json       ← 📐 YOU MAINTAIN THIS — STT/brokerage/exchange rates (see FNO-GUIDE.md)
+├── FNO-GUIDE.md         ← 📐 how the options engine works, and how to use it
 ├── config.json          ← your keys + settings
 ├── public/index.html    ← dashboard
 ├── token.json           ← auto: daily login token (private)
 ├── instruments.json     ← auto: cached symbol→key map
+├── fno-instruments.json ← auto: cached F&O contract master (strikes, expiries, lots)
 ├── intel-history.jsonl  ← auto: market snapshots for the intel backtester
+├── fno-iv-history.jsonl ← auto: one ATM implied-vol reading per index per session
 └── README.md
 ```
 
