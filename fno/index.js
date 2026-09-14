@@ -120,12 +120,22 @@ module.exports = function createFno(deps) {
 
     let quotes = {};
     try { quotes = await d.quotes(keys); }
-    catch (e) { return { ok: false, reason: 'quote fetch failed: ' + String(e.message || e).slice(0, 100) }; }
+    catch (e) {
+      // The quote loader now reports the actual HTTP status and what it tried, so pass the whole
+      // thing through rather than truncating it into a shrug.
+      return { ok: false, reason: 'quote fetch failed — ' + String(e.message || e).slice(0, 400) };
+    }
     if (!quotes || !Object.keys(quotes).length) {
-      return { ok: false, reason: 'the quote feed returned nothing for this expiry — check the Upstox session is live and the market is open' };
+      return { ok: false, reason: 'the quote feed returned an empty result for this expiry. If the market is closed there may be no live board; if it is open, check the Upstox login on the dashboard.' };
     }
 
-    return CH.analyse({ chain: chainDef, quotes, now: now(), r: isNum(d.rate) ? d.rate : 0.065, spotHint: seed });
+    const out = CH.analyse({ chain: chainDef, quotes, now: now(), r: isNum(d.rate) ? d.rate : 0.065, spotHint: seed });
+    // A degraded feed is still a feed — but the panel has to say which one it got.
+    if (out.ok && quotes.__degraded) {
+      out.quality.warnings.unshift(quotes.__degraded);
+      out.quality.feedDegraded = true;
+    }
+    return out;
   }
 
   /* ============================================================
