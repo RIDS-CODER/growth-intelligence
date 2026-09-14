@@ -2089,6 +2089,8 @@ function fnoQualityHtml(d){
       ${mhTile('Live two-sided quotes',Math.round(q.midShare*100)+'%',q.quotedLegs+' legs quoted')}
       ${mhTile('Call/put IV gap',q.parityIvGap!=null?numS(q.parityIvGap*100,2)+' pts':null,'parity says this should be zero','not measurable')}
       ${mhTile('Median spread',q.medianSpreadPct!=null?pctS(q.medianSpreadPct,1):null,'of the premium','no live bid/ask to measure')}
+      ${mhTile('Contract master',d.instrumentSource?[...new Set(Object.values(d.instrumentSource))].join(' + ')+'.json.gz':null,
+        'which Upstox file the strikes came from','source not recorded')}
     </div>
     ${!rates.verified?`<div class="fnowarn"><b>Cost rates are unverified.</b> They are dated ${rates.asOf} and read from ${rates.source}.
       STT, exchange charges and stamp duty are set by circular and change. Check one real contract note against the
