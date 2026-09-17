@@ -434,9 +434,20 @@ function parseCandles(j){
    Parsed tolerantly and NEVER partially: a row whose depth cannot be read still contributes its
    last price, flagged as such by the absence of bid/ask, and chain.js downgrades it from there.
    Upstox has used more than one spelling for several of these fields over the life of the v2
-   API, so each is read through a small list rather than by one hardcoded name. */
+   API, so each is read through a small list rather than by one hardcoded name.
+
+   IT FALLS BACK TO THE LTP ENDPOINT, for the same reason the instrument master walks a chain of
+   candidate files: `/v2/market-quote/ltp` is PROVEN in this codebase — every quote on the Stocks
+   tab comes through it — while this richer endpoint is not. If the full quote fails for any
+   reason, degraded data beats no options tab: chain.js already handles an LTP-only board and says
+   on screen that spreads are unknown on it. The degradation is marked, never silent.
+
+   AND IT KEEPS THE ERROR. The first version counted failures and threw the reasons away, which
+   turned "HTTP 401 Unauthorized" — an answer — into "1 request(s) failed", a shrug. The status
+   code distinguishes an expired login from a wrong path from a rate limit, and it is the only
+   thing that does. */
 async function upstoxFullQuotes(keys){
-  const out={}; let failed=0;
+  const out={}; const errs=[];
   const pick=(o,names)=>{for(const n of names){if(o&&o[n]!==undefined&&o[n]!==null&&o[n]!=="")return o[n];}return null;};
   const num=v=>{const n=typeof v==="number"?v:parseFloat(v);return isFinite(n)?n:null;};
   for(let i=0;i<keys.length;i+=200){          // the endpoint caps a request well above this
@@ -457,10 +468,28 @@ async function upstoxFullQuotes(keys){
           volume:num(pick(v,["volume","total_traded_volume","volume_traded"]))
         };
       }
-    }catch(e){failed++;}
+    }catch(e){errs.push(String(e.message||e).slice(0,90));}
   }
-  if(!Object.keys(out).length&&failed) throw new Error("market-quote returned nothing for "+keys.length+" keys ("+failed+" request(s) failed) — is the Upstox session live?");
-  return out;
+  if(Object.keys(out).length) return out;
+
+  /* Nothing came back from the full-quote endpoint. Before giving up, try the one this server has
+     used successfully since the day it was written. */
+  let ltp={};
+  try{ ltp=await upstoxLTP(keys); }catch(e){ errs.push("ltp fallback: "+String(e.message||e).slice(0,70)); }
+  if(Object.keys(ltp).length){
+    for(const k in ltp) out[k]={ltp:ltp[k],bid:null,ask:null,oi:null,volume:null};
+    /* Non-enumerable so it cannot be mistaken for an instrument key by anything counting or
+       iterating this map — it exists only to let the panel say WHY spreads are missing. */
+    Object.defineProperty(out,"__degraded",{value:"full market quote unavailable ("+(errs[0]||"unknown")+") — fell back to last-traded prices, so bid/ask, open interest and volume are not available on this board",enumerable:false});
+    return out;
+  }
+
+  /* Both endpoints are down. Report the ACTUAL status: 401 means the daily Upstox login has
+     expired, 400 means the request shape is wrong, 404 means the path is, 429 means rate limits.
+     Guessing at "is the session live?" when the server already knows the answer helps nobody. */
+  const detail=errs.length?errs.join("; "):"no error was reported, which usually means an empty response body";
+  throw new Error("no quotes for "+keys.length+" contracts. Tried /v2/market-quote/quotes then /v2/market-quote/ltp — "+detail
+    +". A 401 means the daily Upstox login has expired (re-login on the dashboard); 400 or 404 means the request shape is wrong; 429 means rate-limited.");
 }
 async function upstoxLTP(keys){
   // batched live last-traded price; keys = array of instrument_key
@@ -2629,8 +2658,31 @@ async function handler(req,res){
         bid:parseFloat(u.searchParams.get("bid"))||undefined,ask:parseFloat(u.searchParams.get("ask"))||undefined,
         exchange:u.searchParams.get("exchange")||"NSE"}));}
     if(p==="/api/fno/health"){   // is the options side actually working, and how much IV history has accrued
-      return sendJSON(res,{iv:fno.ivStats(),rates:{asOf:fno.costs.rates().asOf,verified:fno.costs.rates().verified===true,source:fno.costs.rates().source},
-        lastError:fno.lastError(),ts:Date.now()});}
+      const h={iv:fno.ivStats(),rates:{asOf:fno.costs.rates().asOf,verified:fno.costs.rates().verified===true,source:fno.costs.rates().source},
+        loggedIn:loggedIn(),marketOpen:marketOpen(),lastError:fno.lastError(),ts:Date.now()};
+      /* ?probe=1 — the diagnostic that separates "your login expired" from "the option instrument
+         keys are wrong". It quotes NSE_INDEX|Nifty 50, a key this server has used successfully
+         since it was written, through BOTH quote endpoints and reports the raw status of each.
+         If the index quotes and the option strikes do not, the problem is the F&O keys, not auth.
+         Without this the two failures are indistinguishable from the outside, which is exactly the
+         hole that made the last round of debugging guesswork. */
+      if(u.searchParams.get("probe")==="1"){
+        const KNOWN="NSE_INDEX|Nifty 50";
+        const one=async(path,label)=>{
+          try{const j=await getJSON(`https://api.upstox.com/v2/market-quote/${path}?instrument_key=${encodeURIComponent(KNOWN)}`,authHeaders());
+            const n=Object.keys((j&&j.data)||{}).length;
+            return {endpoint:label,ok:n>0,rows:n,error:n?null:"200 OK but no rows returned"};}
+          catch(e){return {endpoint:label,ok:false,rows:0,error:String(e.message||e).slice(0,120)};}};
+        h.probe={instrument:KNOWN,
+          fullQuote:await one("quotes","/v2/market-quote/quotes"),
+          ltp:await one("ltp","/v2/market-quote/ltp")};
+        h.probe.reading=!h.probe.ltp.ok
+          ? "Neither endpoint works for an instrument this server quotes every day, so this is authentication or connectivity — not anything F&O-specific. Re-login on the dashboard."
+          : h.probe.fullQuote.ok
+            ? "Both endpoints work for a known instrument. If option strikes still fail, the problem is the F&O instrument keys or the contracts themselves, not the session."
+            : "The last-traded-price endpoint works but the full market quote does not. The options tab will fall back to LTP and run without bid/ask, spreads or open interest.";
+      }
+      return sendJSON(res,h);}
 
     if(p==="/api/paper/state") return sendJSON(res,paper.getState());
     if(p==="/api/paper/control"){ const a=u.searchParams.get("action");

@@ -164,7 +164,9 @@ function createInstruments(opts) {
 
   async function fetchMaster(name) {
     const r = await doFetch(`${ASSETS}/${name}.json.gz`, { signal: AbortSignal.timeout(REQ_TIMEOUT) });
-    if (!r.ok) throw new Error(`${name}: HTTP ${r.status}`);
+    // The candidate's name is added by the caller, which is walking the chain — adding it here too
+    // produced "NSE_FO: NSE_FO: HTTP 403" in the one message a stuck user actually reads.
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const buf = Buffer.from(await r.arrayBuffer());
     /* The endpoint serves gzip, but some proxies transparently decompress and hand back plain
        JSON with the same URL. Sniff the magic bytes rather than assuming, because assuming
@@ -172,7 +174,7 @@ function createInstruments(opts) {
     const gz = buf.length > 2 && buf[0] === 0x1f && buf[1] === 0x8b;
     const text = (gz ? zlib.gunzipSync(buf) : buf).toString('utf8');
     const arr = JSON.parse(text);
-    if (!Array.isArray(arr)) throw new Error(`${name}: master is not an array`);
+    if (!Array.isArray(arr)) throw new Error('master is not an array');
     return arr;
   }
 

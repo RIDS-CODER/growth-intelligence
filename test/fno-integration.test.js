@@ -192,8 +192,9 @@ test('a dead quote feed reports the stage it died at', async () => {
     const d = await r.fno.board({ underlying: 'NIFTY', capital: 1000000 });
     assert.equal(d.ok, false);
     assert.equal(d.stage, 'chain');
-    assert.ok(/quote feed returned nothing/.test(d.reason), d.reason);
-    assert.ok(/Upstox session is live/.test(d.reason), 'and points at the likely cause');
+    assert.ok(/empty result/.test(d.reason), d.reason);
+    assert.ok(/market is closed/.test(d.reason) && /Upstox login/.test(d.reason),
+      'and names both plausible causes rather than guessing one');
   } finally { r.cleanup(); }
 });
 
@@ -205,6 +206,57 @@ test('a throwing quote feed is caught and named', async () => {
     assert.ok(/quote fetch failed/.test(d.reason), d.reason);
     assert.ok(/403/.test(d.reason), 'the underlying error survives to the user');
   } finally { r.cleanup(); }
+});
+
+test('the real HTTP status survives to the user, not a failure count', async () => {
+  /* The first version of the quote loader caught its errors and reported "1 request(s) failed",
+     which turned an answer into a shrug. 401 means the daily login expired, 400 means the request
+     shape is wrong, 404 means the path is, 429 means rate limits — and only the status says which.
+     The message must be long enough to carry it. */
+  const r = rig({ quotes: async () => { throw new Error('no quotes for 74 contracts. Tried /v2/market-quote/quotes then /v2/market-quote/ltp — HTTP 401 https://api.upstox.com/v2/market-quote/quotes. A 401 means the daily Upstox login has expired.'); } });
+  try {
+    const d = await r.fno.board({ underlying: 'NIFTY', capital: 1000000 });
+    assert.equal(d.ok, false);
+    assert.ok(/HTTP 401/.test(d.reason), 'the status code reaches the screen: ' + d.reason);
+    assert.ok(/login has expired/.test(d.reason), 'and so does what to do about it');
+    assert.ok(/market-quote\/ltp/.test(d.reason), 'including that the fallback was also tried');
+  } finally { r.cleanup(); }
+});
+
+test('a degraded LTP-only feed still produces a board, and says it is degraded', async () => {
+  /* When the full-quote endpoint is unavailable the loader falls back to the LTP endpoint this
+     server has always used. Degraded data beats no options tab — but spreads become unknowable,
+     so the panel has to say which feed it got rather than presenting guesses as measurements. */
+  const base = rig();
+  const inner = base.fno;
+  base.cleanup();
+
+  const r = rig({
+    quotes: async keys => {
+      const full = {};
+      for (const key of keys) {
+        const m = /\|(\d+)-(\d+)(CE|PE)$/.exec(key);
+        if (!m) continue;
+        const T = BS.yearsToExpiry(NOW, Number(m[1]));
+        const px = BS.price(m[3], F, Number(m[2]), T, smile(Number(m[2]), T * 365), RATE);
+        if (px > 0.01) full[key] = { ltp: px, bid: null, ask: null, oi: null, volume: null };
+      }
+      Object.defineProperty(full, '__degraded', { value: 'full market quote unavailable (HTTP 404) — fell back to last-traded prices', enumerable: false });
+      return full;
+    }
+  });
+  try {
+    const d = await r.fno.board({ underlying: 'NIFTY', capital: 1500000 });
+    assert.ok(d.ok, 'a board is still produced: ' + d.reason);
+    assert.ok(Math.abs(d.chain.forward - F) < 2, 'the forward still comes out of parity on LTPs');
+    assert.equal(d.chain.quality.feedDegraded, true);
+    assert.ok(d.chain.quality.warnings.some(w => /fell back to last-traded prices/.test(w)),
+      JSON.stringify(d.chain.quality.warnings));
+    // And spreads are reported as unknown rather than as zero.
+    assert.equal(d.chain.quality.medianSpreadPct, null, 'no bid/ask means no measurable spread');
+    assert.equal(d.chain.quality.onMid, 0);
+  } finally { r.cleanup(); }
+  assert.ok(inner, 'fixture sanity');
 });
 
 test('no candles costs the realized-vol inputs and nothing else', async () => {
