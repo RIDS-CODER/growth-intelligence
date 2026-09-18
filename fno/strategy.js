@@ -76,13 +76,24 @@ function evaluate(legs, ctx) {
   };
 
   /* Scan a wide grid to find the extremes and the breakevens. The grid spans ±40% of the forward,
-     which comfortably brackets every listed strike on an index chain. */
+     which comfortably brackets every listed strike on an index chain.
+
+     EVERY STRIKE IS ADDED TO THE GRID EXPLICITLY. An option payoff is piecewise linear with its
+     kinks at the strikes, so its maximum and minimum always occur AT a strike or out in the tails
+     — never between them. A uniform grid steps about 30 points on SENSEX and can miss a strike by
+     15, which quietly understates the worst case: a long straddle reported ₹17,858 of risk when
+     the true figure was the full ₹18,065 premium. Small in percentage terms and exactly the wrong
+     direction, since the one number that must never be flattering is maximum loss. */
   const lo = F * 0.6, hi = F * 1.4;
   const steps = 2000;
+  const levels = [];
+  for (let i = 0; i <= steps; i++) levels.push(lo + (hi - lo) * i / steps);
+  for (const l of legs) if (l.strike > lo && l.strike < hi) levels.push(l.strike);
+  levels.sort((a, b) => a - b);
+
   const grid = [];
   let maxP = -Infinity, minP = Infinity, maxAt = null, minAt = null;
-  for (let i = 0; i <= steps; i++) {
-    const level = lo + (hi - lo) * i / steps;
+  for (const level of levels) {
     const p = payoffAt(level);
     grid.push({ level, payoff: p });
     if (p > maxP) { maxP = p; maxAt = level; }
@@ -424,6 +435,29 @@ function propose(o) {
 
     const ev = evaluate(legs, ctx);
     if (!ev.ok) { rejected.push({ name: spec.name, reason: ev.reason }); continue; }
+
+    /* A NON-DIRECTIONAL STRUCTURE MUST ACTUALLY BE NON-DIRECTIONAL.
+
+       Legs are chosen by delta from the strikes that are tradeable, and when the near-the-money
+       strikes are quoting too wide — after hours, or on a thin board — the nearest tradeable pair
+       can sit well away from the money. Build a "straddle" out of those and you get a structure
+       whose name says volatility and whose net delta says direction. Observed live on SENSEX: a
+       Long Straddle at a strike 0.8% above the forward, net delta −0.454. That is a bearish
+       position, and a beginner reading the label would have had no way to know.
+
+       So a 'move' or 'range' structure is checked against what it claims to be and rejected with
+       a reason when it does not hold up. Rejecting is right rather than harsh: if the market will
+       not quote the money, there is no neutral trade to be had on that board. */
+    if ((spec.view === 'move' || spec.view === 'range') && ev.greeks && isNum(ev.greeks.delta)) {
+      const cap = isNum(spec.maxNetDelta) ? spec.maxNetDelta : 0.20;
+      if (Math.abs(ev.greeks.delta) > cap) {
+        rejected.push({
+          name: spec.name,
+          reason: `this would have a net delta of ${ev.greeks.delta.toFixed(2)}, which is a directional bet rather than the neutral structure the name implies. The tradeable strikes nearest the money are too far from it — usually a sign the board is thin or the session is closed.`
+        });
+        continue;
+      }
+    }
 
     const sz = size(ev, { capital, lotSize: a.lotSize, riskPct, costConfig: cfg });
     if (!sz.ok) { rejected.push({ name: spec.name, reason: sz.reason }); continue; }

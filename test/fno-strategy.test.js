@@ -197,6 +197,75 @@ test('net Greeks are the signed sum of the legs, and are refused when a leg has 
   assert.ok(/no solvable implied volatility/.test(noVol.greeksNote));
 });
 
+test('maximum loss is exact at the strike, not sampled near it', () => {
+  /* FROM A LIVE BOARD. A SENSEX straddle at 75200 (lot 20) bought for 903.25 points reported a
+     worst case of ₹17,858 when the true figure is the whole ₹18,065 premium — a long straddle
+     loses everything AT the strike, by definition.
+
+     The cause was a uniform payoff grid stepping ~30 points and missing the strike by ~10. An
+     option payoff is piecewise linear with its kinks at the strikes, so its extremes always land
+     ON one; every strike is now an explicit grid point. Small in percentage terms, and in exactly
+     the wrong direction, since maximum loss is the one number that must never flatter. */
+  const legs = [
+    { type: 'CE', strike: 75200, side: 'BUY', ratio: 1, price: 159.65, iv: 0.101 },
+    { type: 'PE', strike: 75200, side: 'BUY', ratio: 1, price: 743.60, iv: 0.101 }
+  ];
+  const ev = ST.evaluate(legs, { forward: 74613, T: 5.9 / 365, r: 0.065, atmIv: 0.101 });
+  close(ev.maxLoss, 903.25, 1e-9, 'the worst case is the full premium, exactly');
+  close(ev.maxLoss * 20, 18065, 1e-6, 'and ₹18,065 on a 20-lot, not ₹17,858');
+  close(ev.maxLossAt, 75200, 1e-9, 'and it occurs at the strike');
+
+  // The same has to hold wherever the strikes fall relative to the grid.
+  for (const K of [24013, 24037.5, 51987, 81111]) {
+    const one = ST.evaluate([{ type: 'CE', strike: K, side: 'BUY', ratio: 1, price: 100, iv: 0.13 }],
+      { forward: K * 0.998, T: 7 / 365, r: 0.065, atmIv: 0.13 });
+    close(one.maxLoss, 100, 1e-9, `a long call at K=${K} can only lose its premium`);
+  }
+});
+
+test('a "straddle" that is really a directional bet is refused, not relabelled', () => {
+  /* FROM THE SAME LIVE BOARD. With the near-the-money strikes quoting too wide to trade, the
+     delta-based picker reached for the nearest tradeable pair and built a Long Straddle 0.8%
+     above the forward with a net delta of −0.454. The name said volatility; the position was
+     bearish. A beginner reading the label had no way to know.
+
+     Structures that claim to be neutral are now checked against their own net delta. */
+  const a = board();
+
+  // Make everything except a band well above the money untradeable, as an after-hours board is.
+  const wide = { ...a, rows: a.rows.map(r => ({
+    ...r,
+    CE: r.CE && { ...r.CE, tradeable: r.strike > a.forward * 1.007 },
+    PE: r.PE && { ...r.PE, tradeable: r.strike > a.forward * 1.007 }
+  })) };
+
+  const p = ST.propose({ analysis: wide, capital: 2000000, view: 'move', costs, vol: { verdict: 'cheap' } });
+  const straddle = p.candidates.find(c => c.name === 'Long Straddle');
+  if (straddle) {
+    assert.ok(Math.abs(straddle.greeks.delta) <= 0.20,
+      `a proposed straddle must be near-neutral, got delta ${straddle.greeks.delta}`);
+  } else {
+    const why = p.rejected.find(r => r.name === 'Long Straddle');
+    assert.ok(why, 'if it was not proposed, the omission is explained');
+    assert.ok(/directional bet rather than the neutral structure/.test(why.reason), why.reason);
+    assert.ok(/net delta of -0\.\d/.test(why.reason), 'and quotes the delta that disqualified it: ' + why.reason);
+  }
+
+  // On a healthy board the straddle is proposed and IS neutral.
+  const good = ST.propose({ analysis: a, capital: 2000000, view: 'move', costs, vol: { verdict: 'cheap' } });
+  const ok = good.candidates.find(c => c.name === 'Long Straddle');
+  assert.ok(ok, 'a normal board still offers one: ' + JSON.stringify(good.rejected));
+  assert.ok(Math.abs(ok.greeks.delta) < 0.20, `and it is neutral, delta ${ok.greeks.delta}`);
+});
+
+test('the neutrality check applies to range structures too, and not to directional ones', () => {
+  const a = board();
+  // A bull call spread is SUPPOSED to be directional and must never be rejected for it.
+  const up = ST.propose({ analysis: a, capital: 2000000, view: 'up', costs, vol: { verdict: 'fair' } });
+  for (const c of up.candidates) assert.ok(c.greeks.delta > 0.05, `${c.name} should carry real bullish delta`);
+  assert.ok(!up.rejected.some(r => /directional bet/.test(r.reason || '')), 'no directional structure is rejected for being directional');
+});
+
 test('a malformed structure is refused', () => {
   assert.equal(ST.evaluate([], ctx).ok, false);
   assert.equal(ST.evaluate(null, ctx).ok, false);
