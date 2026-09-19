@@ -747,9 +747,13 @@ Two things it does that most options tools don't:
 > `/api/fno/costs?price=100&qty=75`. If they match, set `"verified": true` in `fno-costs.json`. STT and
 > exchange charges are set by circular and change; every net P&L figure depends on them.
 
-**→ Full explanation in [`FNO-GUIDE.md`](FNO-GUIDE.md)** — how to use it, why the numbers are what they
-are (the forward from put-call parity, the expiry decision, what the volatility read refuses to say),
-and how it is built.
+**→ Never traded options before? Start with [`FNO-START-HERE.md`](FNO-START-HERE.md)** — what an option
+actually is, the four ways you lose money, how to read the panel, and exactly what to type into your
+broker. Assumes zero knowledge; twenty minutes.
+
+**→ Already know your way around? [`FNO-GUIDE.md`](FNO-GUIDE.md)** — why the numbers are what they are
+(the forward from put-call parity, the expiry decision, what the volatility read refuses to say), how
+it is built, and troubleshooting.
 
 ## Files
 ```
@@ -784,7 +788,8 @@ growth-intelligence-pro/
 │   └── signal.js        ← entry limits, stops, targets, time stop, exit rules
 ├── macro-calendar.json  ← 📅 YOU MAINTAIN THIS — FOMC/CPI/RBI dates (NFP is derived)
 ├── fno-costs.json       ← 📐 YOU MAINTAIN THIS — STT/brokerage/exchange rates (see FNO-GUIDE.md)
-├── FNO-GUIDE.md         ← 📐 how the options engine works, and how to use it
+├── FNO-START-HERE.md    ← 📐 options from zero — read this first if you are new
+├── FNO-GUIDE.md         ← 📐 how the options engine works, and why the numbers are what they are
 ├── config.json          ← your keys + settings
 ├── public/index.html    ← dashboard
 ├── token.json           ← auto: daily login token (private)

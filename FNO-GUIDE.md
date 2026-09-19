@@ -5,6 +5,10 @@ Index options on **NIFTY, BANKNIFTY, SENSEX** (plus FINNIFTY, MIDCPNIFTY, BANKEX
 This guide is in three parts. Read part 1 to use it. Read part 2 when a number surprises you. Read
 part 3 if you are changing the code.
 
+> **New to options?** Read [`FNO-START-HERE.md`](FNO-START-HERE.md) first. It assumes no knowledge at
+> all — what an option is, the four ways you lose money, and exactly what to type into your broker.
+> This guide assumes you already know what a strike and a premium are.
+
 ---
 
 # Part 1 — Using it
